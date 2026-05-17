@@ -5,6 +5,9 @@
   <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
   <title>WiFi 上网认证</title>
   <link rel="stylesheet" href="/static/style.css">
+  <link rel="manifest" href="/static/manifest.json">
+  <link rel="icon" type="image/svg+xml" href="/static/icon.svg">
+  <meta name="theme-color" content="#4f46e5">
 </head>
 <body class="portal">
   <header class="portal-hero">
@@ -120,5 +123,16 @@
   </div>
 
   <script src="/static/portal.js" defer></script>
+  <script>
+    // Register the service worker — gives the portal page near-instant
+    // repaint after first visit + asset cache survives WiFi disconnect.
+    // Failing registration is silent: the page still works as a plain SPA.
+    if ('serviceWorker' in navigator) {
+      window.addEventListener('load', () => {
+        navigator.serviceWorker.register('/sw.js', { scope: '/' })
+          .catch(() => { /* portal works without it */ });
+      });
+    }
+  </script>
 </body>
 </html>

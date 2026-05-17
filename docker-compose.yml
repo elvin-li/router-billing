@@ -1,0 +1,25 @@
+# One-shot dev environment. Not for production (use the .ipk on OpenWrt).
+#
+#   docker compose up --build       # build + start with dry-firewall
+#   docker compose exec rb sh       # poke around
+#   curl localhost:8080/portal      # try the captive portal
+#
+# State persists in the named `state` volume; remove it to wipe.
+
+services:
+  rb:
+    build: .
+    container_name: router-billing
+    ports:
+      - "8080:8080"
+    volumes:
+      - state:/var/lib/router-billing
+      - ./config.example.yaml:/etc/router-billing/config.yaml:ro
+    environment:
+      TZ: "Asia/Shanghai"
+    # nftables would need NET_ADMIN; for the dev image we just run dry.
+    command: ["-config", "/etc/router-billing/config.yaml", "--dry-firewall"]
+    restart: unless-stopped
+
+volumes:
+  state:

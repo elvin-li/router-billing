@@ -1,5 +1,47 @@
 # Changelog
 
+## v0.10.1 — 可测性、Release 自动化、PWA、Docker
+
+### 可测性
+- **`firewall.API` 接口**：把 `*firewall.Manager` 的消费面抽成接口（Add/Remove/Sync/EnsureSet/List/Counters）
+  - `service.MACService` 现在依赖接口而不是具体类型 → 测试可注入 fake
+  - 也为未来 iptables 后端铺路
+- **service 包测试**（新 8 个）：grant/extend/delete/revoke/replace/resync/expire-due 覆盖；
+  fakeFW 记录 Add/Remove/Sync 调用，断言 DB 与防火墙状态一致
+- **scheduler 包测试**（新 4 个）：抽 `Expirer` 接口；测试初始 tick、ctx-cancel、
+  错误下不卡死循环、interval≤0 默认 1 小时
+
+### 发布自动化
+- **`.github/workflows/release.yml`**：tag `vX.Y[.Z]` push → 自动 `make arm64 + pack + ipk`
+  → 解析 CHANGELOG.md 对应版本的小节作为 release 说明 → 上传 artifacts
+- **`LICENSE`**：MIT
+- **README badges**：CI status / latest release / Go version / platform / license
+
+### 容器化（仅开发用，生产仍是 ipk）
+- **`Dockerfile`**：multi-stage（golang:1.22-alpine → alpine:3.20 + nftables）
+  非 root 运行；非真实防火墙场景配 `--dry-firewall`
+- **`docker-compose.yml`**：一行 `docker compose up` 起本地预览
+
+### Server 强化
+- **`/api/pay/create` 限流**：20 次/分钟（按 IP），防止支付意图洪水攻击
+  浪费 sqlite 写入 + 上游 HTTPS 往返；超限返 429
+- **PWA 化**：
+  - `/static/manifest.json` + 192×192 渐变 SVG icon
+  - `/sw.js`（root-scope）service worker：cache-first 静态资源；其他网络优先
+  - portal.html 注册 SW + 声明 manifest → "添加到主屏幕" 体验
+
+### 测试
+- 4 个新集成测试：pay-create rate-limit 429、`/sw.js` 端点、`/static/manifest.json` 端点、portal.html 包含 PWA 声明
+
+### 数字
+| | 之前 | 现在 |
+|---|---|---|
+| 测试包 | 13 / 15 | 15 / 15 ✓ |
+| 测试函数 | 84 | 100 |
+| Go LoC | 9882 | 10800+ |
+
+---
+
 ## v0.10 — 安全、运维、测试三连击
 
 围绕「上线后能用一年不出事」做的一轮。无新业务功能；全部是兜底/可观测/可恢复。

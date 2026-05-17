@@ -1,0 +1,81 @@
+name: release
+
+# Runs whenever a tag matching v*.*.* is pushed.
+#   git tag -a v0.11 -m 'short tag note'
+#   git push origin v0.11
+#
+# Builds the aarch64 binary + tar.gz + ipk, then creates a GitHub Release
+# with the matching section from CHANGELOG.md as the release body.
+
+on:
+  push:
+    tags:
+      - 'v*.*'      # v0.10, v1.0, etc.
+      - 'v*.*.*'    # v0.10.1 patch releases
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    name: build + publish
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0   # so the workflow can see git history for ldflags
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.22'
+          cache: true
+
+      - name: cross-compile aarch64
+        run: make arm64
+
+      - name: pack tar.gz + ipk
+        run: |
+          make pack-arm64
+          make ipk
+
+      - name: list artifacts
+        run: ls -lh build/router-billing-arm64* build/router-billing*.ipk
+
+      - name: extract release notes from CHANGELOG.md
+        id: notes
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          # Strip leading 'v' so v0.10 → 0.10 → match `## v0.10` block.
+          VER="${TAG#v}"
+          if [ ! -f CHANGELOG.md ]; then
+            echo "no CHANGELOG.md" > release-notes.md
+          else
+            # Awk: print the block between '## v<VER>' and the next '## '.
+            awk -v ver="$VER" '
+              BEGIN { p=0 }
+              /^## v/ {
+                if (p) exit
+                if ($0 ~ "^## v"ver"( |$)") { p=1; next }
+              }
+              p { print }
+            ' CHANGELOG.md > release-notes.md
+            if [ ! -s release-notes.md ]; then
+              echo "_(no CHANGELOG entry for $TAG — see git log)_" > release-notes.md
+            fi
+          fi
+          echo "--- release-notes.md ---"
+          cat release-notes.md
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.ref_name }}
+          name: ${{ github.ref_name }}
+          body_path: release-notes.md
+          files: |
+            build/router-billing-arm64
+            build/router-billing-arm64.tar.gz
+            build/router-billing_*_aarch64_generic.ipk
+          fail_on_unmatched_files: true
+          prerelease: false
+          draft: false

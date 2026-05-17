@@ -39,6 +39,16 @@ func (a *App) handlePayCreate(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "method", http.StatusMethodNotAllowed)
 		return
 	}
+	// Cheap defence against payment-intent flood from a single source — both
+	// WeChat and Alipay rate-limit downstream, but every flood-create costs
+	// us a sqlite write + outbound HTTPS roundtrip. 20/min/IP is generous
+	// for the worst legitimate user (fat-finger reload spam).
+	if a.payCreateLimiter != nil && !a.payCreateLimiter.allow(clientIP(r)) {
+		writeJSON(w, http.StatusTooManyRequests, map[string]string{
+			"error": "请求过于频繁，请稍候再试",
+		})
+		return
+	}
 	var req payCreateReq
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		http.Error(w, "bad json", http.StatusBadRequest)

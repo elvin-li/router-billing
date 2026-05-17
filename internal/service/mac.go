@@ -12,12 +12,16 @@ import (
 )
 
 // MACService is the only place that mutates both DB and firewall together.
+//
+// FW is the firewall.API interface (not *firewall.Manager) so tests can
+// substitute a fake and so a future iptables backend slots in without
+// touching this file.
 type MACService struct {
 	DB *db.DB
-	FW *firewall.Manager
+	FW firewall.API
 }
 
-func New(d *db.DB, fw *firewall.Manager) *MACService {
+func New(d *db.DB, fw firewall.API) *MACService {
 	return &MACService{DB: d, FW: fw}
 }
 

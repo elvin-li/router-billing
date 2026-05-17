@@ -389,6 +389,74 @@ func multipartBackup(t *testing.T, filename string, data []byte) (io.Reader, str
 	return &buf, w.FormDataContentType()
 }
 
+func TestPayCreateRateLimit(t *testing.T) {
+	app := setupTestApp(t)
+	app.payCreateLimiter = newRateLimiter(2, time.Hour)
+	h := app.Routes()
+
+	// Two POSTs go through. Body schema fails downstream (no provider) but
+	// the limiter counts them first.
+	for i := 0; i < 2; i++ {
+		req := httptest.NewRequest("POST", "/api/pay/create", strings.NewReader(`{"mac":"aa:bb:cc:dd:ee:ff","plan":"month","provider":"wechat"}`))
+		req.Header.Set("Content-Type", "application/json")
+		rr := httptest.NewRecorder()
+		h.ServeHTTP(rr, req)
+		if rr.Code == 429 {
+			t.Errorf("attempt %d wrongly rate-limited", i)
+		}
+	}
+	// 3rd hit gets 429.
+	req := httptest.NewRequest("POST", "/api/pay/create", strings.NewReader(`{"mac":"aa:bb:cc:dd:ee:ff","plan":"month","provider":"wechat"}`))
+	req.Header.Set("Content-Type", "application/json")
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, req)
+	if rr.Code != 429 {
+		t.Errorf("3rd attempt should be 429, got %d", rr.Code)
+	}
+}
+
+func TestServiceWorkerServed(t *testing.T) {
+	app := setupTestApp(t)
+	h := app.Routes()
+	res, body := do(t, h, "GET", "/sw.js", nil, nil)
+	if res.StatusCode != 200 {
+		t.Fatalf("/sw.js status=%d", res.StatusCode)
+	}
+	if ct := res.Header.Get("Content-Type"); !strings.HasPrefix(ct, "application/javascript") {
+		t.Errorf("content-type = %q; want application/javascript*", ct)
+	}
+	if !strings.Contains(body, "self.addEventListener('fetch'") {
+		t.Error("body doesn't look like our SW")
+	}
+}
+
+func TestManifestServed(t *testing.T) {
+	app := setupTestApp(t)
+	h := app.Routes()
+	res, body := do(t, h, "GET", "/static/manifest.json", nil, nil)
+	if res.StatusCode != 200 {
+		t.Fatalf("status=%d", res.StatusCode)
+	}
+	if !strings.Contains(body, `"start_url"`) || !strings.Contains(body, "WiFi 上网认证") {
+		t.Errorf("manifest body unexpected: %s", body)
+	}
+}
+
+func TestPortalAnnouncesPWAAssets(t *testing.T) {
+	app := setupTestApp(t)
+	h := app.Routes()
+	_, body := do(t, h, "GET", "/portal", nil, nil)
+	for _, want := range []string{
+		`rel="manifest"`,
+		`/static/manifest.json`,
+		`navigator.serviceWorker.register('/sw.js'`,
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("portal missing %q", want)
+		}
+	}
+}
+
 func TestRedeemRateLimit(t *testing.T) {
 	app := setupTestApp(t)
 	// Shrink the window so the test runs fast.

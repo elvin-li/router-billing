@@ -4,17 +4,25 @@ import (
 	"context"
 	"log"
 	"time"
-
-	"router-billing/internal/service"
 )
 
-// Run blocks until ctx is canceled. It periodically expires MACs.
-func Run(ctx context.Context, svc *service.MACService, interval time.Duration) {
+// Expirer is the single-method interface Run needs from MACService.
+// Defining it here (rather than importing *service.MACService) lets tests
+// pass a closure or fake without dragging in the whole service+db+firewall
+// graph just to exercise the scheduler tick.
+type Expirer interface {
+	ExpireDue(ctx context.Context) (int, error)
+}
+
+// Run blocks until ctx is canceled. Calls e.ExpireDue() once immediately
+// (so a freshly-restarted server processes any backlog) and then on each
+// tick of `interval`. Errors are logged and the loop continues — a transient
+// DB hiccup shouldn't stop the cron forever.
+func Run(ctx context.Context, e Expirer, interval time.Duration) {
 	if interval <= 0 {
 		interval = time.Hour
 	}
-	// Run once immediately so startup catches any backlog.
-	if _, err := svc.ExpireDue(ctx); err != nil {
+	if _, err := e.ExpireDue(ctx); err != nil {
 		log.Printf("scheduler: initial expire: %v", err)
 	}
 	t := time.NewTicker(interval)
@@ -24,7 +32,7 @@ func Run(ctx context.Context, svc *service.MACService, interval time.Duration) {
 		case <-ctx.Done():
 			return
 		case <-t.C:
-			if _, err := svc.ExpireDue(ctx); err != nil {
+			if _, err := e.ExpireDue(ctx); err != nil {
 				log.Printf("scheduler: expire: %v", err)
 			}
 		}

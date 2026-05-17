@@ -1,5 +1,11 @@
 # 路由器计费系统（router-billing）
 
+[![CI](https://github.com/elvin-li/router-billing/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/elvin-li/router-billing/actions/workflows/ci.yml)
+[![Release](https://img.shields.io/github/v/release/elvin-li/router-billing?include_prereleases&sort=semver)](https://github.com/elvin-li/router-billing/releases)
+[![Go](https://img.shields.io/badge/go-1.22-00ADD8?logo=go)](go.mod)
+[![Platform](https://img.shields.io/badge/platform-OpenWrt%20aarch64-1e293b)](deploy/openwrt)
+[![License](https://img.shields.io/badge/license-MIT-green)](LICENSE)
+
 OpenWrt（aarch64）上运行的 MAC 地址计费认证系统。**只对收费 SSID 上的客户端执行 MAC 白名单准入**；熟人/管理 SSID（Free_WiFi · WPA2 加密）完全不受计费逻辑影响。
 
 ## 三套 SSID

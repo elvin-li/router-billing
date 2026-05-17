@@ -35,6 +35,7 @@ type App struct {
 	registerLimiter   *rateLimiter
 	adminLoginLimiter *rateLimiter
 	redeemLimiter     *rateLimiter // voucher redemption, keyed by IP
+	payCreateLimiter  *rateLimiter // payment intent creation, keyed by IP
 
 	waitMu  sync.Mutex
 	waiters map[string][]chan struct{} // order_no → pending wait channels
@@ -52,6 +53,7 @@ func NewApp(cfg *config.Config, dbx *db.DB, svc *service.MACService) (*App, erro
 		registerLimiter:   newRateLimiter(4, 1*time.Hour),
 		adminLoginLimiter: newRateLimiter(8, 5*time.Minute),
 		redeemLimiter:     newRateLimiter(10, 10*time.Minute),
+		payCreateLimiter:  newRateLimiter(20, time.Minute),
 		waiters:           map[string][]chan struct{}{},
 	}
 
@@ -193,6 +195,13 @@ func (a *App) Routes() http.Handler {
 	// Static
 	staticDir := filepath.Join(a.Cfg.WebRoot, "static")
 	mux.Handle("/static/", http.StripPrefix("/static/", http.FileServer(http.Dir(staticDir))))
+
+	// Service worker needs to be served from the root for scope '/'.
+	mux.HandleFunc("/sw.js", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/javascript")
+		w.Header().Set("Cache-Control", "no-cache") // never stale
+		http.ServeFile(w, r, filepath.Join(staticDir, "sw.js"))
+	})
 
 	return securityHeaders(csrfMiddleware(logMiddleware(mux)))
 }
