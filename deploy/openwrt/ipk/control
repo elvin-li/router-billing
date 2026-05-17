@@ -1,0 +1,11 @@
+Package: router-billing
+Version: 0.6
+Architecture: aarch64_generic
+Maintainer: router-billing
+Section: net
+Priority: optional
+Description: WiFi captive portal billing system. Free SSID + paid SSIDs with per-MAC billing.
+ Supports WeChat Pay / Alipay (Native + outbound polling), redemption vouchers,
+ user accounts, real-time admin device list, automatic backups.
+Depends: nftables, iproute2, kmod-nft-nat
+Source: https://localhost

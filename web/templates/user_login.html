@@ -1,0 +1,43 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+  <title>登录 · router-billing</title>
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body class="portal">
+  <div class="login-shell" style="background: var(--bg-tinted); min-height: auto; padding: 32px 16px 60px;">
+    <div class="login-card">
+      <div class="logo">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/>
+          <circle cx="9" cy="7" r="4"/>
+          <path d="M22 11h-6"/><path d="M19 8v6"/>
+        </svg>
+      </div>
+      <h1>登录</h1>
+      <p class="sub">用手机号登录，管理你的 MAC</p>
+
+      {{if .Err}}<div class="flash err">{{.Err}}</div>{{end}}
+
+      <form method="post" action="/user/login">
+        <input type="hidden" name="next" value="{{.Next}}">
+        <div class="field">
+          <label>手机号</label>
+          <input name="phone" type="tel" inputmode="numeric" maxlength="11" autocomplete="username" autofocus required>
+        </div>
+        <div class="field">
+          <label>密码</label>
+          <input name="password" type="password" autocomplete="current-password" required>
+        </div>
+        <button class="btn primary" type="submit" style="margin-top:8px;">登录</button>
+      </form>
+      <p class="hint" style="margin-top:16px; text-align:center;">
+        没有账号？<a href="/user/register">免费注册</a><br>
+        <a href="/portal" style="color: var(--text-soft);">← 返回付费页</a>
+      </p>
+    </div>
+  </div>
+</body>
+</html>

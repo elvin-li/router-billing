@@ -1,0 +1,26 @@
+# Build outputs
+build/
+*.tar.gz
+*.ipk
+
+# Local data
+*.db
+*.db-shm
+*.db-wal
+*.db-journal
+*.bak
+
+# Secrets
+*.pem
+config.yaml
+.env*
+
+# IDE / OS / tooling
+.idea/
+.vscode/
+.claude/
+.DS_Store
+*.swp
+
+# Go
+vendor/

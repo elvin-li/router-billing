@@ -1,0 +1,108 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>充值码 · router-billing</title>
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body class="admin">
+<div class="admin-shell">
+  {{template "admin-sidebar" .}}
+  <main class="admin-main">
+    <div class="admin-header">
+      <div>
+        <h1>充值码</h1>
+        <div class="crumbs">线下卖卡，用户扫码或输入码激活上网时长</div>
+      </div>
+      {{if .Batch}}
+        <a href="/admin/vouchers/print?batch={{.Batch}}" target="_blank" class="btn primary small" style="width:auto;">打印本批</a>
+        <a href="/admin/vouchers/export.csv?batch={{.Batch}}" class="btn outline small" style="width:auto;">导出 CSV</a>
+        <a href="/admin/vouchers" class="btn ghost small" style="width:auto;">显示全部</a>
+      {{end}}
+    </div>
+
+    {{template "flash" .}}
+
+    <div class="stats-row" style="grid-template-columns: repeat(auto-fit,minmax(140px,1fr));">
+      <div class="stat"><div class="stat-icon brand"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="2" y="6" width="20" height="12" rx="2"/></svg></div><div class="stat-text"><span class="stat-label">本视图总数</span><span class="stat-value">{{.Counts.total}}</span></div></div>
+      <div class="stat"><div class="stat-icon brand"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M9 12l2 2 4-4"/><rect x="2" y="3" width="20" height="18" rx="2"/></svg></div><div class="stat-text"><span class="stat-label">未使用</span><span class="stat-value">{{.Counts.unused}}</span></div></div>
+      <div class="stat"><div class="stat-icon success"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="20 6 9 17 4 12"/></svg></div><div class="stat-text"><span class="stat-label">已兑换</span><span class="stat-value">{{.Counts.redeemed}}</span></div></div>
+      <div class="stat"><div class="stat-icon warning"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg></div><div class="stat-text"><span class="stat-label">已过期</span><span class="stat-value">{{.Counts.expired}}</span></div></div>
+      <div class="stat"><div class="stat-icon danger"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><line x1="4.93" y1="4.93" x2="19.07" y2="19.07"/></svg></div><div class="stat-text"><span class="stat-label">已作废</span><span class="stat-value">{{.Counts.revoked}}</span></div></div>
+    </div>
+
+    <section class="admin-card">
+      <h2>批量生成</h2>
+      <p class="desc">一次生成 N 张同规格的卡，自动归到同一个 batch；线下印刷后用 CSV 导出对账。</p>
+      <form method="post" action="/admin/vouchers/generate" class="form-grid">
+        {{template "csrf" .}}
+        <div class="field">
+          <label>张数</label>
+          <input name="count" type="number" min="1" max="1000" required value="50">
+        </div>
+        <div class="field">
+          <label>每张可上网天数</label>
+          <input name="days" type="number" min="1" max="3650" required value="30">
+        </div>
+        <div class="field">
+          <label>本批名称（可选）</label>
+          <input name="batch" placeholder="如 2024Q1-shop1">
+        </div>
+        <div class="field">
+          <label>充值码自身的过期（天，0=永不）</label>
+          <input name="expires_days" type="number" min="0" value="0">
+        </div>
+        <div class="field">
+          <label>备注（可选）</label>
+          <input name="label" placeholder="如 月卡">
+        </div>
+        <div class="field-actions">
+          <button class="btn primary" type="submit">生成</button>
+        </div>
+      </form>
+    </section>
+
+    <section class="admin-card">
+      <h2>{{if .Batch}}batch = <code>{{.Batch}}</code>{{else}}最近 500 张{{end}}</h2>
+      <p class="desc">充值码以 4-4-4 分组显示，用户输入时空格、横线、大小写都自动忽略。</p>
+      <div class="table-wrap">
+        <table class="data">
+          <thead><tr>
+            <th>充值码</th><th>天数</th><th>批次</th><th>状态</th><th>兑换 MAC</th><th>过期</th><th>操作</th>
+          </tr></thead>
+          <tbody>
+            {{range .Vouchers}}
+            <tr>
+              <td class="mono">{{prettyCode .Code}}</td>
+              <td>{{.Days}}</td>
+              <td><a href="/admin/vouchers?batch={{.Batch}}">{{.Batch}}</a></td>
+              <td>
+                {{if .Revoked}}<span class="pill blocked">已作废</span>
+                {{else if .RedeemedAt}}<span class="pill paid">已兑换</span>
+                {{else if .ExpiresAt}}{{if isPast .ExpiresAt}}<span class="pill expired">已过期</span>{{else}}<span class="pill active">可用</span>{{end}}
+                {{else}}<span class="pill active">可用</span>{{end}}
+              </td>
+              <td class="mono">{{.RedeemedByMac}}</td>
+              <td style="color:var(--text-soft);">{{if .ExpiresAt}}{{formatTime (deref .ExpiresAt)}}{{else}}永不{{end}}</td>
+              <td class="row-actions">
+                {{if and (not .Revoked) (not .RedeemedAt)}}
+                <form method="post" action="/admin/vouchers/revoke" onsubmit="return confirm('作废 {{prettyCode .Code}}?')">
+                  {{template "csrf" $}}
+                  <input type="hidden" name="code" value="{{.Code}}">
+                  <button class="btn danger tiny" type="submit">作废</button>
+                </form>
+                {{end}}
+              </td>
+            </tr>
+            {{else}}
+            <tr><td colspan="7" class="empty-state">还没有充值码，上面表单生成一批吧</td></tr>
+            {{end}}
+          </tbody>
+        </table>
+      </div>
+    </section>
+  </main>
+</div>
+</body>
+</html>

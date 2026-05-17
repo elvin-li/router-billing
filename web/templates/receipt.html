@@ -1,0 +1,91 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>电子收据 {{.Order.OrderNo}}</title>
+  <link rel="stylesheet" href="/static/style.css">
+  <style>
+    .receipt-page {
+      max-width: 540px;
+      margin: 24px auto;
+      background: #fff;
+      padding: 36px 40px;
+      border-radius: 12px;
+      box-shadow: 0 6px 24px rgba(15,23,42,0.08);
+      color: #0f172a;
+    }
+    .r-toolbar { max-width: 540px; margin: 14px auto; text-align: right; }
+    .r-head { text-align: center; padding-bottom: 18px; border-bottom: 2px solid #0f172a; }
+    .r-head h1 { margin: 0 0 4px; font-size: 22px; letter-spacing: 0.04em; }
+    .r-head .sub { font-size: 13px; color: #64748b; }
+    .r-table { width: 100%; margin: 22px 0; border-collapse: collapse; font-size: 14px; }
+    .r-table td { padding: 8px 0; border-bottom: 1px dashed #cbd5e1; }
+    .r-table td.k { color: #64748b; width: 110px; }
+    .r-table td.v { font-family: ui-monospace, Menlo, monospace; }
+    .r-total {
+      margin-top: 18px;
+      padding: 14px 18px;
+      background: #f1f5f9;
+      border-radius: 8px;
+      display: flex; justify-content: space-between; align-items: baseline;
+    }
+    .r-total .lbl { color: #475569; font-size: 14px; }
+    .r-total .val { font-size: 28px; font-weight: 700; color: #4f46e5; }
+    .r-foot { margin-top: 24px; font-size: 11px; color: #94a3b8; text-align: center; line-height: 1.7; }
+    .r-stamp {
+      margin: 28px auto 0;
+      width: 90px; height: 90px;
+      border: 3px solid #dc2626;
+      border-radius: 50%;
+      display: flex; align-items: center; justify-content: center;
+      transform: rotate(-12deg);
+      color: #dc2626;
+      font-weight: 700;
+      font-size: 13px;
+      letter-spacing: 0.1em;
+    }
+    @media print {
+      body, body.admin { background: #fff !important; }
+      .r-toolbar { display: none; }
+      .receipt-page { box-shadow: none; border: 1px solid #cbd5e1; margin: 0; }
+    }
+    @page { size: A5; margin: 12mm; }
+  </style>
+</head>
+<body class="admin">
+  <div class="r-toolbar">
+    <button onclick="window.print()" class="btn primary small" style="width:auto;">打印 / 保存为 PDF</button>
+    <a href="javascript:history.back()" class="btn ghost small" style="width:auto;">返回</a>
+  </div>
+
+  <div class="receipt-page">
+    <div class="r-head">
+      <h1>电子收据</h1>
+      <div class="sub">{{.Merchant}}</div>
+    </div>
+
+    <table class="r-table">
+      <tr><td class="k">订单号</td><td class="v">{{.Order.OrderNo}}</td></tr>
+      <tr><td class="k">套餐</td><td>{{.PlanLabel}}（{{.Order.Days}} 天）</td></tr>
+      <tr><td class="k">设备 MAC</td><td class="v">{{.Order.Mac}}</td></tr>
+      <tr><td class="k">支付方式</td><td>{{.Order.PaymentMethod}}</td></tr>
+      {{if .Order.TradeNo}}<tr><td class="k">流水号</td><td class="v" style="font-size:12px;">{{.Order.TradeNo}}</td></tr>{{end}}
+      <tr><td class="k">下单时间</td><td>{{formatTime .Order.CreatedAt}}</td></tr>
+      <tr><td class="k">支付时间</td><td>{{formatTimePtr .Order.PaidAt}}</td></tr>
+    </table>
+
+    <div class="r-total">
+      <span class="lbl">合计金额</span>
+      <span class="val">¥{{.AmtYuan}}</span>
+    </div>
+
+    <div class="r-stamp">已支付</div>
+
+    <div class="r-foot">
+      本收据为系统自动生成，无需签字盖章<br>
+      如需正式发票请联系商家
+    </div>
+  </div>
+</body>
+</html>

@@ -1,0 +1,121 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>在线设备 · router-billing</title>
+  <link rel="stylesheet" href="/static/style.css">
+  <!-- Live updates via SSE (devices-stream.js). Meta-refresh is a fallback for browsers without EventSource. -->
+  <noscript><meta http-equiv="refresh" content="{{.AutoRefresh}}"></noscript>
+</head>
+<body class="admin">
+<div class="admin-shell">
+  {{template "admin-sidebar" .}}
+  <main class="admin-main">
+    <div class="admin-header">
+      <div>
+        <h1>在线设备</h1>
+        <div class="crumbs">实时 ARP + 最近 10 分钟历史 · 一键授权充电桩/IoT</div>
+      </div>
+      <div style="display:flex; gap:10px; align-items:center;">
+        <span class="auto-refresh" id="live-badge"><span class="dot"></span>实时（SSE）</span>
+        <a href="/admin/ssid-cards" class="btn outline small" style="width:auto;">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="width:14px;height:14px;"><rect x="3" y="3" width="7" height="7"/><rect x="14" y="3" width="7" height="7"/><rect x="3" y="14" width="7" height="7"/><rect x="14" y="14" width="7" height="7"/></svg>
+          SSID 海报
+        </a>
+      </div>
+    </div>
+
+    {{template "flash" .}}
+
+    <section class="admin-card">
+      <h2>{{.Iface}} 上的设备</h2>
+      <p class="desc">绿色边框 = 未授权的在线设备（适合一键加入白名单）。蓝色 pill = 已授权。</p>
+      <div class="table-wrap">
+        <table class="data">
+          <thead><tr>
+            <th>设备</th><th>IP</th><th>状态</th><th>最近活动</th><th>已转发</th><th>到期</th><th>操作</th>
+          </tr></thead>
+          <tbody>
+            {{range .Devices}}
+            <tr class="{{if and (not .Active) .Online}}highlight{{end}}">
+              <td>
+                <div class="mono">{{.MAC}}</div>
+                {{if .Hostname}}<div style="font-size:12px; color:var(--text-soft);">{{.Hostname}}</div>{{end}}
+              </td>
+              <td class="mono">{{.IP}}</td>
+              <td>
+                {{if .Online}}<span class="pill active">在线</span>{{else}}<span class="pill expired">离线</span>{{end}}
+                {{if .Active}}<span class="pill active">已授权</span>
+                {{else if .Known}}<span class="pill expired">已过期</span>
+                {{else}}<span class="pill pending">未授权</span>{{end}}
+              </td>
+              <td style="color:var(--text-soft);">{{ago .LastSeen}}</td>
+              <td class="mono" style="color:var(--text-soft);">{{humanBytes .Bytes}}</td>
+              <td>
+                {{if .Known}}{{formatTime .ExpiresAt}}{{else}}<span style="color:var(--text-muted);">—</span>{{end}}
+              </td>
+              <td class="row-actions">
+                <form method="post" action="/admin/macs/extend">
+                  {{template "csrf" $}}
+                  <input type="hidden" name="mac" value="{{.MAC}}">
+                  <select name="days" title="授权时长">
+                    <option value="30">30 天</option>
+                    <option value="365" selected>1 年</option>
+                    <option value="1825">5 年</option>
+                    <option value="3650">10 年</option>
+                  </select>
+                  <button class="btn primary tiny" type="submit">{{if .Active}}续期{{else}}授权{{end}}</button>
+                </form>
+                {{if .Known}}
+                <form method="post" action="/admin/macs/delete" onsubmit="return confirm('收回 {{.MAC}} 的授权?')">
+                  {{template "csrf" $}}
+                  <input type="hidden" name="mac" value="{{.MAC}}">
+                  <button class="btn danger tiny" type="submit">收回</button>
+                </form>
+                {{end}}
+              </td>
+            </tr>
+            {{else}}
+            <tr><td colspan="7" class="empty-state">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><circle cx="12" cy="12" r="9"/><path d="M3 12h18"/><path d="M12 3a14.5 14.5 0 0 1 0 18 14.5 14.5 0 0 1 0-18z"/></svg>
+              {{.Iface}} 上没有发现设备。让设备连接收费 SSID 后页面会自动刷新。
+            </td></tr>
+            {{end}}
+          </tbody>
+        </table>
+      </div>
+    </section>
+
+    <section class="admin-card">
+      <h2>添加未在线的 MAC</h2>
+      <p class="desc">设备暂未上电？从机身贴纸上抄到 MAC 直接录入，上电后自动联网。</p>
+      <form method="post" action="/admin/macs/add" class="form-grid">
+        {{template "csrf" .}}
+        <div class="field">
+          <label>MAC 地址</label>
+          <input class="mono" name="mac" placeholder="AA:BB:CC:DD:EE:FF" maxlength="17" required>
+        </div>
+        <div class="field">
+          <label>授权时长</label>
+          <select name="days">
+            <option value="30">30 天</option>
+            <option value="365" selected>1 年</option>
+            <option value="1825">5 年</option>
+            <option value="3650">10 年</option>
+          </select>
+        </div>
+        <div class="field">
+          <label>备注</label>
+          <input name="label" placeholder="如：充电桩 #1">
+        </div>
+        <div class="field-actions">
+          <button class="btn primary" type="submit">添加</button>
+        </div>
+      </form>
+    </section>
+  </main>
+</div>
+<script src="/static/devices-stream.js" defer></script>
+</body>
+</html>

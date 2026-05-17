@@ -1,0 +1,85 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+  <title>充值码激活</title>
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body class="portal">
+  <header class="portal-hero">
+    <div class="logo">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+        <rect x="2" y="6" width="20" height="12" rx="2"/>
+        <path d="M2 10h20"/><path d="M7 14h.01"/><path d="M11 14h.01"/>
+      </svg>
+    </div>
+    <div style="flex:1;">
+      <h1>充值码激活</h1>
+      <p class="sub">输入印在卡片上的 12 位码即可上网</p>
+    </div>
+  </header>
+
+  <main class="card">
+    {{if .OK}}
+      <div class="success-screen" style="padding:18px 0;">
+        <div class="success-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg></div>
+        <h1>激活成功</h1>
+        <p class="desc">已添加 <strong>{{.Days}} 天</strong>，到期：{{.ExpiresAt}}</p>
+        <p class="hint" style="margin-top:14px;">现在可以直接上网了。<br><a href="/portal">← 返回付费页</a></p>
+      </div>
+    {{else}}
+      {{if .Err}}<div class="flash err" style="margin-bottom:16px;">{{.Err}}</div>{{end}}
+
+      <div class="section">
+        <span class="section-label">充值码（12 位）</span>
+        <input type="text" id="code-input" name="code" form="redeem-form"
+               placeholder="XXXX-XXXX-XXXX" maxlength="14"
+               value="{{.Code}}" autocomplete="off"
+               style="width:100%; padding:14px; font-family:ui-monospace,monospace; font-size:22px; text-align:center; letter-spacing:0.15em; border:2px solid var(--border); border-radius:12px; text-transform:uppercase;">
+      </div>
+
+      <div class="section">
+        <span class="section-label">本设备 MAC</span>
+        {{if .MAC}}
+          <div class="mac-chip">
+            <div class="badge"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="2" y="3" width="20" height="14" rx="2"/><line x1="8" y1="21" x2="16" y2="21"/><line x1="12" y1="17" x2="12" y2="21"/></svg></div>
+            <div class="text"><span class="lbl">已识别</span><span class="val">{{.MAC}}</span></div>
+            <input type="hidden" form="redeem-form" name="mac" value="{{.MAC}}">
+          </div>
+        {{else}}
+          <div class="mac-manual">
+            <p>未能识别 MAC，请手动填入：</p>
+            <input type="text" form="redeem-form" name="mac" placeholder="AA:BB:CC:DD:EE:FF" maxlength="17">
+          </div>
+        {{end}}
+      </div>
+
+      <form id="redeem-form" method="post" action="/redeem">
+        <button class="btn primary" type="submit">激活</button>
+      </form>
+    {{end}}
+
+    <p class="hint" style="margin-top:18px;">
+      已有账号？<a href="/user/login">登录</a>后激活会自动归入账号<br>
+      <a href="/portal">← 返回付费页</a>
+    </p>
+  </main>
+
+  <script>
+    // Auto-format the code input as 4-4-4 grouped, uppercase, alphabet-only.
+    const inp = document.getElementById('code-input');
+    if (inp) {
+      const alphabet = /[23456789ABCDEFGHJKMNPQRSTUVWXYZ]/g;
+      inp.addEventListener('input', () => {
+        let v = inp.value.toUpperCase().replace(/[^A-Z2-9]/g, '');
+        v = v.replace(/[01OIL]/g, '');
+        if (v.length > 12) v = v.slice(0, 12);
+        const parts = [];
+        for (let i = 0; i < v.length; i += 4) parts.push(v.slice(i, i + 4));
+        inp.value = parts.join('-');
+      });
+    }
+  </script>
+</body>
+</html>

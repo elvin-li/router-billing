@@ -1,0 +1,1073 @@
+package db
+
+import (
+	"context"
+	"database/sql"
+	_ "embed"
+	"errors"
+	"fmt"
+	"os"
+	"path/filepath"
+	"strings"
+	"time"
+
+	"router-billing/internal/models"
+
+	_ "modernc.org/sqlite"
+)
+
+//go:embed schema.sql
+var schemaSQL string
+
+type DB struct {
+	conn *sql.DB
+}
+
+func Open(path string) (*DB, error) {
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return nil, fmt.Errorf("mkdir db dir: %w", err)
+	}
+	dsn := fmt.Sprintf("file:%s?_pragma=journal_mode(WAL)&_pragma=busy_timeout(5000)&_pragma=foreign_keys(on)", path)
+	conn, err := sql.Open("sqlite", dsn)
+	if err != nil {
+		return nil, fmt.Errorf("open sqlite: %w", err)
+	}
+	conn.SetMaxOpenConns(1) // SQLite serializes writes; WAL gives us cheap reads
+	if err := conn.Ping(); err != nil {
+		return nil, fmt.Errorf("ping sqlite: %w", err)
+	}
+	if err := runMigrations(conn); err != nil {
+		return nil, fmt.Errorf("migrate: %w", err)
+	}
+	return &DB{conn: conn}, nil
+}
+
+func (d *DB) Close() error { return d.conn.Close() }
+
+// Exec is a low-level escape hatch for one-off DDL/PRAGMA work (e.g. backup
+// checkpoint). Prefer the typed methods elsewhere in this package.
+func (d *DB) Exec(ctx context.Context, query string, args ...any) (sql.Result, error) {
+	return d.conn.ExecContext(ctx, query, args...)
+}
+
+// ---------- MAC ----------
+
+const macCols = `id, mac, label, status, expires_at, user_id, schedule_json, created_at, updated_at`
+
+func scanMAC(row interface{ Scan(...any) error }) (*models.MAC, error) {
+	var m models.MAC
+	var userID sql.NullInt64
+	if err := row.Scan(&m.ID, &m.Mac, &m.Label, &m.Status, &m.ExpiresAt, &userID, &m.ScheduleJSON, &m.CreatedAt, &m.UpdatedAt); err != nil {
+		return nil, err
+	}
+	if userID.Valid {
+		v := userID.Int64
+		m.UserID = &v
+	}
+	return &m, nil
+}
+
+// SetMACSchedule writes the schedule JSON onto the MAC row. Pass "" to clear.
+func (d *DB) SetMACSchedule(ctx context.Context, mac, scheduleJSON string) error {
+	_, err := d.conn.ExecContext(ctx,
+		`UPDATE macs SET schedule_json = ?, updated_at = CURRENT_TIMESTAMP WHERE mac = ?`,
+		scheduleJSON, mac)
+	return err
+}
+
+func (d *DB) ListMACs(ctx context.Context) ([]models.MAC, error) {
+	return d.queryMACs(ctx, `SELECT `+macCols+` FROM macs ORDER BY expires_at DESC`)
+}
+
+func (d *DB) ListActiveMACs(ctx context.Context) ([]models.MAC, error) {
+	return d.queryMACs(ctx, `SELECT `+macCols+` FROM macs WHERE status = 'active' AND expires_at > CURRENT_TIMESTAMP`)
+}
+
+func (d *DB) ListMACsForUser(ctx context.Context, userID int64) ([]models.MAC, error) {
+	return d.queryMACs(ctx, `SELECT `+macCols+` FROM macs WHERE user_id = ? ORDER BY expires_at DESC`, userID)
+}
+
+func (d *DB) queryMACs(ctx context.Context, q string, args ...any) ([]models.MAC, error) {
+	rows, err := d.conn.QueryContext(ctx, q, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []models.MAC
+	for rows.Next() {
+		m, err := scanMAC(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, *m)
+	}
+	return out, rows.Err()
+}
+
+func (d *DB) GetMAC(ctx context.Context, mac string) (*models.MAC, error) {
+	row := d.conn.QueryRowContext(ctx, `SELECT `+macCols+` FROM macs WHERE mac = ?`, mac)
+	m, err := scanMAC(row)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	return m, nil
+}
+
+// UpsertMAC adds new MAC or extends existing one's expiry. Returns the post-state.
+// If existing MAC is still active, new expiry = current_expiry + days.
+// Otherwise new expiry = now + days. userID nil keeps the existing owner (or null).
+func (d *DB) UpsertMAC(ctx context.Context, mac, label string, days int, userID *int64) (*models.MAC, error) {
+	tx, err := d.conn.BeginTx(ctx, nil)
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback()
+
+	existing, err := getMACTx(ctx, tx, mac)
+	if err != nil {
+		return nil, err
+	}
+	now := time.Now().UTC()
+	var newExpiry time.Time
+	if existing != nil && existing.ExpiresAt.After(now) && existing.Status == models.MACActive {
+		newExpiry = existing.ExpiresAt.AddDate(0, 0, days)
+	} else {
+		newExpiry = now.AddDate(0, 0, days)
+	}
+	if existing == nil {
+		var uid sql.NullInt64
+		if userID != nil {
+			uid = sql.NullInt64{Int64: *userID, Valid: true}
+		}
+		_, err = tx.ExecContext(ctx,
+			`INSERT INTO macs (mac, label, status, expires_at, user_id, created_at, updated_at) VALUES (?, ?, 'active', ?, ?, ?, ?)`,
+			mac, label, newExpiry, uid, now, now)
+	} else {
+		newLabel := existing.Label
+		if label != "" {
+			newLabel = label
+		}
+		if userID != nil {
+			_, err = tx.ExecContext(ctx,
+				`UPDATE macs SET label = ?, status = 'active', expires_at = ?, user_id = ?, updated_at = ? WHERE mac = ?`,
+				newLabel, newExpiry, *userID, now, mac)
+		} else {
+			_, err = tx.ExecContext(ctx,
+				`UPDATE macs SET label = ?, status = 'active', expires_at = ?, updated_at = ? WHERE mac = ?`,
+				newLabel, newExpiry, now, mac)
+		}
+	}
+	if err != nil {
+		return nil, err
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, err
+	}
+	return d.GetMAC(ctx, mac)
+}
+
+func getMACTx(ctx context.Context, tx *sql.Tx, mac string) (*models.MAC, error) {
+	row := tx.QueryRowContext(ctx, `SELECT `+macCols+` FROM macs WHERE mac = ?`, mac)
+	m, err := scanMAC(row)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	return m, nil
+}
+
+func (d *DB) DeleteMAC(ctx context.Context, mac string) error {
+	_, err := d.conn.ExecContext(ctx, `DELETE FROM macs WHERE mac = ?`, mac)
+	return err
+}
+
+func (d *DB) SetMACStatus(ctx context.Context, mac string, status models.MACStatus) error {
+	_, err := d.conn.ExecContext(ctx, `UPDATE macs SET status = ?, updated_at = CURRENT_TIMESTAMP WHERE mac = ?`, status, mac)
+	return err
+}
+
+// SetMACLabel updates only the label. Used by /user/macs/label so a user can
+// rename their own devices without changing expiry/status.
+func (d *DB) SetMACLabel(ctx context.Context, mac, label string) error {
+	_, err := d.conn.ExecContext(ctx,
+		`UPDATE macs SET label = ?, updated_at = CURRENT_TIMESTAMP WHERE mac = ?`,
+		label, mac)
+	return err
+}
+
+// ReplaceMAC atomically transfers a user's active MAC to a new MAC. The old MAC
+// is deleted from DB. Returns the new MAC row.
+func (d *DB) ReplaceMAC(ctx context.Context, userID int64, oldMac, newMac, label string) (*models.MAC, error) {
+	tx, err := d.conn.BeginTx(ctx, nil)
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback()
+
+	old, err := getMACTx(ctx, tx, oldMac)
+	if err != nil {
+		return nil, err
+	}
+	if old == nil || old.UserID == nil || *old.UserID != userID {
+		return nil, fmt.Errorf("MAC %s 不属于当前用户", oldMac)
+	}
+	if old.Status != models.MACActive || old.ExpiresAt.Before(time.Now().UTC()) {
+		return nil, fmt.Errorf("MAC %s 已过期，无法转移", oldMac)
+	}
+	conflict, err := getMACTx(ctx, tx, newMac)
+	if err != nil {
+		return nil, err
+	}
+	if conflict != nil {
+		return nil, fmt.Errorf("MAC %s 已被使用", newMac)
+	}
+	newExpiry := old.ExpiresAt
+	if label == "" {
+		label = old.Label
+	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM macs WHERE mac = ?`, oldMac); err != nil {
+		return nil, err
+	}
+	now := time.Now().UTC()
+	if _, err := tx.ExecContext(ctx,
+		`INSERT INTO macs (mac, label, status, expires_at, user_id, created_at, updated_at) VALUES (?, ?, 'active', ?, ?, ?, ?)`,
+		newMac, label, newExpiry, userID, now, now); err != nil {
+		return nil, err
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, err
+	}
+	return d.GetMAC(ctx, newMac)
+}
+
+// ExpireDueMACs marks expired MACs and returns the ones newly expired.
+func (d *DB) ExpireDueMACs(ctx context.Context) ([]string, error) {
+	rows, err := d.conn.QueryContext(ctx, `SELECT mac FROM macs WHERE status = 'active' AND expires_at <= CURRENT_TIMESTAMP`)
+	if err != nil {
+		return nil, err
+	}
+	var expired []string
+	for rows.Next() {
+		var m string
+		if err := rows.Scan(&m); err != nil {
+			rows.Close()
+			return nil, err
+		}
+		expired = append(expired, m)
+	}
+	rows.Close()
+	if len(expired) == 0 {
+		return nil, nil
+	}
+	_, err = d.conn.ExecContext(ctx, `UPDATE macs SET status = 'expired', updated_at = CURRENT_TIMESTAMP WHERE status = 'active' AND expires_at <= CURRENT_TIMESTAMP`)
+	return expired, err
+}
+
+// ---------- Orders ----------
+
+const orderCols = `id, order_no, mac, plan, days, amount_cents, status, payment_method, trade_no, user_id, last_queried_at, paid_at, created_at`
+
+func scanOrder(row interface{ Scan(...any) error }) (*models.Order, error) {
+	var o models.Order
+	var userID sql.NullInt64
+	var lastQ, paidAt sql.NullTime
+	if err := row.Scan(&o.ID, &o.OrderNo, &o.Mac, &o.Plan, &o.Days, &o.AmountCents, &o.Status,
+		&o.PaymentMethod, &o.TradeNo, &userID, &lastQ, &paidAt, &o.CreatedAt); err != nil {
+		return nil, err
+	}
+	if userID.Valid {
+		v := userID.Int64
+		o.UserID = &v
+	}
+	if lastQ.Valid {
+		t := lastQ.Time
+		o.LastQueriedAt = &t
+	}
+	if paidAt.Valid {
+		t := paidAt.Time
+		o.PaidAt = &t
+	}
+	return &o, nil
+}
+
+func (d *DB) CreateOrder(ctx context.Context, o *models.Order) error {
+	var uid sql.NullInt64
+	if o.UserID != nil {
+		uid = sql.NullInt64{Int64: *o.UserID, Valid: true}
+	}
+	res, err := d.conn.ExecContext(ctx,
+		`INSERT INTO orders (order_no, mac, plan, days, amount_cents, status, payment_method, user_id, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		o.OrderNo, o.Mac, o.Plan, o.Days, o.AmountCents, o.Status, o.PaymentMethod, uid, time.Now().UTC())
+	if err != nil {
+		return err
+	}
+	id, _ := res.LastInsertId()
+	o.ID = id
+	return nil
+}
+
+func (d *DB) GetOrder(ctx context.Context, orderNo string) (*models.Order, error) {
+	row := d.conn.QueryRowContext(ctx, `SELECT `+orderCols+` FROM orders WHERE order_no = ?`, orderNo)
+	o, err := scanOrder(row)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	return o, nil
+}
+
+func (d *DB) ListOrders(ctx context.Context, limit int) ([]models.Order, error) {
+	if limit <= 0 || limit > 500 {
+		limit = 100
+	}
+	return d.queryOrders(ctx, `SELECT `+orderCols+` FROM orders ORDER BY created_at DESC LIMIT ?`, limit)
+}
+
+func (d *DB) ListOrdersForUser(ctx context.Context, userID int64, limit int) ([]models.Order, error) {
+	if limit <= 0 || limit > 500 {
+		limit = 50
+	}
+	return d.queryOrders(ctx, `SELECT `+orderCols+` FROM orders WHERE user_id = ? ORDER BY created_at DESC LIMIT ?`, userID, limit)
+}
+
+// ListPendingOrdersToPoll returns pending orders older than `staleAfter` since
+// last upstream query — these are candidates for our fallback poller.
+func (d *DB) ListPendingOrdersToPoll(ctx context.Context, staleAfter time.Duration, maxAge time.Duration, limit int) ([]models.Order, error) {
+	cutoffStale := time.Now().UTC().Add(-staleAfter)
+	cutoffAge := time.Now().UTC().Add(-maxAge)
+	q := `SELECT ` + orderCols + ` FROM orders
+	      WHERE status = 'pending'
+	        AND created_at > ?
+	        AND (last_queried_at IS NULL OR last_queried_at < ?)
+	      ORDER BY created_at DESC
+	      LIMIT ?`
+	return d.queryOrders(ctx, q, cutoffAge, cutoffStale, limit)
+}
+
+func (d *DB) MarkOrderQueried(ctx context.Context, orderNo string) error {
+	_, err := d.conn.ExecContext(ctx, `UPDATE orders SET last_queried_at = ? WHERE order_no = ?`, time.Now().UTC(), orderNo)
+	return err
+}
+
+func (d *DB) queryOrders(ctx context.Context, q string, args ...any) ([]models.Order, error) {
+	rows, err := d.conn.QueryContext(ctx, q, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []models.Order
+	for rows.Next() {
+		o, err := scanOrder(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, *o)
+	}
+	return out, rows.Err()
+}
+
+// MarkOrderPaid sets status=paid atomically; returns (transitioned, order, err).
+// Idempotent — re-calling for an already-paid order returns transitioned=false.
+func (d *DB) MarkOrderPaid(ctx context.Context, orderNo, tradeNo string) (bool, *models.Order, error) {
+	tx, err := d.conn.BeginTx(ctx, nil)
+	if err != nil {
+		return false, nil, err
+	}
+	defer tx.Rollback()
+
+	row := tx.QueryRowContext(ctx, `SELECT `+orderCols+` FROM orders WHERE order_no = ?`, orderNo)
+	o, err := scanOrder(row)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, nil, fmt.Errorf("order %s not found", orderNo)
+	}
+	if err != nil {
+		return false, nil, err
+	}
+	if o.Status == models.OrderPaid {
+		return false, o, nil
+	}
+	now := time.Now().UTC()
+	if _, err := tx.ExecContext(ctx, `UPDATE orders SET status = 'paid', trade_no = ?, paid_at = ? WHERE order_no = ?`, tradeNo, now, orderNo); err != nil {
+		return false, nil, err
+	}
+	if err := tx.Commit(); err != nil {
+		return false, nil, err
+	}
+	o.Status = models.OrderPaid
+	o.TradeNo = tradeNo
+	o.PaidAt = &now
+	return true, o, nil
+}
+
+// ---------- Sessions ----------
+
+func (d *DB) CreateSession(ctx context.Context, token, kind, subject string, userID *int64, ttl time.Duration) error {
+	var uid sql.NullInt64
+	if userID != nil {
+		uid = sql.NullInt64{Int64: *userID, Valid: true}
+	}
+	_, err := d.conn.ExecContext(ctx,
+		`INSERT INTO sessions (token, kind, subject, user_id, expires_at) VALUES (?, ?, ?, ?, ?)`,
+		token, kind, subject, uid, time.Now().UTC().Add(ttl))
+	return err
+}
+
+type SessionRow struct {
+	Kind    string
+	Subject string
+	UserID  *int64
+}
+
+func (d *DB) GetSession(ctx context.Context, token string) (*SessionRow, error) {
+	row := d.conn.QueryRowContext(ctx,
+		`SELECT kind, subject, user_id FROM sessions WHERE token = ? AND expires_at > CURRENT_TIMESTAMP`, token)
+	var s SessionRow
+	var uid sql.NullInt64
+	err := row.Scan(&s.Kind, &s.Subject, &uid)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	if uid.Valid {
+		v := uid.Int64
+		s.UserID = &v
+	}
+	return &s, nil
+}
+
+func (d *DB) DeleteSession(ctx context.Context, token string) error {
+	_, err := d.conn.ExecContext(ctx, `DELETE FROM sessions WHERE token = ?`, token)
+	return err
+}
+
+func (d *DB) PurgeExpiredSessions(ctx context.Context) error {
+	_, err := d.conn.ExecContext(ctx, `DELETE FROM sessions WHERE expires_at <= CURRENT_TIMESTAMP`)
+	return err
+}
+
+// ---------- Users ----------
+
+func (d *DB) CreateUser(ctx context.Context, phone, passwordHash string) (*models.User, error) {
+	now := time.Now().UTC()
+	res, err := d.conn.ExecContext(ctx,
+		`INSERT INTO users (phone, password_hash, created_at, updated_at) VALUES (?, ?, ?, ?)`,
+		phone, passwordHash, now, now)
+	if err != nil {
+		return nil, err
+	}
+	id, _ := res.LastInsertId()
+	return &models.User{ID: id, Phone: phone, PasswordHash: passwordHash, CreatedAt: now, UpdatedAt: now}, nil
+}
+
+func (d *DB) GetUserByPhone(ctx context.Context, phone string) (*models.User, error) {
+	row := d.conn.QueryRowContext(ctx,
+		`SELECT id, phone, password_hash, suspended, created_at, updated_at FROM users WHERE phone = ?`, phone)
+	var u models.User
+	var susp int
+	err := row.Scan(&u.ID, &u.Phone, &u.PasswordHash, &susp, &u.CreatedAt, &u.UpdatedAt)
+	if err == nil {
+		u.Suspended = susp != 0
+	}
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	return &u, nil
+}
+
+func (d *DB) GetUser(ctx context.Context, id int64) (*models.User, error) {
+	row := d.conn.QueryRowContext(ctx,
+		`SELECT id, phone, password_hash, suspended, created_at, updated_at FROM users WHERE id = ?`, id)
+	var u models.User
+	var susp int
+	err := row.Scan(&u.ID, &u.Phone, &u.PasswordHash, &susp, &u.CreatedAt, &u.UpdatedAt)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	u.Suspended = susp != 0
+	return &u, nil
+}
+
+func (d *DB) UpdateUserPassword(ctx context.Context, userID int64, passwordHash string) error {
+	_, err := d.conn.ExecContext(ctx,
+		`UPDATE users SET password_hash = ?, updated_at = ? WHERE id = ?`,
+		passwordHash, time.Now().UTC(), userID)
+	return err
+}
+
+func (d *DB) ListUsers(ctx context.Context, limit int) ([]models.User, error) {
+	return d.SearchUsers(ctx, "", limit)
+}
+
+// SearchUsers returns users whose phone CONTAINS the query string.
+func (d *DB) SearchUsers(ctx context.Context, q string, limit int) ([]models.User, error) {
+	if limit <= 0 || limit > 500 {
+		limit = 100
+	}
+	var rows *sql.Rows
+	var err error
+	if q == "" {
+		rows, err = d.conn.QueryContext(ctx,
+			`SELECT id, phone, password_hash, suspended, created_at, updated_at FROM users ORDER BY created_at DESC LIMIT ?`, limit)
+	} else {
+		rows, err = d.conn.QueryContext(ctx,
+			`SELECT id, phone, password_hash, suspended, created_at, updated_at FROM users WHERE phone LIKE ? ORDER BY created_at DESC LIMIT ?`,
+			"%"+q+"%", limit)
+	}
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []models.User
+	for rows.Next() {
+		var u models.User
+		var susp int
+		if err := rows.Scan(&u.ID, &u.Phone, &u.PasswordHash, &susp, &u.CreatedAt, &u.UpdatedAt); err != nil {
+			return nil, err
+		}
+		u.Suspended = susp != 0
+		out = append(out, u)
+	}
+	return out, rows.Err()
+}
+
+func (d *DB) SuspendUser(ctx context.Context, id int64, suspended bool) error {
+	v := 0
+	if suspended {
+		v = 1
+	}
+	_, err := d.conn.ExecContext(ctx,
+		`UPDATE users SET suspended = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`, v, id)
+	if err == nil && suspended {
+		// also drop the user's active sessions so a suspended user can't keep using the app
+		_, _ = d.conn.ExecContext(ctx, `DELETE FROM sessions WHERE kind='user' AND user_id = ?`, id)
+	}
+	return err
+}
+
+// DeleteUser removes a user. macs.user_id / orders.user_id are SET NULL by FK.
+func (d *DB) DeleteUser(ctx context.Context, id int64) error {
+	_, _ = d.conn.ExecContext(ctx, `DELETE FROM sessions WHERE kind='user' AND user_id = ?`, id)
+	_, err := d.conn.ExecContext(ctx, `DELETE FROM users WHERE id = ?`, id)
+	return err
+}
+
+// ---------- Sightings ----------
+
+func (d *DB) UpsertSighting(ctx context.Context, mac, ip, hostname string) error {
+	now := time.Now().UTC()
+	_, err := d.conn.ExecContext(ctx,
+		`INSERT INTO device_sightings (mac, last_ip, hostname, first_seen, last_seen) VALUES (?, ?, ?, ?, ?)
+		 ON CONFLICT(mac) DO UPDATE SET
+		   last_ip = excluded.last_ip,
+		   hostname = CASE WHEN excluded.hostname != '' THEN excluded.hostname ELSE device_sightings.hostname END,
+		   last_seen = excluded.last_seen`,
+		mac, ip, hostname, now, now)
+	return err
+}
+
+func (d *DB) ListRecentSightings(ctx context.Context, since time.Duration) ([]models.Sighting, error) {
+	cutoff := time.Now().UTC().Add(-since)
+	rows, err := d.conn.QueryContext(ctx,
+		`SELECT mac, last_ip, hostname, first_seen, last_seen FROM device_sightings WHERE last_seen > ? ORDER BY last_seen DESC`,
+		cutoff)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []models.Sighting
+	for rows.Next() {
+		var s models.Sighting
+		if err := rows.Scan(&s.MAC, &s.LastIP, &s.Hostname, &s.FirstSeen, &s.LastSeen); err != nil {
+			return nil, err
+		}
+		out = append(out, s)
+	}
+	return out, rows.Err()
+}
+
+func (d *DB) PurgeOldSightings(ctx context.Context, olderThan time.Duration) error {
+	cutoff := time.Now().UTC().Add(-olderThan)
+	_, err := d.conn.ExecContext(ctx, `DELETE FROM device_sightings WHERE last_seen < ?`, cutoff)
+	return err
+}
+
+// ---------- Stats ----------
+
+type Stats struct {
+	Total        int
+	Active       int
+	Expired      int
+	RevenueCents int
+	Users        int
+}
+
+func (d *DB) Stats(ctx context.Context) (Stats, error) {
+	var s Stats
+	queries := []struct {
+		q   string
+		out *int
+	}{
+		{`SELECT COUNT(*) FROM macs`, &s.Total},
+		{`SELECT COUNT(*) FROM macs WHERE status='active' AND expires_at > CURRENT_TIMESTAMP`, &s.Active},
+		{`SELECT COUNT(*) FROM macs WHERE status IN ('expired','blocked') OR expires_at <= CURRENT_TIMESTAMP`, &s.Expired},
+		{`SELECT COALESCE(SUM(amount_cents),0) FROM orders WHERE status='paid'`, &s.RevenueCents},
+		{`SELECT COUNT(*) FROM users`, &s.Users},
+	}
+	for _, q := range queries {
+		if err := d.conn.QueryRowContext(ctx, q.q).Scan(q.out); err != nil {
+			return s, err
+		}
+	}
+	return s, nil
+}
+
+// AttentionCounts surfaces things admin should probably look at.
+// Empty counts → green; non-zero → render highlighted in the dashboard.
+type AttentionCounts struct {
+	ExpiringSoon   int // active MACs whose expiry is < 7 days from now
+	StalePending   int // orders still pending after 10 min
+	SuspendedUsers int
+	FailedToday    int // orders with status='failed' created today
+}
+
+func (d *DB) Attention(ctx context.Context) (AttentionCounts, error) {
+	var a AttentionCounts
+	queries := []struct {
+		q   string
+		out *int
+	}{
+		{`SELECT COUNT(*) FROM macs WHERE status='active' AND expires_at > CURRENT_TIMESTAMP AND expires_at < datetime('now','+7 days')`, &a.ExpiringSoon},
+		{`SELECT COUNT(*) FROM orders WHERE status='pending' AND created_at < datetime('now','-10 minutes')`, &a.StalePending},
+		{`SELECT COUNT(*) FROM users WHERE suspended = 1`, &a.SuspendedUsers},
+		{`SELECT COUNT(*) FROM orders WHERE status='failed' AND date(created_at) = date('now')`, &a.FailedToday},
+	}
+	for _, q := range queries {
+		if err := d.conn.QueryRowContext(ctx, q.q).Scan(q.out); err != nil {
+			return a, err
+		}
+	}
+	return a, nil
+}
+
+// Total returns the sum of all attention counts (for the badge in the navbar).
+func (a AttentionCounts) Total() int {
+	return a.ExpiringSoon + a.StalePending + a.SuspendedUsers + a.FailedToday
+}
+
+// PlanSales is per-plan revenue + order count over an inclusive day range.
+type PlanSales struct {
+	Plan        string
+	OrdersCount int
+	TotalCents  int
+}
+
+// PlanSalesSince returns sales aggregated by plan for the last N days
+// (paid orders only). Used by the admin dashboard chart.
+func (d *DB) PlanSalesSince(ctx context.Context, days int) ([]PlanSales, error) {
+	if days <= 0 || days > 3650 {
+		days = 30
+	}
+	rows, err := d.conn.QueryContext(ctx,
+		`SELECT plan, COUNT(*), COALESCE(SUM(amount_cents),0)
+		 FROM orders
+		 WHERE status='paid' AND paid_at > datetime('now','-' || ? || ' days')
+		 GROUP BY plan
+		 ORDER BY SUM(amount_cents) DESC`, days)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []PlanSales
+	for rows.Next() {
+		var p PlanSales
+		if err := rows.Scan(&p.Plan, &p.OrdersCount, &p.TotalCents); err != nil {
+			return nil, err
+		}
+		out = append(out, p)
+	}
+	return out, rows.Err()
+}
+
+// ---------- Vouchers ----------
+
+const voucherCols = `id, code, days, label, batch, expires_at, redeemed_at, redeemed_by_mac, redeemed_user_id, revoked, created_at`
+
+func scanVoucher(row interface{ Scan(...any) error }) (*models.Voucher, error) {
+	var v models.Voucher
+	var expiresAt, redeemedAt sql.NullTime
+	var redeemedByMac sql.NullString
+	var redeemedUserID sql.NullInt64
+	var revoked int
+	if err := row.Scan(&v.ID, &v.Code, &v.Days, &v.Label, &v.Batch,
+		&expiresAt, &redeemedAt, &redeemedByMac, &redeemedUserID, &revoked, &v.CreatedAt); err != nil {
+		return nil, err
+	}
+	if expiresAt.Valid {
+		t := expiresAt.Time
+		v.ExpiresAt = &t
+	}
+	if redeemedAt.Valid {
+		t := redeemedAt.Time
+		v.RedeemedAt = &t
+	}
+	if redeemedByMac.Valid {
+		v.RedeemedByMac = redeemedByMac.String
+	}
+	if redeemedUserID.Valid {
+		uid := redeemedUserID.Int64
+		v.RedeemedUserID = &uid
+	}
+	v.Revoked = revoked != 0
+	return &v, nil
+}
+
+// CreateVoucher inserts one voucher. Returns ErrVoucherExists on duplicate code.
+func (d *DB) CreateVoucher(ctx context.Context, code string, days int, label, batch string, expiresAt *time.Time) (*models.Voucher, error) {
+	var expr any
+	if expiresAt != nil {
+		expr = *expiresAt
+	}
+	res, err := d.conn.ExecContext(ctx,
+		`INSERT INTO vouchers (code, days, label, batch, expires_at) VALUES (?, ?, ?, ?, ?)`,
+		code, days, label, batch, expr)
+	if err != nil {
+		return nil, err
+	}
+	id, _ := res.LastInsertId()
+	return &models.Voucher{ID: id, Code: code, Days: days, Label: label, Batch: batch, ExpiresAt: expiresAt}, nil
+}
+
+func (d *DB) GetVoucher(ctx context.Context, code string) (*models.Voucher, error) {
+	row := d.conn.QueryRowContext(ctx, `SELECT `+voucherCols+` FROM vouchers WHERE code = ?`, code)
+	v, err := scanVoucher(row)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	return v, nil
+}
+
+func (d *DB) ListVouchers(ctx context.Context, batch string, limit int) ([]models.Voucher, error) {
+	if limit <= 0 || limit > 1000 {
+		limit = 500
+	}
+	q := `SELECT ` + voucherCols + ` FROM vouchers`
+	args := []any{}
+	if batch != "" {
+		q += ` WHERE batch = ?`
+		args = append(args, batch)
+	}
+	q += ` ORDER BY created_at DESC LIMIT ?`
+	args = append(args, limit)
+
+	rows, err := d.conn.QueryContext(ctx, q, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []models.Voucher
+	for rows.Next() {
+		v, err := scanVoucher(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, *v)
+	}
+	return out, rows.Err()
+}
+
+func (d *DB) RevokeVoucher(ctx context.Context, code string) error {
+	_, err := d.conn.ExecContext(ctx, `UPDATE vouchers SET revoked = 1 WHERE code = ? AND redeemed_at IS NULL`, code)
+	return err
+}
+
+// RedeemVoucher atomically marks a voucher consumed. Returns the voucher row
+// on success; on already-redeemed/revoked/expired returns a typed error.
+func (d *DB) RedeemVoucher(ctx context.Context, code, mac string, userID *int64) (*models.Voucher, error) {
+	tx, err := d.conn.BeginTx(ctx, nil)
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback()
+
+	row := tx.QueryRowContext(ctx, `SELECT `+voucherCols+` FROM vouchers WHERE code = ?`, code)
+	v, err := scanVoucher(row)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, ErrVoucherNotFound
+	}
+	if err != nil {
+		return nil, err
+	}
+	if v.Revoked {
+		return nil, ErrVoucherRevoked
+	}
+	if v.RedeemedAt != nil {
+		return nil, ErrVoucherUsed
+	}
+	if v.ExpiresAt != nil && v.ExpiresAt.Before(time.Now().UTC()) {
+		return nil, ErrVoucherExpired
+	}
+	now := time.Now().UTC()
+	var uid any
+	if userID != nil {
+		uid = *userID
+	}
+	if _, err := tx.ExecContext(ctx,
+		`UPDATE vouchers SET redeemed_at = ?, redeemed_by_mac = ?, redeemed_user_id = ? WHERE code = ?`,
+		now, mac, uid, code); err != nil {
+		return nil, err
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, err
+	}
+	v.RedeemedAt = &now
+	v.RedeemedByMac = mac
+	v.RedeemedUserID = userID
+	return v, nil
+}
+
+// Voucher errors.
+var (
+	ErrVoucherNotFound = errors.New("充值码不存在")
+	ErrVoucherUsed     = errors.New("充值码已使用")
+	ErrVoucherRevoked  = errors.New("充值码已作废")
+	ErrVoucherExpired  = errors.New("充值码已过期")
+)
+
+// ---------- Stats history ----------
+
+func (d *DB) UpsertStatsDaily(ctx context.Context, day string, s Stats) error {
+	now := time.Now().UTC()
+	_, err := d.conn.ExecContext(ctx,
+		`INSERT INTO stats_daily (day, mac_total, mac_active, users_total, revenue_cents, paid_orders, snapshot_at)
+		 VALUES (?, ?, ?, ?, ?, ?, ?)
+		 ON CONFLICT(day) DO UPDATE SET
+		   mac_total = excluded.mac_total,
+		   mac_active = excluded.mac_active,
+		   users_total = excluded.users_total,
+		   revenue_cents = excluded.revenue_cents,
+		   paid_orders = excluded.paid_orders,
+		   snapshot_at = excluded.snapshot_at`,
+		day, s.Total, s.Active, s.Users, s.RevenueCents, 0, now)
+	return err
+}
+
+// SnapshotToday computes current stats and upserts a row for today (UTC).
+func (d *DB) SnapshotToday(ctx context.Context) error {
+	s, err := d.Stats(ctx)
+	if err != nil {
+		return err
+	}
+	// paid_orders for today
+	var paidToday int
+	_ = d.conn.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM orders WHERE status='paid' AND date(paid_at) = date('now')`).Scan(&paidToday)
+	day := time.Now().UTC().Format("2006-01-02")
+	now := time.Now().UTC()
+	_, err = d.conn.ExecContext(ctx,
+		`INSERT INTO stats_daily (day, mac_total, mac_active, users_total, revenue_cents, paid_orders, snapshot_at)
+		 VALUES (?, ?, ?, ?, ?, ?, ?)
+		 ON CONFLICT(day) DO UPDATE SET
+		   mac_total = excluded.mac_total,
+		   mac_active = excluded.mac_active,
+		   users_total = excluded.users_total,
+		   revenue_cents = excluded.revenue_cents,
+		   paid_orders = excluded.paid_orders,
+		   snapshot_at = excluded.snapshot_at`,
+		day, s.Total, s.Active, s.Users, s.RevenueCents, paidToday, now)
+	return err
+}
+
+func (d *DB) ListStatsDaily(ctx context.Context, days int) ([]models.StatsDaily, error) {
+	if days <= 0 || days > 365 {
+		days = 30
+	}
+	cutoff := time.Now().UTC().AddDate(0, 0, -days).Format("2006-01-02")
+	rows, err := d.conn.QueryContext(ctx,
+		`SELECT day, mac_total, mac_active, users_total, revenue_cents, paid_orders, snapshot_at
+		 FROM stats_daily WHERE day >= ? ORDER BY day ASC`, cutoff)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []models.StatsDaily
+	for rows.Next() {
+		var s models.StatsDaily
+		if err := rows.Scan(&s.Day, &s.MacTotal, &s.MacActive, &s.UsersTotal, &s.RevenueCents, &s.PaidOrders, &s.SnapshotAt); err != nil {
+			return nil, err
+		}
+		out = append(out, s)
+	}
+	return out, rows.Err()
+}
+
+// ---------- Plans (DB overlay) ----------
+
+func (d *DB) ListPlans(ctx context.Context) ([]models.Plan, error) {
+	rows, err := d.conn.QueryContext(ctx,
+		`SELECT plan_key, label, days, price_cents, sort_order, enabled, updated_at FROM plans ORDER BY sort_order, days`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []models.Plan
+	for rows.Next() {
+		var p models.Plan
+		var enabled int
+		if err := rows.Scan(&p.Key, &p.Label, &p.Days, &p.PriceCents, &p.SortOrder, &enabled, &p.UpdatedAt); err != nil {
+			return nil, err
+		}
+		p.Enabled = enabled != 0
+		out = append(out, p)
+	}
+	return out, rows.Err()
+}
+
+func (d *DB) UpsertPlan(ctx context.Context, p models.Plan) error {
+	en := 0
+	if p.Enabled {
+		en = 1
+	}
+	_, err := d.conn.ExecContext(ctx,
+		`INSERT INTO plans (plan_key, label, days, price_cents, sort_order, enabled, updated_at)
+		 VALUES (?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+		 ON CONFLICT(plan_key) DO UPDATE SET
+		   label = excluded.label, days = excluded.days, price_cents = excluded.price_cents,
+		   sort_order = excluded.sort_order, enabled = excluded.enabled, updated_at = CURRENT_TIMESTAMP`,
+		p.Key, p.Label, p.Days, p.PriceCents, p.SortOrder, en)
+	return err
+}
+
+func (d *DB) DeletePlan(ctx context.Context, key string) error {
+	_, err := d.conn.ExecContext(ctx, `DELETE FROM plans WHERE plan_key = ?`, key)
+	return err
+}
+
+func (d *DB) CountPlans(ctx context.Context) (int, error) {
+	var n int
+	err := d.conn.QueryRowContext(ctx, `SELECT COUNT(*) FROM plans`).Scan(&n)
+	return n, err
+}
+
+// ---------- Audit log ----------
+
+type AuditEntry struct {
+	ID     int64
+	At     time.Time
+	Actor  string
+	Action string
+	Target string
+	Detail string
+}
+
+func (d *DB) Audit(ctx context.Context, actor, action, target, detail string) {
+	_, _ = d.conn.ExecContext(ctx,
+		`INSERT INTO audit_log (actor, action, target, detail) VALUES (?, ?, ?, ?)`,
+		actor, action, target, detail)
+}
+
+func (d *DB) ListAudit(ctx context.Context, limit int) ([]AuditEntry, error) {
+	return d.SearchAudit(ctx, AuditFilter{Limit: limit})
+}
+
+// AuditFilter restricts which entries SearchAudit returns. Empty fields are
+// ignored. Time strings should be YYYY-MM-DD; mismatched/empty = no bound.
+type AuditFilter struct {
+	Actor  string // substring (LIKE %s%)
+	Action string // exact match
+	Target string // substring
+	Since  string // YYYY-MM-DD (inclusive)
+	Until  string // YYYY-MM-DD (inclusive)
+	Limit  int
+}
+
+func (d *DB) SearchAudit(ctx context.Context, f AuditFilter) ([]AuditEntry, error) {
+	if f.Limit <= 0 || f.Limit > 1000 {
+		f.Limit = 200
+	}
+	var sb strings.Builder
+	sb.WriteString(`SELECT id, at, actor, action, target, detail FROM audit_log WHERE 1=1`)
+	args := []any{}
+	if f.Actor != "" {
+		sb.WriteString(` AND actor LIKE ?`)
+		args = append(args, "%"+f.Actor+"%")
+	}
+	if f.Action != "" {
+		sb.WriteString(` AND action = ?`)
+		args = append(args, f.Action)
+	}
+	if f.Target != "" {
+		sb.WriteString(` AND target LIKE ?`)
+		args = append(args, "%"+f.Target+"%")
+	}
+	if f.Since != "" {
+		sb.WriteString(` AND date(at) >= date(?)`)
+		args = append(args, f.Since)
+	}
+	if f.Until != "" {
+		sb.WriteString(` AND date(at) <= date(?)`)
+		args = append(args, f.Until)
+	}
+	sb.WriteString(` ORDER BY id DESC LIMIT ?`)
+	args = append(args, f.Limit)
+
+	rows, err := d.conn.QueryContext(ctx, sb.String(), args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []AuditEntry
+	for rows.Next() {
+		var e AuditEntry
+		if err := rows.Scan(&e.ID, &e.At, &e.Actor, &e.Action, &e.Target, &e.Detail); err != nil {
+			return nil, err
+		}
+		out = append(out, e)
+	}
+	return out, rows.Err()
+}
+
+// DistinctAuditActions returns the unique actions present in the log (for
+// populating the filter dropdown).
+func (d *DB) DistinctAuditActions(ctx context.Context) ([]string, error) {
+	rows, err := d.conn.QueryContext(ctx, `SELECT DISTINCT action FROM audit_log ORDER BY action`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []string
+	for rows.Next() {
+		var a string
+		if err := rows.Scan(&a); err != nil {
+			return nil, err
+		}
+		out = append(out, a)
+	}
+	return out, rows.Err()
+}
+
+func (d *DB) PurgeAuditLog(ctx context.Context, keep int) error {
+	if keep <= 0 {
+		keep = 10000
+	}
+	_, err := d.conn.ExecContext(ctx,
+		`DELETE FROM audit_log WHERE id NOT IN (SELECT id FROM audit_log ORDER BY id DESC LIMIT ?)`, keep)
+	return err
+}

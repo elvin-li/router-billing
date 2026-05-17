@@ -1,0 +1,95 @@
+{{define "admin-sidebar"}}
+<aside class="admin-side">
+  <div class="admin-brand">
+    <div class="logo">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+        <path d="M5 12.55a11 11 0 0 1 14 0"/>
+        <path d="M1.42 9a16 16 0 0 1 21.16 0"/>
+        <path d="M8.53 16.11a6 6 0 0 1 6.95 0"/>
+        <line x1="12" y1="20" x2="12.01" y2="20"/>
+      </svg>
+    </div>
+    <div>
+      <div class="name">router-billing</div>
+      <div class="sub">v{{.Version}}</div>
+    </div>
+  </div>
+  <nav class="admin-nav">
+    <a href="/admin/macs"    class="{{if eq .Page "macs"}}active{{end}}">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+        <rect x="2" y="3" width="20" height="14" rx="2"/><line x1="8" y1="21" x2="16" y2="21"/><line x1="12" y1="17" x2="12" y2="21"/>
+      </svg>
+      <span>MAC 管理</span>
+    </a>
+    <a href="/admin/devices" class="{{if eq .Page "devices"}}active{{end}}">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+        <circle cx="12" cy="12" r="9"/><path d="M3 12h18"/><path d="M12 3a14.5 14.5 0 0 1 0 18 14.5 14.5 0 0 1 0-18z"/>
+      </svg>
+      <span>在线设备</span>
+    </a>
+    <a href="/admin/users" class="{{if eq .Page "users"}}active{{end}}">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+        <path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/>
+        <path d="M22 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/>
+      </svg>
+      <span>用户</span>
+    </a>
+    <a href="/admin/orders"  class="{{if eq .Page "orders"}}active{{end}}">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+        <path d="M9 11l3 3L22 4"/><path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11"/>
+      </svg>
+      <span>订单</span>
+    </a>
+    <a href="/admin/vouchers" class="{{if eq .Page "vouchers"}}active{{end}}">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+        <path d="M20 12V8a2 2 0 0 0-2-2H4a2 2 0 0 0-2 2v4a2 2 0 0 1 0 4v4a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-4a2 2 0 0 1 0-4z"/>
+        <path d="M9 8v8"/><path d="M13 12h4"/>
+      </svg>
+      <span>充值码</span>
+    </a>
+    <a href="/admin/plans" class="{{if eq .Page "plans"}}active{{end}}">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+        <line x1="12" y1="1" x2="12" y2="23"/><path d="M17 5H9.5a3.5 3.5 0 0 0 0 7h5a3.5 3.5 0 0 1 0 7H6"/>
+      </svg>
+      <span>套餐</span>
+    </a>
+    <a href="/admin/ssid-cards" class="{{if eq .Page "ssid-cards"}}active{{end}}">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+        <rect x="3" y="3" width="7" height="7"/><rect x="14" y="3" width="7" height="7"/><rect x="3" y="14" width="7" height="7"/><rect x="14" y="14" width="7" height="7"/>
+      </svg>
+      <span>SSID 海报</span>
+    </a>
+    <a href="/admin/audit" class="{{if eq .Page "audit"}}active{{end}}">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+        <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/>
+        <polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/>
+      </svg>
+      <span>审计日志</span>
+    </a>
+  </nav>
+  <div class="admin-bottom">
+    <form method="post" action="/admin/resync" style="margin:0;">
+      {{template "csrf" .}}
+      <button type="submit" class="btn ghost small" style="width:100%;">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="width:14px;height:14px;">
+          <polyline points="23 4 23 10 17 10"/><polyline points="1 20 1 14 7 14"/><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/>
+        </svg>
+        <span>重建防火墙</span>
+      </button>
+    </form>
+    <a href="/admin/logout" style="margin-top:6px;">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+        <path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><polyline points="16 17 21 12 16 7"/><line x1="21" y1="12" x2="9" y2="12"/>
+      </svg>
+      <span>退出</span>
+    </a>
+  </div>
+</aside>
+{{end}}
+
+{{define "flash"}}
+{{if .OK}}<div class="flash ok">操作成功</div>{{end}}
+{{if .Err}}<div class="flash err">{{.Err}}</div>{{end}}
+{{end}}
+
+{{define "csrf"}}<input type="hidden" name="_csrf" value="{{.CSRFToken}}">{{end}}

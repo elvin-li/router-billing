@@ -1,0 +1,9 @@
+#!/bin/sh
+# opkg pre-removal hook.
+set -e
+
+/etc/init.d/router-billing stop 2>/dev/null || true
+/etc/init.d/router-billing disable 2>/dev/null || true
+/usr/share/router-billing/firewall-billing.sh purge 2>/dev/null || true
+
+exit 0

@@ -1,0 +1,97 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>时段限制 · router-billing</title>
+  <link rel="stylesheet" href="/static/style.css">
+  <style>
+    .day-row { display: flex; gap: 6px; flex-wrap: wrap; }
+    .day-row label {
+      display: inline-flex; align-items: center; gap: 4px;
+      padding: 6px 12px; border: 1px solid var(--border); border-radius: 8px;
+      cursor: pointer; font-size: 14px; background: var(--surface);
+      transition: all 0.12s;
+    }
+    .day-row input { margin: 0; accent-color: var(--brand); }
+    .day-row input:checked + span { color: var(--brand); font-weight: 600; }
+    .day-row label:has(input:checked) {
+      background: var(--brand-soft);
+      border-color: var(--brand);
+    }
+    .time-pair { display: flex; gap: 6px; align-items: center; }
+    .time-pair input { width: 56px; padding: 6px 8px; border: 1px solid var(--border); border-radius: 6px; }
+  </style>
+</head>
+<body class="admin">
+<div class="admin-shell">
+  {{template "admin-sidebar" .}}
+  <main class="admin-main">
+    <div class="admin-header">
+      <div>
+        <h1>时段限制</h1>
+        <div class="crumbs">MAC <code>{{.MAC.Mac}}</code>{{if .MAC.Label}} · {{.MAC.Label}}{{end}} · 设置后每分钟自动开关</div>
+      </div>
+      <a href="/admin/macs" class="btn ghost small" style="width:auto;">← 返回</a>
+    </div>
+
+    {{template "flash" .}}
+
+    <section class="admin-card">
+      <p class="desc">配置后，该 MAC 只在符合条件的时段才能上网（不影响到期时间 / DB 状态，纯防火墙层面）。<br>
+      留空 + 「清除」按钮 = 24x7 不限。</p>
+
+      <form method="post" action="/admin/macs/schedule">
+        {{template "csrf" .}}
+        <input type="hidden" name="mac" value="{{.MAC.Mac}}">
+
+        <div class="section">
+          <span class="section-label">星期（多选）</span>
+          <div class="day-row">
+            {{range $i, $name := (list "周一" "周二" "周三" "周四" "周五" "周六" "周日")}}
+            <label>
+              <input type="checkbox" name="days" value="{{add $i 1}}"
+                {{$d := add $i 1}}{{if hasInt $.Schedule.Days $d}}checked{{end}}>
+              <span>{{$name}}</span>
+            </label>
+            {{end}}
+          </div>
+        </div>
+
+        <div class="section">
+          <span class="section-label">时段</span>
+          <div class="time-pair">
+            <input type="number" name="start_hr"  min="0" max="23" value="{{div .Schedule.StartMin 60}}" required>
+            <span>:</span>
+            <input type="number" name="start_min" min="0" max="59" value="{{mod .Schedule.StartMin 60}}" required>
+            <span style="margin:0 8px;">→</span>
+            <input type="number" name="end_hr"    min="0" max="23" value="{{div .Schedule.EndMin 60}}"   required>
+            <span>:</span>
+            <input type="number" name="end_min"   min="0" max="59" value="{{mod .Schedule.EndMin 60}}"   required>
+            <span class="hint" style="margin-left:10px;">结束 ≤ 开始时跨午夜</span>
+          </div>
+        </div>
+
+        <div style="display:flex; gap:10px; margin-top:18px;">
+          <button class="btn primary" type="submit">保存时段</button>
+          {{if .HasSchedule}}
+          <button class="btn outline" type="submit" name="clear" value="1"
+                  formnovalidate
+                  onclick="return confirm('清除时段限制？该 MAC 将恢复 24x7 在线。')">
+            清除（恢复 24x7）
+          </button>
+          {{end}}
+        </div>
+      </form>
+
+      <p class="hint" style="margin-top:18px;">
+        常用预设：<br>
+        - 周一至周五 18:00-22:00 ：小孩用网时间<br>
+        - 周一至周五 09:00-18:00 ：工作时段<br>
+        - 22:00-06:00 ：夜班<br>
+      </p>
+    </section>
+  </main>
+</div>
+</body>
+</html>

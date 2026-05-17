@@ -1,0 +1,36 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+  <title>支付成功</title>
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body class="portal">
+  <main class="card success-screen">
+    <div class="success-icon">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round">
+        <polyline points="20 6 9 17 4 12"/>
+      </svg>
+    </div>
+    <h1>支付成功</h1>
+    <p class="desc">设备已开通上网权限</p>
+    {{with .Row}}
+      <div class="info-card">
+        <dl>
+          <dt>MAC 地址</dt><dd>{{.Mac}}</dd>
+          <dt>到期时间</dt><dd>{{formatTime .ExpiresAt}}</dd>
+        </dl>
+      </div>
+    {{end}}
+    <p class="hint">现在可以直接上网了。如果浏览器仍提示无网络，等待 5 秒或重新打开网页即可。</p>
+    {{if .ReceiptOrderNo}}
+    <p style="margin-top:14px;">
+      <a href="/receipt?order_no={{.ReceiptOrderNo}}" target="_blank" class="btn outline" style="width:auto; display:inline-block;">
+        电子收据（报销用）
+      </a>
+    </p>
+    {{end}}
+  </main>
+</body>
+</html>

@@ -1,0 +1,56 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>订单 · router-billing</title>
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body class="admin">
+<div class="admin-shell">
+  {{template "admin-sidebar" .}}
+  <main class="admin-main">
+    <div class="admin-header">
+      <div>
+        <h1>订单</h1>
+        <div class="crumbs">最近 200 条 · 包含支付中、已付、失败</div>
+      </div>
+      <a href="/admin/export/orders.csv" class="btn outline small" style="width:auto;">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="width:14px;height:14px;"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+        导出 CSV
+      </a>
+    </div>
+
+    <section class="admin-card">
+      <div class="table-wrap">
+        <table class="data">
+          <thead><tr>
+            <th>订单号</th><th>MAC</th><th>套餐</th><th>金额</th><th>支付</th><th>状态</th><th>支付时间</th><th>创建</th><th></th>
+          </tr></thead>
+          <tbody>
+            {{range .Orders}}
+            <tr>
+              <td class="mono" style="font-size:12px;color:#64748b;">{{.OrderNo}}</td>
+              <td class="mono">{{.Mac}}</td>
+              <td>{{.Plan}} <span style="color:#94a3b8;">({{.Days}}天)</span></td>
+              <td><strong>¥{{formatYuan .AmountCents}}</strong></td>
+              <td>{{.PaymentMethod}}</td>
+              <td><span class="pill {{.Status}}">{{.Status}}</span></td>
+              <td>{{formatTimePtr .PaidAt}}</td>
+              <td style="color:#64748b;">{{formatTime .CreatedAt}}</td>
+              <td>{{if eq (printf "%s" .Status) "paid"}}<a href="/receipt?order_no={{.OrderNo}}" target="_blank" class="btn outline tiny" style="width:auto;">收据</a>{{end}}</td>
+            </tr>
+            {{else}}
+            <tr><td colspan="9" class="empty-state">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M9 11l3 3L22 4"/><path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11"/></svg>
+              暂无订单
+            </td></tr>
+            {{end}}
+          </tbody>
+        </table>
+      </div>
+    </section>
+  </main>
+</div>
+</body>
+</html>

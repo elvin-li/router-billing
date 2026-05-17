@@ -1,0 +1,169 @@
+package main
+
+import (
+	"bufio"
+	"context"
+	"flag"
+	"fmt"
+	"log"
+	"os"
+	"os/signal"
+	"strings"
+	"syscall"
+	"time"
+
+	"golang.org/x/crypto/bcrypt"
+
+	"router-billing/internal/backup"
+	"router-billing/internal/config"
+	"router-billing/internal/db"
+	"router-billing/internal/dnsmasq"
+	"router-billing/internal/firewall"
+	"router-billing/internal/scheduler"
+	"router-billing/internal/server"
+	"router-billing/internal/service"
+	"router-billing/internal/sightings"
+	"router-billing/internal/walledgarden"
+)
+
+var version = "dev"
+
+func main() {
+	cfgPath := flag.String("config", "/etc/router-billing/config.yaml", "path to config.yaml")
+	dryFirewall := flag.Bool("dry-firewall", false, "log nft commands without executing (dev only)")
+	showVersion := flag.Bool("version", false, "print version and exit")
+	checkConfig := flag.Bool("check-config", false, "validate the config file and exit")
+	genHash := flag.Bool("gen-password-hash", false, "read a password from stdin and print its bcrypt hash; ideal for admins[].password_hash")
+	flag.Parse()
+
+	log.SetFlags(log.LstdFlags | log.Lmicroseconds)
+
+	if *showVersion {
+		fmt.Printf("router-billing %s\n", version)
+		return
+	}
+	if *genHash {
+		runGenHash()
+		return
+	}
+	if *checkConfig {
+		if _, err := config.Load(*cfgPath); err != nil {
+			fmt.Fprintf(os.Stderr, "config %s: %v\n", *cfgPath, err)
+			os.Exit(2)
+		}
+		fmt.Printf("config %s: OK\n", *cfgPath)
+		return
+	}
+
+	log.Printf("router-billing %s starting (config=%s)", version, *cfgPath)
+
+	cfg, err := config.Load(*cfgPath)
+	if err != nil {
+		log.Fatalf("config: %v", err)
+	}
+
+	dbx, err := db.Open(cfg.DBPath)
+	if err != nil {
+		log.Fatalf("db: %v", err)
+	}
+	defer dbx.Close()
+
+	fw := firewall.New(cfg.Firewall.Table, cfg.Firewall.TableName, cfg.Firewall.SetName, cfg.PaidIface)
+	if *dryFirewall {
+		fw.SetDryRun(true)
+		log.Printf("firewall: dry-run mode enabled")
+	}
+
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+
+	if err := fw.EnsureSet(ctx); err != nil {
+		log.Printf("warn: firewall ensure set: %v (continuing)", err)
+	}
+
+	svc := service.New(dbx, fw)
+	if err := svc.Resync(ctx); err != nil {
+		log.Printf("warn: initial firewall resync: %v (continuing)", err)
+	}
+
+	// Background goroutines.
+	go scheduler.Run(ctx, svc, cfg.Scheduler.ExpireCheckInterval)
+	go svc.EnforceSchedules(ctx)
+	tracker := &sightings.Tracker{
+		DB:         dbx,
+		Iface:      cfg.PaidIface,
+		LeasesPath: dnsmasq.DefaultLeasesPath,
+	}
+	go tracker.Run(ctx)
+
+	// Walled garden: resolve and inject configured domains so unpaid users can
+	// reach payment infrastructure without being whitelisted first.
+	if len(cfg.WalledGarden.Domains) > 0 {
+		wg := &walledgarden.Resolver{
+			FW:              fw,
+			SetName:         "wg_paid",
+			Domains:         cfg.WalledGarden.Domains,
+			RefreshInterval: cfg.WalledGarden.RefreshInterval,
+		}
+		go wg.Run(ctx)
+	}
+
+	if cfg.Backup.Enabled {
+		rot := &backup.Rotator{
+			DB:         dbx,
+			DBPath:     cfg.DBPath,
+			Dir:        cfg.Backup.Dir,
+			RetainDays: cfg.Backup.RetainDays,
+			Interval:   cfg.Backup.Interval,
+			Enabled:    true,
+		}
+		go rot.Run(ctx)
+	}
+
+	// Hourly daily-stats snapshot for the dashboard chart.
+	go func() {
+		_ = dbx.SnapshotToday(ctx)
+		t := time.NewTicker(time.Hour)
+		defer t.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-t.C:
+				_ = dbx.SnapshotToday(ctx)
+			}
+		}
+	}()
+
+	app, err := server.NewApp(cfg, dbx, svc)
+	if err != nil {
+		log.Fatalf("server init: %v", err)
+	}
+	app.Version = version
+	if err := app.Run(ctx); err != nil {
+		log.Fatalf("server: %v", err)
+	}
+	log.Printf("router-billing exited cleanly")
+}
+
+// runGenHash reads a single line from stdin (no echo if TTY) and prints a
+// bcrypt hash suitable for paste into admins[].password_hash.
+func runGenHash() {
+	fmt.Print("password: ")
+	scanner := bufio.NewScanner(os.Stdin)
+	if !scanner.Scan() {
+		fmt.Fprintln(os.Stderr, "no input")
+		os.Exit(2)
+	}
+	p := strings.TrimRight(scanner.Text(), "\r\n")
+	if len(p) < 6 {
+		fmt.Fprintln(os.Stderr, "password must be at least 6 chars")
+		os.Exit(2)
+	}
+	h, err := bcrypt.GenerateFromPassword([]byte(p), bcrypt.DefaultCost)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "bcrypt: %v\n", err)
+		os.Exit(2)
+	}
+	fmt.Println(string(h))
+}

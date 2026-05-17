@@ -1,0 +1,83 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>用户 · router-billing</title>
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body class="admin">
+<div class="admin-shell">
+  {{template "admin-sidebar" .}}
+  <main class="admin-main">
+    <div class="admin-header">
+      <div>
+        <h1>用户</h1>
+        <div class="crumbs">手机号注册的账号 · 每用户的 MAC 数 · 停用/删除</div>
+      </div>
+      <form method="get" action="/admin/users" style="margin:0; display:flex; gap:6px;">
+        <input name="q" value="{{.Query}}" placeholder="按手机号搜索（包含匹配）"
+               style="padding:7px 10px; border:1px solid var(--border); border-radius:6px; font-size:13px; width:200px;">
+        <button class="btn outline small" type="submit" style="width:auto;">搜索</button>
+      </form>
+    </div>
+
+    {{template "flash" .}}
+
+    {{$rp := index .Query0 "reset_pwd"}}{{if $rp}}
+    <div class="flash ok" style="display:flex; gap:14px; align-items:center;">
+      <div>
+        用户 <strong>#{{index .Query0 "reset_uid"}}</strong> 的临时密码：
+        <code style="background:rgba(255,255,255,0.6); padding:3px 10px; border-radius:6px; font-size:15px;">{{$rp}}</code>
+      </div>
+      <span style="color:var(--text-soft); font-size:12px;">⚠ 只显示一次，请立即告知用户。该用户的旧 session 已全部失效。</span>
+    </div>
+    {{end}}
+
+    <section class="admin-card">
+      <div class="table-wrap">
+        <table class="data">
+          <thead><tr>
+            <th>ID</th><th>手机号</th><th>MAC 数</th><th>状态</th><th>注册时间</th><th>操作</th>
+          </tr></thead>
+          <tbody>
+            {{range .Users}}
+            <tr>
+              <td style="color:var(--text-soft);">#{{.ID}}</td>
+              <td class="mono">{{.Phone}}</td>
+              <td>{{index $.MacCount .ID}}</td>
+              <td>{{if .Suspended}}<span class="pill blocked">已停用</span>{{else}}<span class="pill active">正常</span>{{end}}</td>
+              <td style="color:var(--text-soft);">{{formatTime .CreatedAt}}</td>
+              <td class="row-actions">
+                <form method="post" action="/admin/users/suspend">
+                  {{template "csrf" $}}
+                  <input type="hidden" name="id" value="{{.ID}}">
+                  <input type="hidden" name="suspended" value="{{if .Suspended}}0{{else}}1{{end}}">
+                  <button class="btn outline tiny" type="submit">{{if .Suspended}}恢复{{else}}停用{{end}}</button>
+                </form>
+                <form method="post" action="/admin/users/reset-password"
+                      onsubmit="return confirm('重置 {{.Phone}} 的密码？\n旧密码立即失效，新临时密码会显示一次。')">
+                  {{template "csrf" $}}
+                  <input type="hidden" name="id" value="{{.ID}}">
+                  <button class="btn outline tiny" type="submit">重置密码</button>
+                </form>
+                <form method="post" action="/admin/users/delete" onsubmit="return confirm('删除用户 {{.Phone}}？该用户的 MAC 仍保留但 owner 被清空。')">
+                  {{template "csrf" $}}
+                  <input type="hidden" name="id" value="{{.ID}}">
+                  <button class="btn danger tiny" type="submit">删除</button>
+                </form>
+              </td>
+            </tr>
+            {{else}}
+            <tr><td colspan="6" class="empty-state">
+              {{if .Query}}没有匹配 <code>{{.Query}}</code> 的用户{{else}}暂无注册用户{{end}}
+            </td></tr>
+            {{end}}
+          </tbody>
+        </table>
+      </div>
+    </section>
+  </main>
+</div>
+</body>
+</html>

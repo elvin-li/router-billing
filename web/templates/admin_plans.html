@@ -1,0 +1,101 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>套餐管理 · router-billing</title>
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body class="admin">
+<div class="admin-shell">
+  {{template "admin-sidebar" .}}
+  <main class="admin-main">
+    <div class="admin-header">
+      <div>
+        <h1>套餐管理</h1>
+        <div class="crumbs">DB 覆盖 config.yaml · 改完立即生效，无需重启</div>
+      </div>
+    </div>
+
+    {{template "flash" .}}
+
+    <section class="admin-card">
+      <h2>新增 / 修改套餐</h2>
+      <p class="desc">key 是套餐的唯一标识（如 <code>month</code> / <code>year</code> / <code>vip</code>）。已存在的 key 会被更新。</p>
+      <form method="post" action="/admin/plans/save" class="form-grid">
+        {{template "csrf" .}}
+        <div class="field">
+          <label>key</label>
+          <input class="mono" name="key" required pattern="[a-z0-9_-]+" placeholder="如 month">
+        </div>
+        <div class="field">
+          <label>显示名</label>
+          <input name="label" required placeholder="如 1 个月">
+        </div>
+        <div class="field">
+          <label>天数</label>
+          <input name="days" type="number" min="1" max="3650" required value="30">
+        </div>
+        <div class="field">
+          <label>价格（分）</label>
+          <input name="price_cents" type="number" min="1" required value="100" placeholder="100 = ¥1">
+        </div>
+        <div class="field">
+          <label>排序（数字越小越靠前）</label>
+          <input name="sort_order" type="number" value="0">
+        </div>
+        <div class="field-actions">
+          <label style="display:flex;align-items:center;gap:6px;margin-right:8px;font-size:13px;">
+            <input type="checkbox" name="enabled" value="on" checked>启用
+          </label>
+          <button class="btn primary" type="submit">保存</button>
+        </div>
+      </form>
+    </section>
+
+    <section class="admin-card">
+      <h2>当前套餐</h2>
+      <p class="desc">绿色 = 启用。来源 = config 的套餐删除后会恢复 config 默认。</p>
+      <div class="table-wrap">
+        <table class="data">
+          <thead><tr>
+            <th>key</th><th>显示名</th><th>天数</th><th>价格</th><th>排序</th><th>状态</th><th>操作</th>
+          </tr></thead>
+          <tbody>
+            {{range .Plans}}
+            <tr>
+              <td class="mono">{{.Key}}</td>
+              <td>{{.Label}}</td>
+              <td>{{.Days}}</td>
+              <td><strong>¥{{formatYuan .PriceCents}}</strong></td>
+              <td>{{.SortOrder}}</td>
+              <td>{{if .Enabled}}<span class="pill active">启用</span>{{else}}<span class="pill expired">停用</span>{{end}}</td>
+              <td class="row-actions">
+                <form method="post" action="/admin/plans/save" style="display:inline-flex;gap:4px;">
+                  {{template "csrf" $}}
+                  <input type="hidden" name="key" value="{{.Key}}">
+                  <input type="hidden" name="label" value="{{.Label}}">
+                  <input type="hidden" name="days" value="{{.Days}}">
+                  <input type="hidden" name="price_cents" value="{{.PriceCents}}">
+                  <input type="hidden" name="sort_order" value="{{.SortOrder}}">
+                  {{if .Enabled}}<input type="hidden" name="enabled" value="off">{{else}}<input type="hidden" name="enabled" value="on">{{end}}
+                  <button class="btn outline tiny" type="submit">{{if .Enabled}}停用{{else}}启用{{end}}</button>
+                </form>
+                <form method="post" action="/admin/plans/delete" onsubmit="return confirm('删除套餐 {{.Key}}？config 中存在的会恢复默认值。')">
+                  {{template "csrf" $}}
+                  <input type="hidden" name="key" value="{{.Key}}">
+                  <button class="btn danger tiny" type="submit">删除</button>
+                </form>
+              </td>
+            </tr>
+            {{else}}
+            <tr><td colspan="7" class="empty-state">无套餐 — 用上方表单添加，或在 config.yaml 设置后重启</td></tr>
+            {{end}}
+          </tbody>
+        </table>
+      </div>
+    </section>
+  </main>
+</div>
+</body>
+</html>

@@ -1,0 +1,95 @@
+# router-billing 配置文件
+# 复制到 /etc/router-billing/config.yaml 并按需修改
+
+listen: ":8080"
+db_path: /var/lib/router-billing/billing.db
+web_root: /usr/share/router-billing/web
+
+# 收费侧的桥接口（由 uci-defaults 生成，开放和加密的两个收费 SSID 共用）
+paid_iface: br-paid
+
+# 强制门户域名/IP — 客户端访问任意 HTTP 都会被劫持到这里
+portal_host: 192.168.5.1
+portal_port: 8080
+
+# 管理员后台凭据。首次启动后请尽快修改。
+# 可只用 admin: 单个，或用 admins: 列表多账号
+admin:
+  username: admin
+  password: changeme
+
+# 多管理员可选；每个支持 password 或 password_hash（bcrypt）
+# 生成哈希：./router-billing --gen-password-hash
+# admins:
+#   - username: alice
+#     password_hash: "$2a$10$..."
+#   - username: bob
+#     password: plain-or-hashed-doesnt-matter
+
+# Prometheus /metrics 鉴权 token（留空 = 端点公开）
+# metrics_token: "long-random-string"
+
+# SSID 信息，仅给 /admin/ssid-cards 打印海报用，不影响实际网络
+# ssids:
+#   free: Free_WiFi
+#   paid: Paid_WiFi
+#   paid_secure: Paid_Secure_WiFi
+#   paid_secure_key: super-secret-2024
+
+# 计费套餐。price_cents 是人民币分。
+plans:
+  month:
+    label: "1 个月"
+    days: 30
+    price_cents: 100      # ¥1
+  year:
+    label: "1 年"
+    days: 365
+    price_cents: 1000     # ¥10
+
+# 微信支付（Native 扫码）
+# 需要：商户号、AppID、APIv3 密钥、证书序列号、商户私钥
+# 没有 HTTPS 公网域名也能用：不要配 notify_url（或留默认），系统会自动 fallback
+# 到主动查单（出站 HTTPS，不要求公网入站）。详见 README。
+pay:
+  wechat:
+    enabled: false
+    mch_id: ""
+    app_id: ""
+    api_v3_key: ""
+    serial_no: ""
+    private_key_path: /etc/router-billing/wx_apiclient_key.pem
+    # 有公网 HTTPS 时填，没有就保留默认占位
+    notify_url: "https://your.domain/notify/wx"
+
+  alipay:
+    enabled: false
+    app_id: ""
+    private_key_path: /etc/router-billing/alipay_app_key.pem
+    alipay_public_key_path: /etc/router-billing/alipay_public_key.pem
+    notify_url: "https://your.domain/notify/ali"
+    gateway: "https://openapi.alipay.com/gateway.do"
+
+# 防火墙后端
+firewall:
+  backend: nftables
+  table: inet
+  table_name: billing
+  set_name: mac_paid
+
+# 后台任务
+scheduler:
+  expire_check_interval: 1h
+
+# 自动备份（强烈建议在生产开启）
+# backup:
+#   enabled: true
+#   dir: /var/lib/router-billing/backups
+#   retain_days: 7
+#   interval: 24h
+
+# 出站 webhook（任何 payment/redeem/grant/revoke 都会 POST 到这个 URL）
+# 接收端可用 secret 做 HMAC-SHA256 验签：header X-Router-Billing-Signature: sha256=<hex>
+# webhook:
+#   url: "https://shopkeeper.example/router-billing/hook"
+#   secret: "a-long-random-shared-secret"

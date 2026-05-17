@@ -1,0 +1,92 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>SSID 二维码海报 · router-billing</title>
+  <link rel="stylesheet" href="/static/style.css">
+  <style>
+    .ssid-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+      gap: 18px;
+    }
+    .ssid-card {
+      background: #fff;
+      border: 1px solid var(--border);
+      border-radius: 14px;
+      padding: 22px 22px 18px;
+      text-align: center;
+      box-shadow: var(--shadow-sm);
+      break-inside: avoid;
+    }
+    .ssid-card h3 {
+      margin: 0 0 4px;
+      font-size: 17px;
+      font-weight: 700;
+    }
+    .ssid-card .ssid {
+      font-family: ui-monospace, monospace;
+      font-size: 14px;
+      color: var(--brand);
+      margin: 0 0 12px;
+      word-break: break-all;
+    }
+    .ssid-card .qr {
+      width: 180px; height: 180px;
+      margin: 6px auto 12px;
+      padding: 10px;
+      background: #fff;
+      border: 1px solid var(--border);
+      border-radius: 12px;
+    }
+    .ssid-card .qr img { width: 100%; height: 100%; display: block; }
+    .ssid-card .pw {
+      font-family: ui-monospace, monospace;
+      font-size: 16px;
+      background: var(--bg);
+      padding: 6px 10px;
+      border-radius: 6px;
+      margin: 0 0 8px;
+      display: inline-block;
+    }
+    .ssid-card .tip { color: var(--text-soft); font-size: 12px; margin: 0; }
+    @media print {
+      body, body.admin { background: #fff !important; }
+      .admin-side, .admin-header { display: none !important; }
+      .admin-main { padding: 0 !important; }
+      .admin-card { box-shadow: none !important; border: none !important; }
+      .ssid-card { page-break-inside: avoid; break-inside: avoid; }
+    }
+  </style>
+</head>
+<body class="admin">
+<div class="admin-shell">
+  {{template "admin-sidebar" .}}
+  <main class="admin-main">
+    <div class="admin-header">
+      <div>
+        <h1>SSID 二维码海报</h1>
+        <div class="crumbs">打印贴墙，让访客扫码即可连接 WiFi 或访问账号页</div>
+      </div>
+      <button onclick="window.print()" class="btn primary small" style="width:auto;">打印</button>
+    </div>
+
+    <section class="admin-card">
+      <p class="desc" style="margin:-8px 0 18px;">所有二维码使用 Wi-Fi 标准格式 <code>WIFI:T:WPA;S:...;P:...;;</code>，iOS / Android / HarmonyOS 相机都能识别。</p>
+      <div class="ssid-grid">
+        {{range .Cards}}
+        <div class="ssid-card">
+          <h3>{{.Title}}</h3>
+          <p class="ssid">{{.SSID}}</p>
+          <div class="qr"><img src="{{.QRPath}}" alt="QR" loading="lazy"></div>
+          {{if .HasPassword}}<p class="pw">{{.Password}}</p>{{end}}
+          <p class="tip">{{.Tip}}</p>
+        </div>
+        {{end}}
+      </div>
+    </section>
+  </main>
+</div>
+</body>
+</html>

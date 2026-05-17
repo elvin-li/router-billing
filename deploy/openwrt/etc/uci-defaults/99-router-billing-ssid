@@ -1,0 +1,153 @@
+#!/bin/sh
+# 第一次启动时建立 SSID：
+#   FREE_SSID         开放，跟 lan 同网段，免费直通
+#   PAID_SSID         开放，独立 paid 区域，受 MAC 白名单
+#   PAID_SECURE_SSID  WPA2，同样 paid 区域，受相同 MAC 白名单
+#                     PAID_SECURE_KEY 必须 ≥ 8 字符；空字符串则跳过创建。
+# 跑完后 OpenWrt 会自动删除本文件。
+
+set -e
+
+FREE_SSID="${FREE_SSID:-Free_WiFi}"
+FREE_KEY="${FREE_KEY:-}"
+
+PAID_SSID="${PAID_SSID:-Paid_WiFi}"
+PAID_KEY="${PAID_KEY:-}"
+
+PAID_SECURE_SSID="${PAID_SECURE_SSID:-Paid_Secure_WiFi}"
+PAID_SECURE_KEY="${PAID_SECURE_KEY:-}"
+
+PAID_SUBNET="${PAID_SUBNET:-192.168.5}"
+
+log() { echo "[router-billing/uci-defaults] $*"; }
+
+# ---- 1. 收费侧 network: br-paid + 192.168.5.1/24 ----
+if ! uci -q get network.paid >/dev/null; then
+    log "添加 network.paid (${PAID_SUBNET}.1/24)"
+    uci set  network.paid='interface'
+    uci set  network.paid.proto='static'
+    uci set  network.paid.device='br-paid'
+    uci set  network.paid.ipaddr="${PAID_SUBNET}.1"
+    uci set  network.paid.netmask='255.255.255.0'
+fi
+
+if ! uci -q show network | grep -q "name='br-paid'"; then
+    log "添加 device br-paid"
+    uci add  network device >/dev/null
+    uci set  network.@device[-1].type='bridge'
+    uci set  network.@device[-1].name='br-paid'
+fi
+
+# ---- 2. dhcp ----
+if ! uci -q get dhcp.paid >/dev/null; then
+    log "添加 dhcp.paid"
+    uci set  dhcp.paid='dhcp'
+    uci set  dhcp.paid.interface='paid'
+    uci set  dhcp.paid.start='100'
+    uci set  dhcp.paid.limit='150'
+    uci set  dhcp.paid.leasetime='2h'
+fi
+
+# ---- 3. 无线接口 ----
+WIFI_DEV=$(uci -q show wireless | sed -n "s/^wireless\.\([^.]*\)=wifi-device$/\1/p" | head -n1)
+if [ -z "$WIFI_DEV" ]; then
+    log "警告：没找到 wifi-device，跳过 SSID 配置（请先在 LuCI 启用无线）"
+else
+    uci set wireless.${WIFI_DEV}.disabled='0'
+
+    add_ssid() {
+        local name="$1" net="$2" key="$3" iface="$4"
+        if uci -q show wireless | grep -q "ssid='${name}'"; then
+            log "SSID ${name} 已存在，跳过"
+            return
+        fi
+        log "添加 SSID ${name} 到 ${WIFI_DEV} (network=${net})"
+        uci add wireless wifi-iface >/dev/null
+        uci set wireless.@wifi-iface[-1].device="${WIFI_DEV}"
+        uci set wireless.@wifi-iface[-1].network="${net}"
+        uci set wireless.@wifi-iface[-1].mode='ap'
+        uci set wireless.@wifi-iface[-1].ssid="${name}"
+        uci set wireless.@wifi-iface[-1].ifname="${iface}"
+        if [ -n "${key}" ]; then
+            if [ ${#key} -lt 8 ]; then
+                log "  ${name} 的密码 < 8 字符，跳过加密配置"
+                uci set wireless.@wifi-iface[-1].encryption='none'
+            else
+                uci set wireless.@wifi-iface[-1].encryption='psk2'
+                uci set wireless.@wifi-iface[-1].key="${key}"
+            fi
+        else
+            uci set wireless.@wifi-iface[-1].encryption='none'
+        fi
+        uci set wireless.@wifi-iface[-1].isolate='0'
+    }
+
+    add_ssid "${FREE_SSID}"        "lan"  "${FREE_KEY}"        "wl-free"
+    add_ssid "${PAID_SSID}"        "paid" "${PAID_KEY}"        "wl-paid"
+    if [ -n "${PAID_SECURE_KEY}" ] && [ ${#PAID_SECURE_KEY} -ge 8 ]; then
+        add_ssid "${PAID_SECURE_SSID}" "paid" "${PAID_SECURE_KEY}" "wl-paidsec"
+    else
+        log "未设置 PAID_SECURE_KEY (≥8 字符)，跳过加密收费 SSID"
+        log "  事后想加：export PAID_SECURE_KEY=xxxxxx && sh /usr/share/router-billing/setup-secure-ssid.sh"
+    fi
+fi
+
+# ---- 4. fw4 区域 paid + 转发 paid -> wan ----
+if ! uci -q show firewall | grep -q "name='paid'"; then
+    log "添加 firewall.zone paid"
+    uci add  firewall zone >/dev/null
+    uci set  firewall.@zone[-1].name='paid'
+    uci set  firewall.@zone[-1].input='ACCEPT'
+    uci set  firewall.@zone[-1].output='ACCEPT'
+    uci set  firewall.@zone[-1].forward='REJECT'
+    uci set  firewall.@zone[-1].masq='1'
+    uci add_list firewall.@zone[-1].network='paid'
+fi
+
+if ! uci -q show firewall | grep -q "name='paid-to-wan'"; then
+    log "添加 firewall.forwarding paid -> wan"
+    uci add  firewall forwarding >/dev/null
+    uci set  firewall.@forwarding[-1].name='paid-to-wan'
+    uci set  firewall.@forwarding[-1].src='paid'
+    uci set  firewall.@forwarding[-1].dest='wan'
+fi
+
+add_paid_rule() {
+    local name="$1" proto="$2" dport="$3" src_port="$4"
+    if uci -q show firewall | grep -q "name='${name}'"; then return; fi
+    log "添加 firewall.rule ${name}"
+    uci add  firewall rule >/dev/null
+    uci set  firewall.@rule[-1].name="${name}"
+    uci set  firewall.@rule[-1].src='paid'
+    uci set  firewall.@rule[-1].proto="${proto}"
+    [ -n "${src_port}" ] && uci set firewall.@rule[-1].src_port="${src_port}"
+    [ -n "${dport}"   ] && uci set firewall.@rule[-1].dest_port="${dport}"
+    uci set  firewall.@rule[-1].target='ACCEPT'
+}
+add_paid_rule "Allow-DHCP-paid"   "udp"    "67"  "68"
+add_paid_rule "Allow-DNS-paid"    "tcpudp" "53"  ""
+add_paid_rule "Allow-Portal-paid" "tcp"    "8080" ""
+
+# ---- 5. firewall include：fw4 重载时重新应用我们的 nftables 表 ----
+INCLUDE_PATH='/usr/share/router-billing/firewall-billing.sh'
+if ! uci -q show firewall | grep -q "path='${INCLUDE_PATH}'"; then
+    log "添加 firewall include -> ${INCLUDE_PATH}"
+    uci add  firewall include >/dev/null
+    uci set  firewall.@include[-1].path="${INCLUDE_PATH}"
+    uci set  firewall.@include[-1].type='script'
+    uci set  firewall.@include[-1].fw4_compatible='1'
+    uci set  firewall.@include[-1].reload='1'
+fi
+
+uci commit network
+uci commit wireless
+uci commit dhcp
+uci commit firewall
+
+log "重启网络栈..."
+/etc/init.d/network reload  >/dev/null 2>&1 || true
+/etc/init.d/firewall reload >/dev/null 2>&1 || true
+wifi reload                  >/dev/null 2>&1 || true
+
+log "完成。免费=${FREE_SSID}, 开放收费=${PAID_SSID}, 加密收费=${PAID_SECURE_SSID:-(未启用)}, 网段=${PAID_SUBNET}.1/24"
+exit 0

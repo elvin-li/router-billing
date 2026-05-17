@@ -1,0 +1,37 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>管理员登录 · router-billing</title>
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body class="admin">
+  <div class="login-shell">
+    <div class="login-card">
+      <div class="logo">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M5 12.55a11 11 0 0 1 14 0"/>
+          <path d="M1.42 9a16 16 0 0 1 21.16 0"/>
+          <path d="M8.53 16.11a6 6 0 0 1 6.95 0"/>
+          <line x1="12" y1="20" x2="12.01" y2="20"/>
+        </svg>
+      </div>
+      <h1>router-billing</h1>
+      <p class="sub">管理员登录</p>
+      {{if .Error}}<div class="flash err">{{.Error}}</div>{{end}}
+      <form method="post" action="/admin/login">
+        <div class="field">
+          <label>用户名</label>
+          <input name="username" autocomplete="username" required autofocus>
+        </div>
+        <div class="field">
+          <label>密码</label>
+          <input name="password" type="password" autocomplete="current-password" required>
+        </div>
+        <button class="btn primary" type="submit" style="margin-top:8px;">登录</button>
+      </form>
+    </div>
+  </div>
+</body>
+</html>

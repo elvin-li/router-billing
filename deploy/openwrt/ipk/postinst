@@ -1,0 +1,21 @@
+#!/bin/sh
+# opkg post-install hook — runs after files are placed.
+set -e
+
+# uci-defaults runs at next boot, but we trigger it now too so the SSID is
+# created immediately on a manual `opkg install`.
+if [ -x /etc/uci-defaults/99-router-billing-ssid ]; then
+    /etc/uci-defaults/99-router-billing-ssid && \
+        rm -f /etc/uci-defaults/99-router-billing-ssid || true
+fi
+
+# Apply nftables rules
+if [ -x /usr/share/router-billing/firewall-billing.sh ]; then
+    /usr/share/router-billing/firewall-billing.sh apply || true
+fi
+
+# Enable + start the service
+/etc/init.d/router-billing enable
+/etc/init.d/router-billing start
+
+exit 0

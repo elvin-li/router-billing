@@ -1,0 +1,80 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>审计日志 · router-billing</title>
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body class="admin">
+<div class="admin-shell">
+  {{template "admin-sidebar" .}}
+  <main class="admin-main">
+    <div class="admin-header">
+      <div>
+        <h1>审计日志</h1>
+        <div class="crumbs">最近 300 条 · 登录 / 付款 / 授权 / 替换 / 收回 · 可按字段筛选</div>
+      </div>
+      <a href="/admin/health" target="_blank" class="btn outline small" style="width:auto;">查看 /health JSON</a>
+    </div>
+
+    <section class="admin-card">
+      <form method="get" action="/admin/audit" class="form-grid">
+        <div class="field">
+          <label>动作者（模糊匹配）</label>
+          <input name="actor" value="{{.Filter.Actor}}" placeholder="如 user:138 / admin">
+        </div>
+        <div class="field">
+          <label>动作</label>
+          <select name="action">
+            <option value="">全部</option>
+            {{range .Actions}}
+            <option value="{{.}}" {{if eq . $.Filter.Action}}selected{{end}}>{{.}}</option>
+            {{end}}
+          </select>
+        </div>
+        <div class="field">
+          <label>目标（模糊匹配）</label>
+          <input name="target" value="{{.Filter.Target}}" placeholder="MAC / 订单号 / 用户ID">
+        </div>
+        <div class="field">
+          <label>起始日期</label>
+          <input name="since" type="date" value="{{.Filter.Since}}">
+        </div>
+        <div class="field">
+          <label>结束日期</label>
+          <input name="until" type="date" value="{{.Filter.Until}}">
+        </div>
+        <div class="field-actions">
+          <button class="btn primary" type="submit">筛选</button>
+          <a href="/admin/audit" class="btn ghost" style="width:auto;">重置</a>
+        </div>
+      </form>
+    </section>
+
+    <section class="admin-card">
+      <div class="table-wrap">
+        <table class="data">
+          <thead><tr>
+            <th>时间</th><th>动作者</th><th>动作</th><th>目标</th><th>详情</th>
+          </tr></thead>
+          <tbody>
+            {{range .Entries}}
+            <tr>
+              <td style="color:var(--text-soft); white-space:nowrap;">{{formatTime .At}}</td>
+              <td class="mono">{{.Actor}}</td>
+              <td><span class="pill {{if eq .Action "pay"}}paid{{else if eq .Action "login"}}active{{else if eq .Action "revoke"}}blocked{{else if eq .Action "login_failed"}}failed{{else if eq .Action "login_suspended"}}blocked{{else}}pending{{end}}">{{.Action}}</span></td>
+              <td class="mono">{{.Target}}</td>
+              <td style="color:var(--text-soft);">{{.Detail}}</td>
+            </tr>
+            {{else}}
+            <tr><td colspan="5" class="empty-state">没有符合条件的记录</td></tr>
+            {{end}}
+          </tbody>
+        </table>
+      </div>
+    </section>
+  </main>
+</div>
+</body>
+</html>

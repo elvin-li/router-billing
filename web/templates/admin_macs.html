@@ -1,0 +1,218 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>MAC 管理 · router-billing</title>
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body class="admin">
+<div class="admin-shell">
+  {{template "admin-sidebar" .}}
+  <main class="admin-main">
+    <div class="admin-header">
+      <div>
+        <h1>MAC 管理</h1>
+        <div class="crumbs">已授权设备 · 累加续费 · 手动添加 IoT</div>
+      </div>
+    </div>
+
+    {{template "flash" .}}
+
+    {{if .Attention.Total}}
+    <div class="attention">
+      <div class="attention-head">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>
+        <span>需要关注 <strong>{{.Attention.Total}}</strong> 项</span>
+      </div>
+      <div class="attention-grid">
+        {{if .Attention.ExpiringSoon}}<a class="attention-item" href="/admin/macs"><strong>{{.Attention.ExpiringSoon}}</strong> 个 MAC 7 天内到期</a>{{end}}
+        {{if .Attention.StalePending}}<a class="attention-item" href="/admin/orders"><strong>{{.Attention.StalePending}}</strong> 个订单超 10 分钟未支付</a>{{end}}
+        {{if .Attention.SuspendedUsers}}<a class="attention-item" href="/admin/users"><strong>{{.Attention.SuspendedUsers}}</strong> 个用户已停用</a>{{end}}
+        {{if .Attention.FailedToday}}<a class="attention-item" href="/admin/orders"><strong>{{.Attention.FailedToday}}</strong> 笔订单今日失败</a>{{end}}
+      </div>
+    </div>
+    {{end}}
+
+    <div class="stats-row">
+      <div class="stat">
+        <div class="stat-icon brand"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="2" y="3" width="20" height="14" rx="2"/><line x1="8" y1="21" x2="16" y2="21"/><line x1="12" y1="17" x2="12" y2="21"/></svg></div>
+        <div class="stat-text"><span class="stat-label">已授权 MAC</span><span class="stat-value">{{.Stats.Total}}</span><svg class="spark" data-metric="mac_total" width="100" height="22"></svg></div>
+      </div>
+      <div class="stat">
+        <div class="stat-icon success"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="22 4 12 14.01 9 11.01"/><path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/></svg></div>
+        <div class="stat-text"><span class="stat-label">当前活跃</span><span class="stat-value">{{.Stats.Active}}</span><svg class="spark" data-metric="mac_active" width="100" height="22"></svg></div>
+      </div>
+      <div class="stat">
+        <div class="stat-icon warning"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg></div>
+        <div class="stat-text"><span class="stat-label">已过期</span><span class="stat-value">{{.Stats.Expired}}</span></div>
+      </div>
+      <div class="stat">
+        <div class="stat-icon brand"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="12" y1="1" x2="12" y2="23"/><path d="M17 5H9.5a3.5 3.5 0 0 0 0 7h5a3.5 3.5 0 0 1 0 7H6"/></svg></div>
+        <div class="stat-text"><span class="stat-label">累计已付订单</span><span class="stat-value">¥{{formatYuan .Stats.RevenueCents}}</span><svg class="spark" data-metric="revenue_cents" width="100" height="22"></svg></div>
+      </div>
+    </div>
+
+    <script src="/static/sparkline.js" defer></script>
+    <script src="/static/stats-stream.js" defer></script>
+
+    {{if .PlanSales}}
+    <section class="admin-card">
+      <h2>30 天套餐销量</h2>
+      <p class="desc">仅统计已付订单。可看出哪个套餐最受欢迎。</p>
+      <div class="plan-sales">
+        {{$max := 0}}{{range .PlanSales}}{{if gt .TotalCents $max}}{{$max = .TotalCents}}{{end}}{{end}}
+        {{range .PlanSales}}
+        <div class="plan-sales-row">
+          <div class="ps-name"><code>{{.Plan}}</code></div>
+          <div class="ps-bar">
+            <div class="ps-fill" style="width: {{percent .TotalCents $max}}%;"></div>
+          </div>
+          <div class="ps-amt"><strong>¥{{formatYuan .TotalCents}}</strong> <span style="color:var(--text-soft);">· {{.OrdersCount}} 单</span></div>
+        </div>
+        {{end}}
+      </div>
+    </section>
+    {{end}}
+
+    <section class="admin-card">
+      <details>
+        <summary style="cursor:pointer; font-weight:600; color:var(--text-soft);">批量导入 / 导出 CSV</summary>
+        <form method="post" action="/admin/macs/import" style="margin-top:14px;">
+          {{template "csrf" .}}
+          <div class="form-grid">
+            <div class="field" style="grid-column: 1 / -1;">
+              <label>粘贴 MAC 列表（每行一个，格式 <code>mac[,天数[,备注]]</code>；空行/# 注释跳过）</label>
+              <textarea name="bulk" rows="6" style="font-family:ui-monospace,monospace; padding:9px 11px; border:1px solid var(--border); border-radius:8px; font-size:13px; width:100%;" placeholder="aa:bb:cc:dd:ee:ff,365,charger-01&#10;11:22:33:44:55:66,30&#10;# 注释行会被忽略"></textarea>
+            </div>
+            <div class="field">
+              <label>缺省天数</label>
+              <input name="default_days" type="number" min="1" value="365">
+            </div>
+            <div class="field-actions">
+              <button class="btn primary" type="submit">导入</button>
+              <a href="/admin/export/macs.csv" class="btn outline" style="width:auto;">导出全部 MAC</a>
+            </div>
+          </div>
+        </form>
+      </details>
+    </section>
+
+    <section class="admin-card">
+      <h2>添加 / 续费 MAC</h2>
+      <p class="desc">用于手动给充电桩、IoT 设备、打印机等无法访问门户页的设备授权。MAC 已存在时累加天数。</p>
+      <form method="post" action="/admin/macs/add" class="form-grid">
+        {{template "csrf" .}}
+        <div class="field">
+          <label>MAC 地址</label>
+          <input class="mono" name="mac" placeholder="AA:BB:CC:DD:EE:FF" maxlength="17" required>
+        </div>
+        <div class="field">
+          <label>套餐（预设）</label>
+          <select name="plan">
+            {{range .Plans}}<option value="{{.Key}}">{{.Label}} · {{.Days}}天</option>{{end}}
+            <option value="">自定义</option>
+          </select>
+        </div>
+        <div class="field">
+          <label>自定义天数（覆盖套餐）</label>
+          <input name="days" type="number" min="1" max="3650" placeholder="如 365 / 1825">
+        </div>
+        <div class="field">
+          <label>备注</label>
+          <input name="label" placeholder="如：充电桩-车库">
+        </div>
+        <div class="field-actions">
+          <button class="btn primary" type="submit">添加 / 续费</button>
+        </div>
+      </form>
+    </section>
+
+    <section class="admin-card">
+      <h2>已授权 MAC</h2>
+        <div class="table-wrap">
+        <table class="data">
+          <thead><tr>
+            <th style="width:32px;"><input type="checkbox" id="bulk-all" onclick="document.querySelectorAll('.bulk-pick').forEach(c=>c.checked=this.checked); refreshBulk();"></th>
+            <th>MAC</th><th>备注</th><th>状态</th><th>到期时间</th><th>剩余</th><th>操作</th>
+          </tr></thead>
+          <tbody>
+            {{range .MACs}}
+            <tr>
+              <td><input type="checkbox" value="{{.Mac}}" class="bulk-pick" onchange="refreshBulk()"></td>
+              <td class="mono">{{.Mac}}</td>
+              <td>{{if .Label}}{{.Label}}{{else}}<span style="color:#9ca3af;">—</span>{{end}}</td>
+              <td><span class="pill {{.Status}}">{{.Status}}</span></td>
+              <td>{{formatTime .ExpiresAt}}</td>
+              <td>{{daysLeft .ExpiresAt}}</td>
+              <td class="row-actions">
+                <form method="post" action="/admin/macs/extend">
+                  {{template "csrf" $}}
+                  <input type="hidden" name="mac" value="{{.Mac}}">
+                  <input type="number" name="days" min="1" placeholder="+天" title="续费天数">
+                  <button class="btn outline tiny" type="submit">续费</button>
+                </form>
+                <a href="/admin/macs/schedule?mac={{.Mac}}" class="btn ghost tiny" style="width:auto;" title="设置时段限制">时段</a>
+                <form method="post" action="/admin/macs/delete" onsubmit="return confirm('删除 {{.Mac}}?')">
+                  {{template "csrf" $}}
+                  <input type="hidden" name="mac" value="{{.Mac}}">
+                  <button class="btn danger tiny" type="submit">删除</button>
+                </form>
+              </td>
+            </tr>
+            {{else}}
+            <tr><td colspan="7" class="empty-state">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><rect x="2" y="3" width="20" height="14" rx="2"/><line x1="8" y1="21" x2="16" y2="21"/><line x1="12" y1="17" x2="12" y2="21"/></svg>
+              暂无授权 MAC。可在上方添加，或前往「在线设备」一键授权。
+            </td></tr>
+            {{end}}
+          </tbody>
+        </table>
+        </div>
+
+        <div class="bulk-bar" style="display:none;" id="bulk-bar">
+          <span id="bulk-count">0</span> 个 MAC 选中
+          <input type="number" id="bulk-days" min="1" placeholder="续费天数" style="width:100px; padding:6px 8px; border:1px solid var(--border); border-radius:6px;">
+          <button class="btn primary tiny" type="button" onclick="submitBulk('extend')" style="width:auto;">批量续费</button>
+          <button class="btn danger tiny" type="button" onclick="submitBulk('delete')" style="width:auto;">批量删除</button>
+        </div>
+      <script>
+        function refreshBulk() {
+          const bar = document.getElementById('bulk-bar');
+          const cnt = document.getElementById('bulk-count');
+          const n = document.querySelectorAll('.bulk-pick:checked').length;
+          cnt.textContent = n;
+          bar.style.display = n > 0 ? 'flex' : 'none';
+        }
+        function submitBulk(action) {
+          const picked = Array.from(document.querySelectorAll('.bulk-pick:checked'));
+          if (picked.length === 0) { alert('请先勾选 MAC'); return; }
+          if (action === 'extend') {
+            const d = parseInt(document.getElementById('bulk-days').value, 10);
+            if (!d || d < 1) { alert('请填入续费天数'); return; }
+          }
+          if (!confirm(`对 ${picked.length} 个 MAC 执行「${action === 'delete' ? '删除' : '续费'}」？`)) return;
+          // Build + submit a transient form (no HTML5 nesting issues).
+          const csrf = document.cookie.match(/(?:^|; )rb_csrf=([^;]+)/);
+          const form = document.createElement('form');
+          form.method = 'POST';
+          form.action = '/admin/macs/bulk';
+          form.style.display = 'none';
+          const add = (n, v) => {
+            const i = document.createElement('input');
+            i.name = n; i.value = v;
+            form.appendChild(i);
+          };
+          add('_csrf', csrf ? decodeURIComponent(csrf[1]) : '');
+          add('action', action);
+          if (action === 'extend') add('days', document.getElementById('bulk-days').value);
+          for (const p of picked) add('mac', p.value);
+          document.body.appendChild(form);
+          form.submit();
+        }
+      </script>
+    </section>
+  </main>
+</div>
+</body>
+</html>

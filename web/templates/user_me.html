@@ -1,0 +1,147 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+  <title>我的账号 · router-billing</title>
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body class="portal">
+  <header class="portal-hero" style="max-width:680px;">
+    <div class="logo">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+        <path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/>
+      </svg>
+    </div>
+    <div style="flex:1;">
+      <h1>我的账号</h1>
+      <p class="sub">{{.User.Phone}}</p>
+    </div>
+    <a href="/user/logout" class="btn outline small" style="width:auto;">登出</a>
+  </header>
+
+  {{if eq .OK "registered"}}<div class="flash ok" style="max-width:680px; width:100%; margin-top:12px;">注册成功 ✓</div>{{end}}
+  {{if eq .OK "claimed"}}<div class="flash ok" style="max-width:680px; width:100%; margin-top:12px;">本设备已绑定到你的账号 ✓</div>{{end}}
+  {{if eq .OK "replaced"}}<div class="flash ok" style="max-width:680px; width:100%; margin-top:12px;">替换成功 ✓</div>{{end}}
+  {{if eq .OK "password"}}<div class="flash ok" style="max-width:680px; width:100%; margin-top:12px;">密码已修改 ✓</div>{{end}}
+  {{if eq .OK "label"}}<div class="flash ok" style="max-width:680px; width:100%; margin-top:12px;">备注已保存 ✓</div>{{end}}
+  {{if .Err}}<div class="flash err" style="max-width:680px; width:100%; margin-top:12px;">{{.Err}}</div>{{end}}
+
+  <main class="card" style="max-width:680px;">
+    <span class="section-label">本设备</span>
+    {{if .DeviceMAC}}
+      <div class="mac-chip">
+        <div class="badge">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="2" y="3" width="20" height="14" rx="2"/><line x1="8" y1="21" x2="16" y2="21"/><line x1="12" y1="17" x2="12" y2="21"/></svg>
+        </div>
+        <div class="text">
+          <span class="lbl">检测到 MAC</span>
+          <span class="val">{{.DeviceMAC}}</span>
+        </div>
+        {{if not .DeviceKnown}}
+        <form method="post" action="/user/macs/claim" style="margin-left:auto;">
+          {{template "csrf" .}}
+          <button class="btn primary small" type="submit" style="width:auto;">绑定到我</button>
+        </form>
+        {{else}}
+          <span class="pill active" style="margin-left:auto;">已是你的设备</span>
+        {{end}}
+      </div>
+    {{else}}
+      <div class="mac-manual">
+        <p>未能识别本设备 MAC。请确保你正在用要管理的设备访问本页。</p>
+      </div>
+    {{end}}
+  </main>
+
+  <main class="card" style="max-width:680px;">
+    <span class="section-label">我的设备 ({{len .MACs}})</span>
+    {{if .MACs}}
+    <div class="table-wrap">
+      <table class="data">
+        <thead><tr>
+          <th>MAC</th><th>备注</th><th>状态</th><th>到期</th><th>剩余</th><th>操作</th>
+        </tr></thead>
+        <tbody>
+          {{range .MACs}}
+          <tr>
+            <td class="mono">{{.Mac}}</td>
+            <td>
+              <form method="post" action="/user/macs/label" style="display:flex; gap:4px; align-items:center;">
+                {{template "csrf" $}}
+                <input type="hidden" name="mac" value="{{.Mac}}">
+                <input name="label" value="{{.Label}}" placeholder="备注" maxlength="60" style="padding:4px 8px; border:1px solid var(--border); border-radius:6px; font-size:13px; width:140px;">
+                <button class="btn outline tiny" type="submit" title="保存备注">✓</button>
+              </form>
+            </td>
+            <td><span class="pill {{.Status}}">{{.Status}}</span></td>
+            <td>{{formatTime .ExpiresAt}}</td>
+            <td>{{daysLeft .ExpiresAt}}</td>
+            <td class="row-actions">
+              {{if and (eq (printf "%s" .Status) "active") ($.DeviceMAC) (ne .Mac $.DeviceMAC)}}
+              <form method="post" action="/user/macs/replace" onsubmit="return confirm('把 {{.Mac}} 的剩余时长转给本设备 {{$.DeviceMAC}}？')">
+                {{template "csrf" $}}
+                <input type="hidden" name="old_mac" value="{{.Mac}}">
+                <button class="btn outline tiny" type="submit">转给本设备</button>
+              </form>
+              {{end}}
+              <a href="/portal?mac={{.Mac}}" class="btn primary tiny" style="width:auto;">续费</a>
+            </td>
+          </tr>
+          {{end}}
+        </tbody>
+      </table>
+    </div>
+    {{else}}
+      <div class="empty-state">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" style="width:32px;height:32px;display:block;margin:0 auto 6px;opacity:.5;"><rect x="2" y="3" width="20" height="14" rx="2"/><line x1="8" y1="21" x2="16" y2="21"/></svg>
+        还没有任何设备。<br>
+        <a href="/portal" style="color:var(--brand);">购买上网时长 →</a>
+      </div>
+    {{end}}
+  </main>
+
+  {{if .Orders}}
+  <main class="card" style="max-width:680px;">
+    <span class="section-label">最近订单</span>
+    <div class="table-wrap">
+      <table class="data">
+        <thead><tr><th>订单号</th><th>MAC</th><th>金额</th><th>状态</th><th>时间</th><th></th></tr></thead>
+        <tbody>
+          {{range .Orders}}
+          <tr>
+            <td class="mono" style="font-size:12px;">{{shortMAC .OrderNo}}</td>
+            <td class="mono">{{.Mac}}</td>
+            <td>¥{{formatYuan .AmountCents}}</td>
+            <td><span class="pill {{.Status}}">{{.Status}}</span></td>
+            <td style="color:var(--text-soft);">{{formatTime .CreatedAt}}</td>
+            <td>{{if eq (printf "%s" .Status) "paid"}}<a href="/receipt?order_no={{.OrderNo}}" target="_blank" class="btn outline tiny" style="width:auto;">收据</a>{{end}}</td>
+          </tr>
+          {{end}}
+        </tbody>
+      </table>
+    </div>
+  </main>
+  {{end}}
+
+  <main class="card" style="max-width:680px;">
+    <span class="section-label">修改密码</span>
+    <form method="post" action="/user/password" class="form-grid">
+      {{template "csrf" .}}
+      <div class="field">
+        <label>当前密码</label>
+        <input name="old_password" type="password" required>
+      </div>
+      <div class="field">
+        <label>新密码</label>
+        <input name="new_password" type="password" minlength="6" maxlength="72" required>
+      </div>
+      <div class="field-actions">
+        <button class="btn primary" type="submit">更新</button>
+      </div>
+    </form>
+  </main>
+
+  <p class="portal-footer">router-billing v{{.Version}}</p>
+</body>
+</html>
