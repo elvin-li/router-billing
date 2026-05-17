@@ -137,6 +137,7 @@ func (a *App) Routes() http.Handler {
 		http.Redirect(w, r, "/admin/macs", http.StatusSeeOther)
 	}))
 	mux.HandleFunc("/admin/login", a.handleAdminLogin)
+	mux.HandleFunc("/admin/login/2fa", a.handleAdminLogin2FA)
 	mux.HandleFunc("/admin/logout", a.handleAdminLogout)
 	mux.HandleFunc("/admin/macs", a.requireAdmin(a.handleAdminMACs))
 	mux.HandleFunc("/admin/macs/add", a.requireAdmin(a.handleAdminMACAdd))

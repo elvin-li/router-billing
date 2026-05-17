@@ -18,6 +18,7 @@ import (
 )
 
 const adminCookieName = "rb_admin"
+const adminPendingCookie = "rb_admin_pending"
 const adminSessionTTL = 12 * time.Hour
 
 // deviceView is one row in the /admin/devices table.
@@ -61,13 +62,46 @@ func (a *App) handleAdminLogin(w http.ResponseWriter, r *http.Request) {
 		a.render(w, "admin_login.html", map[string]any{"Error": "尝试过于频繁，请稍候再试"})
 		return
 	}
-	if !a.Cfg.AuthenticateAdmin(u, p) {
+	admin, ok := a.Cfg.AuthenticateAdminFull(u, p)
+	if !ok {
 		a.DB.Audit(r.Context(), "admin-attempt:"+u, "login_failed", "", clientIP(r))
 		a.render(w, "admin_login.html", map[string]any{"Error": "用户名或密码错误"})
 		return
 	}
+
+	// If this admin has a TOTP secret configured, gate the real session
+	// behind a second-factor prompt. Stash a short-lived (5 min) pending
+	// session keyed by a separate cookie so the requireAdmin middleware
+	// can't be tricked into accepting half-authed traffic.
+	if admin.TOTPSecret != "" {
+		ptok := randomToken(32)
+		if err := a.DB.CreateSession(r.Context(), ptok, "pending_2fa", u, nil, 5*time.Minute); err != nil {
+			log.Printf("create pending session: %v", err)
+			http.Error(w, "internal", http.StatusInternalServerError)
+			return
+		}
+		http.SetCookie(w, &http.Cookie{
+			Name:     adminPendingCookie,
+			Value:    ptok,
+			Path:     "/admin",
+			HttpOnly: true,
+			Secure:   isHTTPS(r),
+			SameSite: http.SameSiteLaxMode,
+			MaxAge:   300,
+		})
+		http.Redirect(w, r, "/admin/login/2fa", http.StatusSeeOther)
+		return
+	}
+
+	a.issueAdminSession(w, r, u)
+}
+
+// issueAdminSession creates the real admin session row + cookie and bounces
+// the browser to the dashboard. Used both from the pure-password path and
+// from the 2FA-verified path.
+func (a *App) issueAdminSession(w http.ResponseWriter, r *http.Request, username string) {
 	token := randomToken(32)
-	if err := a.DB.CreateSession(r.Context(), token, "admin", u, nil, adminSessionTTL); err != nil {
+	if err := a.DB.CreateSession(r.Context(), token, "admin", username, nil, adminSessionTTL); err != nil {
 		log.Printf("create session: %v", err)
 		http.Error(w, "internal", http.StatusInternalServerError)
 		return
@@ -80,6 +114,10 @@ func (a *App) handleAdminLogin(w http.ResponseWriter, r *http.Request) {
 		Secure:   isHTTPS(r),
 		SameSite: http.SameSiteLaxMode,
 		MaxAge:   int(adminSessionTTL.Seconds()),
+	})
+	// Wipe any leftover pending cookie from the same browser.
+	http.SetCookie(w, &http.Cookie{
+		Name: adminPendingCookie, Value: "", Path: "/admin", MaxAge: -1, HttpOnly: true,
 	})
 	http.Redirect(w, r, "/admin/macs", http.StatusSeeOther)
 }

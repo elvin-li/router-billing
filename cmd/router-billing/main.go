@@ -34,6 +34,7 @@ func main() {
 	showVersion := flag.Bool("version", false, "print version and exit")
 	checkConfig := flag.Bool("check-config", false, "validate the config file and exit")
 	genHash := flag.Bool("gen-password-hash", false, "read a password from stdin and print its bcrypt hash; ideal for admins[].password_hash")
+	genTOTP := flag.String("gen-totp-secret", "", "generate a fresh TOTP secret for the given admin username; prints base32 + otpauth URL + ASCII QR")
 	logJSON := flag.Bool("log-json", false, "emit each log line as a JSON object (for ingestion into ELK/Loki/etc.)")
 	flag.Parse()
 
@@ -49,6 +50,10 @@ func main() {
 	}
 	if *genHash {
 		runGenHash()
+		return
+	}
+	if *genTOTP != "" {
+		runGenTOTP(*genTOTP)
 		return
 	}
 	if *checkConfig {

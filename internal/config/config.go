@@ -33,10 +33,15 @@ type Config struct {
 
 // Admin is either {username,password} or {username,password_hash}.
 // password_hash is a bcrypt hash (`htpasswd -nB` or our --gen-password-hash CLI).
+//
+// totp_secret (optional) — base32-encoded RFC 6238 secret. When set, this
+// admin's login asks for a 6-digit code in addition to the password.
+// Generate with `--gen-totp-secret`.
 type Admin struct {
 	Username     string `yaml:"username"`
 	Password     string `yaml:"password"`
 	PasswordHash string `yaml:"password_hash"`
+	TOTPSecret   string `yaml:"totp_secret"`
 }
 
 // SSIDInfo holds the names + secure-SSID password so admins can render printable
@@ -280,8 +285,16 @@ func (c *Config) AdminList() []Admin {
 // AuthenticateAdmin returns true if username+password match any admin.
 // Walks the full list to avoid timing leaks of which admin exists.
 func (c *Config) AuthenticateAdmin(username, password string) bool {
-	matched := false
-	for _, a := range c.AdminList() {
+	_, ok := c.AuthenticateAdminFull(username, password)
+	return ok
+}
+
+// AuthenticateAdminFull returns the matched Admin (or nil) plus an ok flag.
+// Lets the caller decide whether to demand a TOTP second factor.
+// Walks the full list to avoid timing leaks of which admin exists.
+func (c *Config) AuthenticateAdminFull(username, password string) (*Admin, bool) {
+	var match *Admin
+	for i, a := range c.AdminList() {
 		userOK := subtle.ConstantTimeCompare([]byte(username), []byte(a.Username)) == 1
 		var passOK bool
 		if a.PasswordHash != "" {
@@ -290,8 +303,22 @@ func (c *Config) AuthenticateAdmin(username, password string) bool {
 			passOK = subtle.ConstantTimeCompare([]byte(password), []byte(a.Password)) == 1
 		}
 		if userOK && passOK {
-			matched = true
+			// Pin to the slice element so the returned pointer survives loop exit.
+			list := c.AdminList()
+			match = &list[i]
 		}
 	}
-	return matched
+	return match, match != nil
+}
+
+// LookupAdmin returns the admin with the given username, or nil.
+// Useful for checking TOTPSecret after the password stage.
+func (c *Config) LookupAdmin(username string) *Admin {
+	for i, a := range c.AdminList() {
+		if subtle.ConstantTimeCompare([]byte(username), []byte(a.Username)) == 1 {
+			list := c.AdminList()
+			return &list[i]
+		}
+	}
+	return nil
 }

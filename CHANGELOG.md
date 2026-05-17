@@ -1,5 +1,46 @@
 # Changelog
 
+
+## v0.11 — Admin 2FA (TOTP)
+
+Per-admin RFC 6238 TOTP. When an admin has `totp_secret` set, login becomes
+two-stage: password + 6-digit code. Compatible with Google Authenticator,
+Authy, 1Password, Bitwarden — every popular authenticator.
+
+### What landed
+- `internal/totp` — RFC 6238 implementation (~120 LoC). Passes all 6 RFC
+  Appendix B test vectors. Rolled in-tree to avoid pulling another module.
+- `config.Admin.TOTPSecret` (optional) — base32 secret per admin
+- `--gen-totp-secret <username>` CLI — prints secret + `otpauth://` URL +
+  ASCII QR (half-block-encoded so it's roughly square in a terminal cell)
+- Two-stage login:
+  - POST /admin/login → password verified → if secret set, write a 5-min
+    `pending_2fa` session row + `rb_admin_pending` cookie → 303 to /admin/login/2fa
+  - The pending stage is a SEPARATE cookie + DB kind so `requireAdmin` can't
+    be tricked into accepting half-authed traffic
+  - POST /admin/login/2fa → verify TOTP (±1 step skew) → DELETE pending →
+    create real admin session
+- Brute-force protection: 5 wrong codes per pending session → pending row
+  killed; admin restarts login. (6-digit space is small enough that this
+  matters — 5 attempts/5min budget makes online guessing impractical.)
+- `admin_2fa.html` template: autofocus, one-time-code autocomplete,
+  paste-friendly (digits-only filter on the input)
+- Constant-time verification (`subtle.ConstantTimeCompare`)
+- Recovery: documented in the 2FA form footer — SSH in, remove
+  `totp_secret` line from config.yaml, restart
+
+### Tests (+11)
+- `internal/totp` (7): RFC 6238 vectors, ±1 step skew tolerance, malformed
+  secret/code rejection, base32 round-trip + spaces/dashes/lowercase variants,
+  provisioning URI shape
+- `internal/server` (4):
+  - Full flow: password → pending → wrong code rejected → right code → real session
+  - Wrong code returns inline error, no session cookie
+  - 5 wrong codes locks the pending session
+  - No `totp_secret` → old single-stage flow still works
+
+---
+
 ## v0.10.2 — 安全审计：6 项发现，5 项已修
 
 针对内部代码的系统性安全 review，发现 6 项问题，全部修复（1 项 LOW 一起做）。

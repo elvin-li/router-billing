@@ -20,6 +20,7 @@ import (
 	"router-billing/internal/db"
 	"router-billing/internal/firewall"
 	"router-billing/internal/service"
+	"router-billing/internal/totp"
 )
 
 // webRoot finds the project's web/ directory regardless of where `go test`
@@ -641,6 +642,121 @@ func TestAdminLoginRateLimitByUsername(t *testing.T) {
 	h.ServeHTTP(rr, req)
 	if !strings.Contains(rr.Body.String(), "尝试过于频繁") {
 		t.Errorf("4th attempt should be rate-limited by username; body=%s", rr.Body.String())
+	}
+}
+
+func TestAdminLogin2FAFullFlow(t *testing.T) {
+	app := setupTestApp(t)
+	const secret = "JBSWY3DPEHPK3PXP" // RFC 4648 example
+	app.Cfg.Admin.TOTPSecret = secret
+	h := app.Routes()
+
+	// Step 1: password POST → 303 to /admin/login/2fa, sets pending cookie.
+	res, _ := do(t, h, "POST", "/admin/login",
+		url.Values{"username": {"admin"}, "password": {"admin-pw"}}, nil)
+	if res.StatusCode != 303 || !strings.Contains(res.Header.Get("Location"), "/admin/login/2fa") {
+		t.Fatalf("pw stage: status=%d loc=%s", res.StatusCode, res.Header.Get("Location"))
+	}
+	jar := cookieJar(res)
+	if jar[adminPendingCookie] == "" {
+		t.Fatal("no rb_admin_pending cookie set")
+	}
+	if jar[adminCookieName] != "" {
+		t.Fatal("real admin cookie should NOT be set yet")
+	}
+
+	// Step 2: pending session shouldn't grant /admin/macs access.
+	res, _ = do(t, h, "GET", "/admin/macs", nil, jar)
+	if res.StatusCode != 303 {
+		t.Errorf("pending session shouldn't grant admin access; got %d", res.StatusCode)
+	}
+
+	// Step 3: submit a correct TOTP code → real admin session.
+	code, err := totp.Code(secret, time.Now().Unix())
+	if err != nil {
+		t.Fatal(err)
+	}
+	res, _ = do(t, h, "POST", "/admin/login/2fa", url.Values{"code": {code}}, jar)
+	if res.StatusCode != 303 || !strings.Contains(res.Header.Get("Location"), "/admin/macs") {
+		t.Fatalf("2fa stage: status=%d loc=%s", res.StatusCode, res.Header.Get("Location"))
+	}
+	jar2 := cookieJar(res)
+	if jar2[adminCookieName] == "" {
+		t.Error("real admin cookie should be set after successful 2FA")
+	}
+
+	// Step 4: merged cookies open /admin/macs.
+	merged := map[string]string{}
+	for k, v := range jar {
+		merged[k] = v
+	}
+	for k, v := range jar2 {
+		merged[k] = v
+	}
+	res, _ = do(t, h, "GET", "/admin/macs", nil, merged)
+	if res.StatusCode != 200 {
+		t.Errorf("authed /admin/macs: %d", res.StatusCode)
+	}
+}
+
+func TestAdminLogin2FAWrongCodeRejected(t *testing.T) {
+	app := setupTestApp(t)
+	app.Cfg.Admin.TOTPSecret = "JBSWY3DPEHPK3PXP"
+	h := app.Routes()
+
+	res, _ := do(t, h, "POST", "/admin/login",
+		url.Values{"username": {"admin"}, "password": {"admin-pw"}}, nil)
+	jar := cookieJar(res)
+
+	res, body := do(t, h, "POST", "/admin/login/2fa", url.Values{"code": {"000000"}}, jar)
+	if res.StatusCode != 200 {
+		t.Fatalf("wrong code: status=%d", res.StatusCode)
+	}
+	if !strings.Contains(body, "验证码错误") {
+		t.Error("body should show '验证码错误'")
+	}
+	if cookieJar(res)[adminCookieName] != "" {
+		t.Error("real admin cookie must NOT be set after a wrong code")
+	}
+}
+
+func TestAdminLogin2FALocksAfterFiveAttempts(t *testing.T) {
+	app := setupTestApp(t)
+	app.Cfg.Admin.TOTPSecret = "JBSWY3DPEHPK3PXP"
+	h := app.Routes()
+
+	res, _ := do(t, h, "POST", "/admin/login",
+		url.Values{"username": {"admin"}, "password": {"admin-pw"}}, nil)
+	jar := cookieJar(res)
+
+	// 5 wrong attempts → still inline error (status 200).
+	for i := 0; i < 5; i++ {
+		res, _ = do(t, h, "POST", "/admin/login/2fa", url.Values{"code": {"000000"}}, jar)
+		if res.StatusCode != 200 {
+			t.Errorf("attempt %d: status=%d (want 200 inline)", i, res.StatusCode)
+		}
+	}
+	// 6th: pending session killed; redirect to /admin/login.
+	res, _ = do(t, h, "POST", "/admin/login/2fa", url.Values{"code": {"000000"}}, jar)
+	if res.StatusCode != 303 {
+		t.Fatalf("6th attempt: status=%d", res.StatusCode)
+	}
+	if !strings.Contains(res.Header.Get("Location"), "2fa_locked") {
+		t.Errorf("expected 2fa_locked redirect; got %s", res.Header.Get("Location"))
+	}
+}
+
+func TestAdminLogin2FANoSecretMeansOldFlow(t *testing.T) {
+	app := setupTestApp(t) // no TOTPSecret set
+	h := app.Routes()
+	res, _ := do(t, h, "POST", "/admin/login",
+		url.Values{"username": {"admin"}, "password": {"admin-pw"}}, nil)
+	if res.StatusCode != 303 || !strings.Contains(res.Header.Get("Location"), "/admin/macs") {
+		t.Errorf("no-totp path should redirect to /admin/macs; got status=%d loc=%s",
+			res.StatusCode, res.Header.Get("Location"))
+	}
+	if cookieJar(res)[adminCookieName] == "" {
+		t.Error("real admin cookie should be set immediately")
 	}
 }
 
