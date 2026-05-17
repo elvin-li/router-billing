@@ -1,5 +1,86 @@
 # Changelog
 
+## v0.12 — iptables 后端 + Aliyun SMS
+
+Two infrastructure additions that don't change any user-facing flow but
+broaden where router-billing can run + what it can do.
+
+### iptables/ipset firewall backend (老 OpenWrt 兼容)
+
+OpenWrt 21.02 and earlier ship `iptables` instead of `fw4`/`nftables`,
+and so do plenty of non-OpenWrt distributions. We now have two complete
+implementations of `firewall.API`:
+
+- `nftables` (default, OpenWrt 22.03+) — existing impl, unchanged.
+- `iptables` (new) — wraps `ipset` (`hash:mac` set with `counters` flag)
+  and assumes the install-script wrote `iptables -m set --match-set
+  mac_paid src ...` rules under `/etc/firewall.user`.
+
+Switch with one config line:
+
+```yaml
+firewall:
+  backend: iptables    # or nftables (default)
+```
+
+- `firewall.NewBackend(...)` factory accepts both names (with case +
+  whitespace tolerance).
+- `Sync` uses `ipset restore` — single kernel transaction, reads stay
+  valid throughout. Same atomic semantics as nft flush+populate.
+- Tolerates older ipset (pre-6.34) that returns non-zero on `-exist`
+  even for benign duplicate-add/missing-del.
+- Walled garden is nftables-only for now (needs `daddr` matching that
+  our ipset backend doesn't manage); main.go type-asserts and logs
+  a clear skip when both are configured.
+
+**Tests**: 9 new in `internal/firewall` — parsers (typical / empty /
+no-Members), per-MAC counter extraction, parseUint edge cases,
+dry-run smoke for all 5 Manager methods, factory accepts 8 valid
+names + rejects unknown.
+
+### Aliyun SMS adapter (`sms.Aliyun`)
+
+Concrete `sms.Provider` for [Aliyun SMS](https://help.aliyun.com/document_detail/101414.html).
+The 公控-friendly path:
+
+```yaml
+sms:
+  provider: aliyun
+  aliyun:
+    access_key_id: "..."
+    access_key_secret: "..."
+    sign_name: "MyApp"
+    template_code: "SMS_1234"
+```
+
+- Implements the V1 canonical-form-params HMAC-SHA1 signing with the
+  three RFC-3986 tweaks Aliyun mandates (`%20` not `+`, `%2A`, raw `~`).
+- `Send(ctx, phone, message)` — if `message` is JSON it's passed through
+  as `TemplateParam`; otherwise wrapped as `{"code": message}` for the
+  common single-variable template case.
+- Injectable `nowFn` / `nonceFn` for deterministic test signing.
+- Upstream error codes (e.g. `isv.SMS_TEMPLATE_ILLEGAL`) surfaced
+  verbatim to the caller.
+
+Not yet wired into `/admin/users/reset-password`; that's v0.13. The
+infrastructure is ready, the password-reset handler just needs to
+flip from "show temp password once" to "POST SMS code" when a
+provider is configured.
+
+**Tests**: 7 new in `internal/sms`:
+- Deterministic signature pin (regression-detector for sign drift)
+- `aliyunEscape` spec compliance (5 cases)
+- End-to-end against `httptest.NewServer`
+- JSON-shaped messages pass through unchanged
+- Upstream API failure → wrapped error
+- Defaults + name + `looksLikeJSON` helper
+
+### Stats
+- 17 packages tested (was 16)
+- 155 test functions (was 130)
+- Tags so far: v0.10.1, v0.10.2, v0.11, v0.12
+
+---
 
 ## v0.11 — Admin 2FA (TOTP)
 
