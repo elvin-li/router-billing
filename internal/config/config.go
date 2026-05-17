@@ -20,6 +20,7 @@ type Config struct {
 	PortalPort   int             `yaml:"portal_port"`
 	Admin        Admin           `yaml:"admin"`         // legacy single-admin
 	Admins       []Admin         `yaml:"admins"`        // multi-admin list
+	APITokens    []APIToken      `yaml:"api_tokens"`    // Bearer tokens for /api/admin/*
 	MetricsToken string          `yaml:"metrics_token"` // optional bearer for /metrics
 	SSIDs        SSIDInfo        `yaml:"ssids"`         // displayed on /admin/ssid-cards
 	Plans        map[string]Plan `yaml:"plans"`
@@ -46,6 +47,15 @@ type Admin struct {
 
 // SSIDInfo holds the names + secure-SSID password so admins can render printable
 // join-WiFi QR cards. Optional — purely informational.
+// APIToken is a Bearer token that grants programmatic admin access. Set
+// `Token` to a long random string (generate with `--gen-api-token`) and
+// `Label` to whatever describes the consumer (e.g. "monitoring-script").
+// The token compares constant-time; rotating = remove + add a new line.
+type APIToken struct {
+	Token string `yaml:"token"`
+	Label string `yaml:"label"`
+}
+
 // SSIDInfo names + PSK keys for the printable SSID-cards page.
 //
 // As of v0.9 the "Free" SSID is intended for trusted friends + the
@@ -321,4 +331,26 @@ func (c *Config) LookupAdmin(username string) *Admin {
 		}
 	}
 	return nil
+}
+
+// MatchAPIToken returns the label of a matching API token, or "" if no match.
+// Walks the whole list to defeat timing-side-channel deduction of which
+// token is configured.
+func (c *Config) MatchAPIToken(presented string) string {
+	if presented == "" {
+		return ""
+	}
+	var label string
+	for _, t := range c.APITokens {
+		if t.Token == "" {
+			continue
+		}
+		if subtle.ConstantTimeCompare([]byte(presented), []byte(t.Token)) == 1 {
+			label = t.Label
+			if label == "" {
+				label = "unnamed-token"
+			}
+		}
+	}
+	return label
 }

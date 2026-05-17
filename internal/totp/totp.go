@@ -12,7 +12,7 @@ package totp
 import (
 	"crypto/hmac"
 	"crypto/rand"
-	"crypto/sha1"
+	"crypto/sha1" //nolint:gosec // RFC 6238/4226 *requires* HMAC-SHA1; every TOTP authenticator (Google Authenticator, Authy, 1Password, Bitwarden) uses it. Switching to SHA-256 would break compatibility with the user-facing apps we're trying to support.
 	"crypto/subtle"
 	"encoding/base32"
 	"encoding/binary"
@@ -111,7 +111,7 @@ func decodeSecret(s string) ([]byte, error) {
 func hotp(key []byte, counter int64) string {
 	buf := make([]byte, 8)
 	binary.BigEndian.PutUint64(buf, uint64(counter))
-	h := hmac.New(sha1.New, key)
+	h := hmac.New(sha1.New, key) //nolint:gosec // RFC 6238 mandates SHA-1; see import block above.
 	h.Write(buf)
 	sum := h.Sum(nil)
 	off := sum[len(sum)-1] & 0x0f

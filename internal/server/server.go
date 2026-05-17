@@ -170,6 +170,12 @@ func (a *App) Routes() http.Handler {
 	// Public-but-tokened metrics endpoint
 	mux.HandleFunc("/metrics", a.handleMetrics)
 
+	// Programmatic admin API — Bearer tokens from config.api_tokens
+	mux.HandleFunc("/api/admin/health", a.requireAPIToken(a.handleAPIHealth))
+	mux.HandleFunc("/api/admin/macs", a.requireAPIToken(a.handleAPIMACList))
+	mux.HandleFunc("/api/admin/macs/grant", a.requireAPIToken(a.handleAPIMACGrant))
+	mux.HandleFunc("/api/admin/macs/revoke", a.requireAPIToken(a.handleAPIMACRevoke))
+
 	// User extras
 	mux.HandleFunc("/user/macs/label", a.requireUser(a.handleUserLabelMAC))
 

@@ -645,6 +645,84 @@ func TestAdminLoginRateLimitByUsername(t *testing.T) {
 	}
 }
 
+func TestAPIToken401WithoutBearer(t *testing.T) {
+	app := setupTestApp(t)
+	app.Cfg.APITokens = []config.APIToken{{Token: "rb_abc", Label: "monitor"}}
+	h := app.Routes()
+
+	for _, path := range []string{"/api/admin/health", "/api/admin/macs", "/api/admin/macs/grant"} {
+		res, _ := do(t, h, "GET", path, nil, nil)
+		if res.StatusCode != 401 {
+			t.Errorf("%s no-auth: %d (want 401)", path, res.StatusCode)
+		}
+	}
+}
+
+func TestAPITokenAcceptsValidGrantsMAC(t *testing.T) {
+	app := setupTestApp(t)
+	app.Cfg.APITokens = []config.APIToken{{Token: "rb_letmein", Label: "ci"}}
+	h := app.Routes()
+
+	body := strings.NewReader(`{"mac":"aa:bb:cc:11:22:33","days":30,"label":"ci-test"}`)
+	req := httptest.NewRequest("POST", "/api/admin/macs/grant", body)
+	req.Header.Set("Authorization", "Bearer rb_letmein")
+	req.Header.Set("Content-Type", "application/json")
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, req)
+	if rr.Code != 200 {
+		t.Fatalf("grant: %d, body=%s", rr.Code, rr.Body.String())
+	}
+	if !strings.Contains(rr.Body.String(), "AA:BB:CC:11:22:33") {
+		t.Errorf("response missing MAC: %s", rr.Body.String())
+	}
+
+	// And it actually landed.
+	m, _ := app.DB.GetMAC(context.Background(), "AA:BB:CC:11:22:33")
+	if m == nil {
+		t.Fatal("MAC not in DB")
+	}
+	if m.Label != "ci-test" {
+		t.Errorf("label=%q (want ci-test)", m.Label)
+	}
+}
+
+func TestAPITokenRejectsBadToken(t *testing.T) {
+	app := setupTestApp(t)
+	app.Cfg.APITokens = []config.APIToken{{Token: "rb_letmein", Label: "ci"}}
+	h := app.Routes()
+
+	req := httptest.NewRequest("GET", "/api/admin/health", nil)
+	req.Header.Set("Authorization", "Bearer wrong")
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, req)
+	if rr.Code != 401 {
+		t.Errorf("bad token: %d", rr.Code)
+	}
+}
+
+func TestAPITokenRevokeMAC(t *testing.T) {
+	app := setupTestApp(t)
+	app.Cfg.APITokens = []config.APIToken{{Token: "rb_letmein", Label: "ci"}}
+	// Pre-seed a MAC
+	ctx := context.Background()
+	_, _ = app.MACSvc.Extend(ctx, "AA:BB:CC:DD:EE:FF", "to-delete", 30, nil)
+	h := app.Routes()
+
+	body := strings.NewReader(`{"mac":"aa:bb:cc:dd:ee:ff"}`)
+	req := httptest.NewRequest("POST", "/api/admin/macs/revoke", body)
+	req.Header.Set("Authorization", "Bearer rb_letmein")
+	req.Header.Set("Content-Type", "application/json")
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, req)
+	if rr.Code != 200 {
+		t.Fatalf("revoke: %d, body=%s", rr.Code, rr.Body.String())
+	}
+	m, _ := app.DB.GetMAC(ctx, "AA:BB:CC:DD:EE:FF")
+	if m != nil {
+		t.Error("MAC should be gone")
+	}
+}
+
 func TestAdminLogin2FAFullFlow(t *testing.T) {
 	app := setupTestApp(t)
 	const secret = "JBSWY3DPEHPK3PXP" // RFC 4648 example
