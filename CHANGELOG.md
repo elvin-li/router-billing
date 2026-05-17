@@ -1,5 +1,54 @@
 # Changelog
 
+## v0.10 — 安全、运维、测试三连击
+
+围绕「上线后能用一年不出事」做的一轮。无新业务功能；全部是兜底/可观测/可恢复。
+
+### 安全
+- **`/redeem` 限流**：10 次 / 10 分钟（按 IP），防充值码暴力猜测
+  （12 字符 31-alphabet 已经是 31¹² ≈ 7.9×10¹⁷ 空间，但加这层省 CPU）
+
+### 运维
+- **`/admin/backup/restore`**：上传 `.db` → 校验（SQLite magic + 必须有 `macs` 表）
+  → 暂存为 `<dbpath>.pending-restore` → 写审计；**当前服务不动**
+- **`main.MaybeApplyPendingRestore()`**：启动时检查 `.pending-restore`，
+  原子改名（旧 DB 备份为 `<dbpath>.before-restore-YYYYMMDD-HHMMSS` 含 WAL/SHM）
+  → 切换 → 删暂存。**两阶段设计**：上传时不关闭活的连接池，靠 `service restart` 完成切换
+- **`/admin/maintenance` 页**：下载备份 / 上传恢复 / 看暂存状态 / 看自动备份配置
+- **`--log-json`**：每行日志包成 JSON
+  `{"ts":"...","svc":"router-billing","ver":"...","msg":"..."}`，给 ELK/Loki 消化
+
+### CI / 代码质量
+- **golangci-lint** 加入 CI 的 `lint` job：errcheck / govet / gosimple /
+  ineffassign / staticcheck / unused / misspell / bodyclose / gosec /
+  gocyclo / goimports / prealloc。配置 `.golangci.yml` 包含合理排除
+  （测试代码松一些；db 包的 fire-and-forget audit 写入豁免）
+
+### 测试（90 → 100+ 用例）
+- **arp**（新）：7 个 case 覆盖 `parseNeighOutput`：典型行、FAILED/INCOMPLETE
+  跳过、IPv4+IPv6 dedup、垃圾输入容忍、MAC 大小写归一、纯 IPv6 entry、空输入
+- **backup**（新）：5 个 case 覆盖 copyFile atomic（无 .tmp 残留 + mode 0600）、
+  prune 跨 cutoff + 前缀过滤、RetainDays≥1 兜底（绝不删唯一备份）
+- **pay**（新）：14 个 case
+  - `randomHex` 形状/字母表
+  - WeChat authHeader 格式（5 个必填字段）
+  - WeChat DecodeNotify 自洽 AES-GCM 往返 + mchid/appid mismatch / 错 key 拒绝
+  - Alipay sign 确定性 + base64 输出
+  - Alipay DecodeNotify 自签 RSA 往返 + 错签名 / app_id mismatch 拒绝
+  - Alipay Precreate against httptest.NewServer（验 method/content-type/biz_content/sign）
+  - Alipay Query SUCCESS path / TRADE_NOT_EXIST path
+  - RSA 私钥/公钥 PEM 加载，HTTP 超时合理性
+- **sightings**（新）：3 个 case 覆盖 ctx-cancel、默认参数、scan 空 iface 无副作用
+- **server**（增量）：`TestRedeemRateLimit` / `TestMaintenancePageRenders` /
+  `TestBackupRestoreRejectsNonSQLite` / `TestBackupRestoreAcceptsValidDB`
+
+### 重构
+- arp 的解析逻辑从 `ListOnInterface` 拆出来成纯函数 `parseNeighOutput`，
+  便于测试不 fork `ip neigh`
+- notify 的 `RetryDelay` 提升为字段，便于测试用 ms 级别替代 2s
+
+---
+
 ## v0.9 — 「熟人 + 管理 WiFi」模型
 
 把 `Free_WiFi` 从「人人可上的开放网」改成「**WPA2 加密 · 给信任的人 + 管理员自己用**」。

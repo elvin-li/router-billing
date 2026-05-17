@@ -38,7 +38,7 @@ func TestUpsertMACWithUserID(t *testing.T) {
 	if m.UserID == nil || *m.UserID != uid.ID {
 		t.Errorf("UserID not set on insert")
 	}
-	if got := m.ExpiresAt.Sub(time.Now()); got < 29*24*time.Hour || got > 31*24*time.Hour {
+	if got := time.Until(m.ExpiresAt); got < 29*24*time.Hour || got > 31*24*time.Hour {
 		t.Errorf("expiry off: %s", got)
 	}
 
@@ -50,7 +50,7 @@ func TestUpsertMACWithUserID(t *testing.T) {
 	if m.UserID == nil || *m.UserID != uid.ID {
 		t.Errorf("UserID dropped on extend")
 	}
-	if got := m.ExpiresAt.Sub(time.Now()); got < 39*24*time.Hour {
+	if got := time.Until(m.ExpiresAt); got < 39*24*time.Hour {
 		t.Errorf("expected ~40 days, got %s", got)
 	}
 }

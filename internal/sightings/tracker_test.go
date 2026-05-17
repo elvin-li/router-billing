@@ -8,7 +8,7 @@ import (
 
 // TestTrackerHonoursContextCancel: with Iface="" the scan path is a no-op
 // (early return). We rely on this to test that Run() exits cleanly when
-// the parent ctx is cancelled.
+// the parent ctx is canceled.
 func TestTrackerHonoursContextCancel(t *testing.T) {
 	tr := &Tracker{
 		Iface:    "", // no-op scan

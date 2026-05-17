@@ -1,6 +1,9 @@
 package firewall
 
-import "testing"
+import (
+	"context"
+	"testing"
+)
 
 func TestValidMAC(t *testing.T) {
 	good := []string{
@@ -31,17 +34,18 @@ func TestValidMAC(t *testing.T) {
 func TestDryRunSync(t *testing.T) {
 	m := New("inet", "billing", "mac_paid", "br-paid")
 	m.SetDryRun(true)
+	ctx := context.Background()
 	// These would otherwise shell out; with dry-run they're just logged.
-	if err := m.EnsureSet(nil); err == nil {
-		// Allow nil ctx — methods build their own timeouts.
+	if err := m.EnsureSet(ctx); err != nil {
+		t.Errorf("EnsureSet: %v", err)
 	}
-	if err := m.Add(nil, "AA:BB:CC:DD:EE:FF"); err != nil {
+	if err := m.Add(ctx, "AA:BB:CC:DD:EE:FF"); err != nil {
 		t.Errorf("Add: %v", err)
 	}
-	if err := m.Remove(nil, "AA:BB:CC:DD:EE:FF"); err != nil {
+	if err := m.Remove(ctx, "AA:BB:CC:DD:EE:FF"); err != nil {
 		t.Errorf("Remove: %v", err)
 	}
-	if err := m.Sync(nil, []string{"AA:BB:CC:DD:EE:FF", "11:22:33:44:55:66", "bad"}); err != nil {
+	if err := m.Sync(ctx, []string{"AA:BB:CC:DD:EE:FF", "11:22:33:44:55:66", "bad"}); err != nil {
 		t.Errorf("Sync: %v", err)
 	}
 }

@@ -21,7 +21,7 @@ func TestParseNeighOutputTypical(t *testing.T) {
 }
 
 func TestParseNeighOutputDedupesByMAC(t *testing.T) {
-	// Device has both v4 and v6 neighbour entries — first wins.
+	// Device has both v4 and v6 neighbor entries — first wins.
 	in := `192.168.5.42 lladdr aa:bb:cc:dd:ee:ff REACHABLE
 fe80::1 lladdr aa:bb:cc:dd:ee:ff router STALE
 `

@@ -57,9 +57,13 @@ func ListOnInterface(ctx context.Context, iface string) ([]Entry, error) {
 // deduped by MAC (devices with both IPv4 and IPv6 neigh entries produce just
 // one Entry — the first seen).
 func parseNeighOutput(out string) []Entry {
+	if out == "" {
+		return nil
+	}
+	lines := strings.Split(out, "\n")
 	var entries []Entry
 	seen := map[string]bool{}
-	for _, line := range strings.Split(out, "\n") {
+	for _, line := range lines {
 		// Examples:
 		//   192.168.5.42 lladdr aa:bb:cc:dd:ee:ff REACHABLE
 		//   192.168.5.43 FAILED

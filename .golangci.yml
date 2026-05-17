@@ -18,7 +18,8 @@ linters:
     - gosec          # security smells (sql injection, weak rand, etc.)
     - gocyclo        # complexity ceiling
     - goimports      # import ordering / unused
-    - prealloc       # missed slice preallocation
+    # `prealloc` is noisy on scanning loops where final length is unknown
+    # ahead of time; not worth the false positives.
 
 linters-settings:
   gocyclo:
@@ -30,6 +31,7 @@ linters-settings:
   gosec:
     excludes:
       - G104   # errcheck handles this
+      - G115   # int64 → uint64 of file sizes is always safe (sizes ≥ 0)
       - G304   # we open paths from validated config (Cfg.DBPath etc.)
       - G404   # math/rand uses are non-crypto on purpose (e.g. test helpers)
   goimports:
@@ -49,7 +51,7 @@ issues:
         - gocyclo
         - errcheck
         - gosec
-        - prealloc
+        - bodyclose      # httptest.NewRecorder responses don't need explicit Close
     # _ = err pattern is intentional for best-effort writes.
     - text: "Error return value of .* is not checked"
       linters:

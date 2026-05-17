@@ -98,7 +98,7 @@ func TestWeChatAuthHeaderFormat(t *testing.T) {
 // --- WeChat AES-GCM notify decode --------------------------------------------
 
 // craftWxNotifyEnvelope builds a valid v3 notification envelope using the
-// provided APIv3 key. Mirrors the WeChat server behaviour.
+// provided APIv3 key. Mirrors the WeChat server behavior.
 func craftWxNotifyEnvelope(t *testing.T, apiV3Key []byte, mchID, appID string) []byte {
 	t.Helper()
 	res := wxNotifyResource{

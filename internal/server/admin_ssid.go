@@ -16,7 +16,7 @@ import (
 //
 // nopassword → T:nopass, omit P
 //
-// Most modern phones recognise it from the camera.
+// Most modern phones recognize it from the camera.
 func wifiQRPayload(ssid, password string, hidden bool) string {
 	var b strings.Builder
 	b.WriteString("WIFI:")
