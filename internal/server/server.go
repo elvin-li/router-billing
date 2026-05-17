@@ -33,7 +33,8 @@ type App struct {
 	loginLimiter      *rateLimiter // user login, keyed by IP
 	loginByPhoneLimit *rateLimiter // user login, keyed by phone
 	registerLimiter   *rateLimiter
-	adminLoginLimiter *rateLimiter
+	adminLoginLimiter *rateLimiter // admin login, keyed by IP
+	adminLoginByUser  *rateLimiter // admin login, keyed by username (defeats IP rotation)
 	redeemLimiter     *rateLimiter // voucher redemption, keyed by IP
 	payCreateLimiter  *rateLimiter // payment intent creation, keyed by IP
 
@@ -52,6 +53,7 @@ func NewApp(cfg *config.Config, dbx *db.DB, svc *service.MACService) (*App, erro
 		loginByPhoneLimit: newRateLimiter(5, 5*time.Minute),
 		registerLimiter:   newRateLimiter(4, 1*time.Hour),
 		adminLoginLimiter: newRateLimiter(8, 5*time.Minute),
+		adminLoginByUser:  newRateLimiter(5, 5*time.Minute),
 		redeemLimiter:     newRateLimiter(10, 10*time.Minute),
 		payCreateLimiter:  newRateLimiter(20, time.Minute),
 		waiters:           map[string][]chan struct{}{},

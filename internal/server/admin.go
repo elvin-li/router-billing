@@ -54,6 +54,13 @@ func (a *App) handleAdminLogin(w http.ResponseWriter, r *http.Request) {
 		a.render(w, "admin_login.html", map[string]any{"Error": "尝试过于频繁，请稍候再试"})
 		return
 	}
+	// SECURITY: per-username limiter too — a botnet rotating source IPs would
+	// otherwise blow through the per-IP budget. 5 attempts / 5 min per
+	// username is generous for fat-finger but stops sustained brute force.
+	if a.adminLoginByUser != nil && !a.adminLoginByUser.allow(u) {
+		a.render(w, "admin_login.html", map[string]any{"Error": "尝试过于频繁，请稍候再试"})
+		return
+	}
 	if !a.Cfg.AuthenticateAdmin(u, p) {
 		a.DB.Audit(r.Context(), "admin-attempt:"+u, "login_failed", "", clientIP(r))
 		a.render(w, "admin_login.html", map[string]any{"Error": "用户名或密码错误"})
@@ -70,6 +77,7 @@ func (a *App) handleAdminLogin(w http.ResponseWriter, r *http.Request) {
 		Value:    token,
 		Path:     "/admin",
 		HttpOnly: true,
+		Secure:   isHTTPS(r),
 		SameSite: http.SameSiteLaxMode,
 		MaxAge:   int(adminSessionTTL.Seconds()),
 	})
@@ -87,6 +95,7 @@ func (a *App) handleAdminLogout(w http.ResponseWriter, r *http.Request) {
 		Path:     "/admin",
 		MaxAge:   -1,
 		HttpOnly: true,
+		Secure:   isHTTPS(r),
 	})
 	http.Redirect(w, r, "/admin/login", http.StatusSeeOther)
 }
@@ -318,10 +327,19 @@ func (a *App) handleAdminUserSuspend(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	action := "user_unsuspend"
+	detail := ""
 	if suspend {
 		action = "user_suspend"
+		// SECURITY: also kill every active session for this user so they're
+		// logged out immediately instead of staying authed until their
+		// session naturally expires (could be ~30 days).
+		killed, err := a.DB.DeleteSessionsByUserID(r.Context(), id)
+		if err != nil {
+			log.Printf("suspend user %d: kill sessions: %v", id, err)
+		}
+		detail = fmt.Sprintf("killed_sessions=%d", killed)
 	}
-	a.DB.Audit(r.Context(), "admin", action, strconv.FormatInt(id, 10), "")
+	a.DB.Audit(r.Context(), "admin", action, strconv.FormatInt(id, 10), detail)
 	http.Redirect(w, r, "/admin/users?ok=1", http.StatusSeeOther)
 }
 
@@ -418,6 +436,8 @@ func (a *App) handleAdminMACAdd(w http.ResponseWriter, r *http.Request) {
 		http.Redirect(w, r, redirectBack(r, "err=internal"), http.StatusSeeOther)
 		return
 	}
+	ip := clientIP(r)
+	a.DB.Audit(r.Context(), "admin", "grant", mac, fmt.Sprintf("days=%d label=%s ip=%s", days, label, ip))
 	a.Notifier.Send(notify.Event{Type: "grant", Actor: "admin", MAC: mac, Days: days, Detail: label})
 	http.Redirect(w, r, redirectBack(r, "ok=1"), http.StatusSeeOther)
 }
@@ -439,6 +459,7 @@ func (a *App) handleAdminMACDelete(w http.ResponseWriter, r *http.Request) {
 	if err := a.MACSvc.Delete(r.Context(), mac); err != nil {
 		log.Printf("admin delete %s: %v", mac, err)
 	}
+	a.DB.Audit(r.Context(), "admin", "revoke", mac, "ip="+clientIP(r))
 	a.Notifier.Send(notify.Event{Type: "revoke", Actor: "admin", MAC: mac})
 	http.Redirect(w, r, redirectBack(r, "ok=1"), http.StatusSeeOther)
 }

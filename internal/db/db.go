@@ -24,7 +24,7 @@ type DB struct {
 }
 
 func Open(path string) (*DB, error) {
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		return nil, fmt.Errorf("mkdir db dir: %w", err)
 	}
 	dsn := fmt.Sprintf("file:%s?_pragma=journal_mode(WAL)&_pragma=busy_timeout(5000)&_pragma=foreign_keys(on)", path)
@@ -34,7 +34,17 @@ func Open(path string) (*DB, error) {
 	}
 	conn.SetMaxOpenConns(1) // SQLite serializes writes; WAL gives us cheap reads
 	if err := conn.Ping(); err != nil {
+		_ = conn.Close()
 		return nil, fmt.Errorf("ping sqlite: %w", err)
+	}
+	// SECURITY: DB file contains bcrypt password hashes (admin + users) and
+	// payment data. Clamp it down to owner-only — by default sqlite creates
+	// with the process umask (often 0644). Safe to chmod unconditionally:
+	// no-op when already 0600.
+	for _, f := range []string{path, path + "-wal", path + "-shm"} {
+		if _, err := os.Stat(f); err == nil {
+			_ = os.Chmod(f, 0o600)
+		}
 	}
 	if err := runMigrations(conn); err != nil {
 		return nil, fmt.Errorf("migrate: %w", err)
@@ -447,6 +457,19 @@ func (d *DB) GetSession(ctx context.Context, token string) (*SessionRow, error) 
 func (d *DB) DeleteSession(ctx context.Context, token string) error {
 	_, err := d.conn.ExecContext(ctx, `DELETE FROM sessions WHERE token = ?`, token)
 	return err
+}
+
+// DeleteSessionsByUserID purges every session belonging to a given user.
+// Called by handleAdminUserSuspend so a suspended user is logged out
+// immediately, not whenever their current session expires.
+func (d *DB) DeleteSessionsByUserID(ctx context.Context, userID int64) (int64, error) {
+	res, err := d.conn.ExecContext(ctx,
+		`DELETE FROM sessions WHERE kind = 'user' AND user_id = ?`, userID)
+	if err != nil {
+		return 0, err
+	}
+	n, _ := res.RowsAffected()
+	return n, nil
 }
 
 func (d *DB) PurgeExpiredSessions(ctx context.Context) error {

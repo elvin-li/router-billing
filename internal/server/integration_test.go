@@ -3,6 +3,7 @@ package server
 import (
 	"bytes"
 	"context"
+	"fmt"
 	"io"
 	"mime/multipart"
 	"net/http"
@@ -524,6 +525,133 @@ func TestAdminVoucherPrintPageRenders(t *testing.T) {
 	}
 	if ct := res.Header.Get("Content-Type"); ct != "image/png" {
 		t.Errorf("qr content-type = %q", ct)
+	}
+}
+
+func TestSuspendKicksLoggedInUser(t *testing.T) {
+	app := setupTestApp(t)
+	h := app.Routes()
+	ctx := context.Background()
+
+	// Register a user and grab the resulting session.
+	res, _ := do(t, h, "POST", "/user/register",
+		url.Values{"phone": {"13800138000"}, "password": {"hunter22"}}, nil)
+	jar := cookieJar(res)
+	if jar[userCookieName] == "" {
+		t.Fatal("no user cookie after register")
+	}
+
+	// /user/me works while authed.
+	res, _ = do(t, h, "GET", "/user/me", nil, jar)
+	if res.StatusCode != 200 {
+		t.Fatalf("authed /user/me: %d", res.StatusCode)
+	}
+
+	// Admin suspends the user via DB (skip the HTTP form for brevity, but
+	// verify the DB layer + currentUserID flow).
+	u, _ := app.DB.GetUserByPhone(ctx, "13800138000")
+	killed, _ := app.DB.DeleteSessionsByUserID(ctx, u.ID)
+	if killed < 1 {
+		t.Errorf("expected DeleteSessionsByUserID to kill ≥1; got %d", killed)
+	}
+
+	// Same cookie now bounces back to /user/login.
+	res, _ = do(t, h, "GET", "/user/me", nil, jar)
+	if res.StatusCode != 303 {
+		t.Errorf("expected redirect after session killed; got %d", res.StatusCode)
+	}
+	if !strings.Contains(res.Header.Get("Location"), "/user/login") {
+		t.Errorf("redirect should be to /user/login; got %s", res.Header.Get("Location"))
+	}
+}
+
+func TestSuspendedFlagAlsoBlocksValidSession(t *testing.T) {
+	// Defense-in-depth: if a stale session exists, currentUserID still bounces
+	// the user because GetUser returns Suspended=true.
+	app := setupTestApp(t)
+	h := app.Routes()
+	ctx := context.Background()
+
+	res, _ := do(t, h, "POST", "/user/register",
+		url.Values{"phone": {"13800138100"}, "password": {"hunter22"}}, nil)
+	jar := cookieJar(res)
+
+	// Flip suspended flag WITHOUT killing the session — simulating the
+	// race where the DB write succeeded but DeleteSessionsByUserID failed.
+	u, _ := app.DB.GetUserByPhone(ctx, "13800138100")
+	if err := app.DB.SuspendUser(ctx, u.ID, true); err != nil {
+		t.Fatal(err)
+	}
+
+	res, _ = do(t, h, "GET", "/user/me", nil, jar)
+	if res.StatusCode != 303 || !strings.Contains(res.Header.Get("Location"), "/user/login") {
+		t.Errorf("expected redirect for suspended user even with valid session; got status=%d loc=%s",
+			res.StatusCode, res.Header.Get("Location"))
+	}
+}
+
+func TestSecureCookieSetWhenBehindTLS(t *testing.T) {
+	app := setupTestApp(t)
+	h := app.Routes()
+
+	// Login through plain HTTP-by-default → Secure=false.
+	res, _ := do(t, h, "POST", "/admin/login",
+		url.Values{"username": {"admin"}, "password": {"admin-pw"}}, nil)
+	if sc := res.Header.Get("Set-Cookie"); strings.Contains(sc, "Secure") {
+		t.Errorf("admin cookie shouldn't be Secure on HTTP; got %s", sc)
+	}
+
+	// Now repeat with X-Forwarded-Proto: https → Secure must be present.
+	form := url.Values{"username": {"admin"}, "password": {"admin-pw"}}
+	req := httptest.NewRequest("POST", "/admin/login", strings.NewReader(form.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req.Header.Set("X-Forwarded-Proto", "https")
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, req)
+	if sc := rr.Header().Get("Set-Cookie"); !strings.Contains(sc, "Secure") {
+		t.Errorf("admin cookie should be Secure behind TLS proxy; got %s", sc)
+	}
+}
+
+func TestAdminLoginRateLimitByUsername(t *testing.T) {
+	app := setupTestApp(t)
+	app.adminLoginByUser = newRateLimiter(3, time.Hour)
+	h := app.Routes()
+
+	// 3 attempts with wrong password but the SAME username are allowed
+	// (failures, but not rate-limited). Different X-Forwarded-For each time
+	// to defeat the IP-keyed limiter and isolate the per-username one.
+	for i := 0; i < 3; i++ {
+		form := url.Values{"username": {"admin"}, "password": {"bad"}}
+		req := httptest.NewRequest("POST", "/admin/login", strings.NewReader(form.Encode()))
+		req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+		req.Header.Set("X-Forwarded-For", fmt.Sprintf("10.0.0.%d", i+1))
+		rr := httptest.NewRecorder()
+		h.ServeHTTP(rr, req)
+		if !strings.Contains(rr.Body.String(), "用户名或密码错误") {
+			t.Errorf("attempt %d body: %s", i, rr.Body.String())
+		}
+	}
+	// 4th attempt with a fresh IP — rate-limit fires on USERNAME, not IP.
+	form := url.Values{"username": {"admin"}, "password": {"bad"}}
+	req := httptest.NewRequest("POST", "/admin/login", strings.NewReader(form.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req.Header.Set("X-Forwarded-For", "10.0.0.99")
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, req)
+	if !strings.Contains(rr.Body.String(), "尝试过于频繁") {
+		t.Errorf("4th attempt should be rate-limited by username; body=%s", rr.Body.String())
+	}
+}
+
+func TestSQLiteDBFileIsOwnerOnly(t *testing.T) {
+	app := setupTestApp(t)
+	info, err := os.Stat(app.Cfg.DBPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if mode := info.Mode().Perm(); mode != 0o600 {
+		t.Errorf("DB file mode = %o; want 0600 (contains bcrypt hashes)", mode)
 	}
 }
 

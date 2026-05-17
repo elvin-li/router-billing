@@ -38,6 +38,7 @@ func csrfMiddleware(h http.Handler) http.Handler {
 				Value:    token,
 				Path:     "/",
 				HttpOnly: false, // template helper reads it client-side (defense-in-depth, not a session secret)
+				Secure:   isHTTPS(r),
 				SameSite: http.SameSiteLaxMode,
 				MaxAge:   30 * 24 * 3600,
 			})

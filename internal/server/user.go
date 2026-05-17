@@ -82,6 +82,13 @@ func (a *App) currentUserID(r *http.Request) int64 {
 	if err != nil || sess == nil || sess.Kind != "user" || sess.UserID == nil {
 		return 0
 	}
+	// SECURITY: re-check the user's current state on every request. The
+	// /admin/users/suspend handler already kills sessions on suspend, but
+	// this defends against the (DB write failure, replay attack, race with
+	// concurrent admin actions) where a stale session lingers.
+	if u, err := a.DB.GetUser(r.Context(), *sess.UserID); err == nil && u != nil && u.Suspended {
+		return 0
+	}
 	return *sess.UserID
 }
 
@@ -199,6 +206,7 @@ func (a *App) startUserSession(w http.ResponseWriter, r *http.Request, u *models
 		Value:    token,
 		Path:     "/",
 		HttpOnly: true,
+		Secure:   isHTTPS(r),
 		SameSite: http.SameSiteLaxMode,
 		MaxAge:   int(userSessionTTL.Seconds()),
 	})
@@ -209,7 +217,12 @@ func (a *App) handleUserLogout(w http.ResponseWriter, r *http.Request) {
 		_ = a.DB.DeleteSession(r.Context(), c.Value)
 	}
 	http.SetCookie(w, &http.Cookie{
-		Name: userCookieName, Value: "", Path: "/", MaxAge: -1, HttpOnly: true,
+		Name:     userCookieName,
+		Value:    "",
+		Path:     "/",
+		MaxAge:   -1,
+		HttpOnly: true,
+		Secure:   isHTTPS(r),
 	})
 	http.Redirect(w, r, "/portal", http.StatusSeeOther)
 }
