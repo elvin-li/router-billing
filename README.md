@@ -6,9 +6,12 @@ OpenWrt（aarch64）上运行的 MAC 地址计费认证系统。**完全不影�
 
 | SSID | 加密 | 网段 | 受 MAC 白名单 | 用途 |
 |---|---|---|---|---|
-| `Free_WiFi` | 开放 | lan | 否 | 给访客，免费随便用 |
-| `Paid_WiFi` | 开放 | paid (192.168.5.0/24) | 是 | 主收费入口，扫码即用 |
-| `Paid_Secure_WiFi` | WPA2 | paid (同上) | 是 | 已付费设备 + 知道密码 → 双重门槛，给固定客户 |
+| `Free_WiFi` | **WPA2 加密**（v0.9+） | lan | 否 | **熟人 / 管理 WiFi** — 给家人朋友 + 管理员自己用，不计费、不走门户 |
+| `Paid_WiFi` | 开放 | paid (192.168.5.0/24) | 是 | 主收费入口 — 客户连这个，浏览器自动跳付费页 |
+| `Paid_Secure_WiFi` | WPA2 | paid (同上) | 是 | VIP 通道 — 已付费设备 + 知道密码 → 双重门槛 |
+
+> v0.9 把 Free_WiFi 改成强制加密：之前它是开放的，意味着隔壁咖啡馆任何人都能蹭网 + 触达 `:8080/admin/login`（虽然有密码但暴露面没必要）。
+> 现在 install.sh 没传 `FREE_KEY` 时会**自动生成** 12 位密码写到 `/etc/router-billing/wifi-keys.txt`（mode 0600）。安装后 `sudo cat` 一次取出来分给家人即可。
 
 两个 paid SSID 共用同一个 `br-paid` 网桥和同一份 `mac_paid` 白名单。
 

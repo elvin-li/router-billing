@@ -41,8 +41,15 @@ type Admin struct {
 
 // SSIDInfo holds the names + secure-SSID password so admins can render printable
 // join-WiFi QR cards. Optional — purely informational.
+// SSIDInfo names + PSK keys for the printable SSID-cards page.
+//
+// As of v0.9 the "Free" SSID is intended for trusted friends + the
+// admin's own management traffic — it MUST have a WPA2 key
+// (free_key). The cards page renders the key alongside the QR so the
+// admin can show it on the printed card.
 type SSIDInfo struct {
 	Free       string `yaml:"free"`
+	FreeKey    string `yaml:"free_key"` // WPA2-PSK for the friends/management SSID
 	Paid       string `yaml:"paid"`
 	PaidSecure string `yaml:"paid_secure"`
 	PaidKey    string `yaml:"paid_secure_key"`

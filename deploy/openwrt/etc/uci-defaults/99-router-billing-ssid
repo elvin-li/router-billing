@@ -1,8 +1,11 @@
 #!/bin/sh
-# 第一次启动时建立 SSID：
-#   FREE_SSID         开放，跟 lan 同网段，免费直通
-#   PAID_SSID         开放，独立 paid 区域，受 MAC 白名单
-#   PAID_SECURE_SSID  WPA2，同样 paid 区域，受相同 MAC 白名单
+# 第一次启动时建立 SSID（v0.9 模型）：
+#   FREE_SSID         「熟人 + 管理 WiFi」WPA2 加密，跟 lan 同网段
+#                     FREE_KEY 必须 ≥ 8 字符。install.sh 没给的话会自动生成
+#                     并写到 /etc/router-billing/wifi-keys.txt (0600)。
+#                     若空字符串则保持开放（**不推荐** — 任何人都能进管理后台）。
+#   PAID_SSID         开放，独立 paid 区域，受 MAC 白名单（扫码付费走这个）
+#   PAID_SECURE_SSID  WPA2，同样 paid 区域，受相同 MAC 白名单（VIP 通道）
 #                     PAID_SECURE_KEY 必须 ≥ 8 字符；空字符串则跳过创建。
 # 跑完后 OpenWrt 会自动删除本文件。
 
@@ -16,6 +19,16 @@ PAID_KEY="${PAID_KEY:-}"
 
 PAID_SECURE_SSID="${PAID_SECURE_SSID:-Paid_Secure_WiFi}"
 PAID_SECURE_KEY="${PAID_SECURE_KEY:-}"
+
+# Warn loudly if Free SSID is still open — that means anyone who walks past
+# can also reach /admin (port 8080) on the LAN.
+if [ -z "${FREE_KEY}" ]; then
+    cat >&2 <<'WARN'
+[router-billing] !! FREE_KEY 未设置 — Free_WiFi 将保持开放。
+[router-billing] !! 这意味着任何人都能连 LAN，触达 /admin/login（依然有密码）。
+[router-billing] !! 强烈建议重跑：FREE_KEY=至少8位 /etc/uci-defaults/99-router-billing-ssid
+WARN
+fi
 
 PAID_SUBNET="${PAID_SUBNET:-192.168.5}"
 

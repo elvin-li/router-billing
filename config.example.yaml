@@ -29,12 +29,19 @@ admin:
 # Prometheus /metrics 鉴权 token（留空 = 端点公开）
 # metrics_token: "long-random-string"
 
-# SSID 信息，仅给 /admin/ssid-cards 打印海报用，不影响实际网络
+# SSID 信息，仅给 /admin/ssid-cards 打印海报用，不影响实际网络。
+#
+# Free_WiFi 模型（v0.9+）：现在是「熟人 + 管理 WiFi」，必须有 WPA2 密码。
+# - 你和你信任的家人/朋友连这个（不计费、不走门户）
+# - 管理员也用这个进 /admin（不会被强制门户拦截）
+# - 客户应该连 Paid_WiFi（开放，扫码付费） 或 Paid_Secure_WiFi（加密，VIP 付费）
+#
 # ssids:
 #   free: Free_WiFi
+#   free_key: change-this-or-i-will-auto-generate    # 强制要求 ≥8 字符；install.sh 没设的话自动生成
 #   paid: Paid_WiFi
 #   paid_secure: Paid_Secure_WiFi
-#   paid_secure_key: super-secret-2024
+#   paid_secure_key: super-secret-2024               # VIP 加密 SSID 的 PSK
 
 # 计费套餐。price_cents 是人民币分。
 plans:

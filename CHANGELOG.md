@@ -1,5 +1,44 @@
 # Changelog
 
+## v0.9 — 「熟人 + 管理 WiFi」模型
+
+把 `Free_WiFi` 从「人人可上的开放网」改成「**WPA2 加密 · 给信任的人 + 管理员自己用**」。
+
+### 改动
+- `config.go` `SSIDInfo.FreeKey` 字段 — `/admin/ssid-cards` 同时显示 SSID 名 + 密码
+- `install.sh` 没传 `FREE_KEY` 时自动生成 12 位密码 → `/etc/router-billing/wifi-keys.txt` (mode 0600)，最后总结里打印一次
+- `uci-defaults`：`FREE_KEY` 为空时在 stderr 大字告警「Free_WiFi 还是开放的，任何路人都能触达 :8080」
+- `/admin/ssid-cards`：
+  - 「免费 WiFi」卡片改名「熟人 / 管理 WiFi（加密）」，自动带密码
+  - 「付费 WiFi（加密）」卡片改名「VIP 付费 WiFi（加密）」
+- README + `config.example.yaml` 加新模型说明 + 迁移提示
+
+### 不变
+- `Paid_WiFi` 依然是开放的（客户扫码付费走这里）
+- `Paid_Secure_WiFi` 依然是 VIP 通道
+- nftables / 防火墙规则、计费逻辑、所有 admin/user 流程 — 零改动
+
+### 升级现有部署
+存量装机不会自动加密 Free SSID（不破坏现有连接）。手动升级一次：
+
+```sh
+# 1. 选一个密码 ≥ 8 字符
+FREE_KEY=your-new-key
+
+# 2. 把所有 Free_WiFi wifi-iface 都改成加密
+for i in $(uci show wireless | awk -F'[].[]' '/ssid='\''Free_WiFi'\''/ {print $2}'); do
+    uci set wireless.@wifi-iface[$i].encryption='psk2'
+    uci set wireless.@wifi-iface[$i].key="$FREE_KEY"
+done
+uci commit wireless && wifi reload
+
+# 3. 保存密码以备查
+printf 'free_key=%s\n' "$FREE_KEY" >> /etc/router-billing/wifi-keys.txt
+chmod 0600 /etc/router-billing/wifi-keys.txt
+```
+
+---
+
 ## v0.8 — Admin 工作流 / 收据 / 销量图 / 批量操作 / 实时仪表盘 / 移动端
 
 **Admin 工作流**

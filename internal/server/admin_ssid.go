@@ -64,27 +64,37 @@ func (a *App) handleAdminSSIDCards(w http.ResponseWriter, r *http.Request) {
 	if info.PaidSecure == "" {
 		info.PaidSecure = "Paid_Secure_WiFi"
 	}
+	// Free SSID is now the friends + management WiFi (WPA2-encrypted).
+	// Render its key on the card so the admin can hand the printed slip
+	// to family/staff without typing the password manually.
+	freeCard := ssidCard{
+		Title:  "熟人 / 管理 WiFi（加密）",
+		SSID:   info.Free,
+		Tip:    "信任的人才连这个 · 管理员也用这个进 /admin",
+		QRPath: fmt.Sprintf("/admin/ssid-cards/qr?ssid=%s", urlQ(info.Free)),
+	}
+	if info.FreeKey != "" {
+		freeCard.HasPassword = true
+		freeCard.Password = info.FreeKey
+		freeCard.QRPath = fmt.Sprintf("/admin/ssid-cards/qr?ssid=%s&password=%s",
+			urlQ(info.Free), urlQ(info.FreeKey))
+	}
 	cards := []ssidCard{
+		freeCard,
 		{
-			Title:  "免费 WiFi",
-			SSID:   info.Free,
-			Tip:    "随便用，无需付费",
-			QRPath: fmt.Sprintf("/admin/ssid-cards/qr?ssid=%s", urlQ(info.Free)),
-		},
-		{
-			Title:  "付费 WiFi（扫码付）",
+			Title:  "付费 WiFi（开放，扫码付）",
 			SSID:   info.Paid,
-			Tip:    "连接后浏览器自动跳付费页",
+			Tip:    "客户连这个 · 浏览器自动跳付费页",
 			QRPath: fmt.Sprintf("/admin/ssid-cards/qr?ssid=%s", urlQ(info.Paid)),
 		},
 	}
 	if info.PaidKey != "" {
 		cards = append(cards, ssidCard{
-			Title:       "付费 WiFi（加密）",
+			Title:       "VIP 付费 WiFi（加密）",
 			SSID:        info.PaidSecure,
 			HasPassword: true,
 			Password:    info.PaidKey,
-			Tip:         "已付费设备 + 知道密码才能连",
+			Tip:         "VIP 客户：已付费设备 + 知道密码才能连",
 			QRPath: fmt.Sprintf("/admin/ssid-cards/qr?ssid=%s&password=%s",
 				urlQ(info.PaidSecure), urlQ(info.PaidKey)),
 		})
