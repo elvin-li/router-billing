@@ -151,6 +151,9 @@ func (a *App) Routes() http.Handler {
 	mux.HandleFunc("/admin/users/delete", a.requireAdmin(a.handleAdminUserDelete))
 	mux.HandleFunc("/admin/users/reset-password", a.requireAdmin(a.handleAdminUserResetPassword))
 	mux.HandleFunc("/admin/audit", a.requireAdmin(a.handleAdminAudit))
+	mux.HandleFunc("/admin/sessions", a.requireAdmin(a.handleAdminSessions))
+	mux.HandleFunc("/admin/sessions/revoke", a.requireAdmin(a.handleAdminSessionRevoke))
+	mux.HandleFunc("/admin/sessions/revoke-all-admin", a.requireAdmin(a.handleAdminSessionRevokeAllAdmin))
 	mux.HandleFunc("/admin/health", a.requireAdmin(a.handleAdminHealth))
 	mux.HandleFunc("/admin/backup", a.requireAdmin(a.handleAdminBackup))
 	mux.HandleFunc("/admin/backup/restore", a.requireAdmin(a.handleAdminBackupRestore))
@@ -315,6 +318,7 @@ func tplFuncs() template.FuncMap {
 			return s
 		},
 		"humanBytes": humanBytes,
+		"sub":        func(a, b int) int { return a - b },
 		"prettyCode": func(s string) string {
 			// 4-4-4 grouping
 			if len(s) <= 4 {

@@ -1,0 +1,76 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>活跃 Session · router-billing</title>
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body class="admin">
+<div class="admin-shell">
+  {{template "admin-sidebar" .}}
+  <main class="admin-main">
+    <div class="admin-header">
+      <div>
+        <h1>活跃 Session</h1>
+        <div class="crumbs">所有未过期的登录会话 · 管理员 TTL {{.AdminTTL}}h · 用户 TTL {{.UserTTL}}h</div>
+      </div>
+    </div>
+
+    {{template "flash" .}}
+
+    <section class="admin-card" style="border-left:4px solid var(--warning); background:#fffbeb;">
+      <h2 style="color:#b45309;">🚨 紧急："丢了管理员设备"</h2>
+      <p>一键吊销所有其他管理员 session（保留你当前这一个）。其他设备上的管理员需要重新登录。</p>
+      <form method="post" action="/admin/sessions/revoke-all-admin"
+            onsubmit="return confirm('确定吊销所有其他管理员 session？\n所有其他设备会立即被踢下线。')">
+        {{template "csrf" .}}
+        <button type="submit" class="btn danger" style="width:auto;">吊销所有其他 admin session</button>
+      </form>
+    </section>
+
+    <section class="admin-card">
+      <h2>所有 session ({{len .Sessions}})</h2>
+      <p class="desc">按到期时间升序排列。<strong>本机</strong> 标记的是你当前的登录。</p>
+      <div class="table-wrap">
+        <table class="data">
+          <thead><tr>
+            <th>类型</th><th>主体</th><th>Token</th><th>到期</th><th>操作</th>
+          </tr></thead>
+          <tbody>
+            {{range .Sessions}}
+            <tr {{if .IsCurrent}}style="background:#dcfce7;"{{end}}>
+              <td>
+                {{if eq .Kind "admin"}}<span class="pill paid">admin</span>
+                {{else}}<span class="pill active">user</span>{{end}}
+                {{if .IsCurrent}}<span class="pill active" style="margin-left:4px;">本机</span>{{end}}
+              </td>
+              <td class="mono">{{.Subject}}</td>
+              <td class="mono" style="font-size:12px; color:var(--text-soft);">
+                {{slice .Token 0 4}}...{{slice .Token (sub (len .Token) 4) (len .Token)}}
+              </td>
+              <td>{{formatTime .ExpiresAt}}</td>
+              <td class="row-actions">
+                {{if not .IsCurrent}}
+                <form method="post" action="/admin/sessions/revoke"
+                      onsubmit="return confirm('吊销这个 session？')">
+                  {{template "csrf" $}}
+                  <input type="hidden" name="token" value="{{.Token}}">
+                  <button class="btn danger tiny" type="submit">吊销</button>
+                </form>
+                {{else}}
+                <span style="color:var(--text-muted); font-size:12px;">不可吊销自己</span>
+                {{end}}
+              </td>
+            </tr>
+            {{else}}
+            <tr><td colspan="5" class="empty-state">没有活跃 session</td></tr>
+            {{end}}
+          </tbody>
+        </table>
+      </div>
+    </section>
+  </main>
+</div>
+</body>
+</html>

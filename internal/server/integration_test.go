@@ -644,6 +644,105 @@ func TestAdminLoginRateLimitByUsername(t *testing.T) {
 	}
 }
 
+func TestAdminSessionsList(t *testing.T) {
+	app := setupTestApp(t)
+	h := app.Routes()
+	jar := loginAdmin(t, h)
+
+	// Add an extra user session so the list has 2 rows.
+	res, _ := do(t, h, "POST", "/user/register",
+		url.Values{"phone": {"13800138777"}, "password": {"hunter22"}}, nil)
+	if res.StatusCode != 303 {
+		t.Fatal("register failed")
+	}
+
+	_, body := do(t, h, "GET", "/admin/sessions", nil, jar)
+	for _, want := range []string{"活跃 Session", "admin", "user", "本机", "13800138777"} {
+		if !strings.Contains(body, want) {
+			t.Errorf("sessions page missing %q", want)
+		}
+	}
+}
+
+func TestAdminSessionRevoke(t *testing.T) {
+	app := setupTestApp(t)
+	h := app.Routes()
+	jar := loginAdmin(t, h)
+	tok := jar[csrfCookieName]
+
+	// Create a victim user session.
+	res, _ := do(t, h, "POST", "/user/register",
+		url.Values{"phone": {"13800138888"}, "password": {"hunter22"}}, nil)
+	victimJar := cookieJar(res)
+	victimTok := victimJar[userCookieName]
+	if victimTok == "" {
+		t.Fatal("victim has no session cookie")
+	}
+
+	// Admin revokes the victim's session.
+	form := url.Values{"_csrf": {tok}, "token": {victimTok}}
+	req := httptest.NewRequest("POST", "/admin/sessions/revoke", strings.NewReader(form.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	for k, v := range jar {
+		req.AddCookie(&http.Cookie{Name: k, Value: v})
+	}
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, req)
+	if rr.Code != 303 {
+		t.Fatalf("revoke: %d (%s)", rr.Code, rr.Body.String())
+	}
+
+	// Victim's previously-valid cookie now bounces.
+	res, _ = do(t, h, "GET", "/user/me", nil, victimJar)
+	if res.StatusCode != 303 {
+		t.Errorf("victim session should be dead; got %d", res.StatusCode)
+	}
+}
+
+func TestAdminRevokeAllAdminKeepsCurrent(t *testing.T) {
+	app := setupTestApp(t)
+	h := app.Routes()
+
+	// Two admin sessions: jar1 = "victim", jar2 = "us".
+	res, _ := do(t, h, "POST", "/admin/login",
+		url.Values{"username": {"admin"}, "password": {"admin-pw"}}, nil)
+	jar1 := cookieJar(res)
+
+	res, _ = do(t, h, "POST", "/admin/login",
+		url.Values{"username": {"admin"}, "password": {"admin-pw"}}, nil)
+	jar2 := cookieJar(res)
+	// Pick up a csrf token for jar2.
+	res, _ = do(t, h, "GET", "/admin/macs", nil, jar2)
+	for k, v := range cookieJar(res) {
+		jar2[k] = v
+	}
+	tok := jar2[csrfCookieName]
+
+	form := url.Values{"_csrf": {tok}}
+	req := httptest.NewRequest("POST", "/admin/sessions/revoke-all-admin",
+		strings.NewReader(form.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	for k, v := range jar2 {
+		req.AddCookie(&http.Cookie{Name: k, Value: v})
+	}
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, req)
+	if rr.Code != 303 {
+		t.Fatalf("revoke-all-admin: %d (%s)", rr.Code, rr.Body.String())
+	}
+
+	// jar1 (other admin) is now dead → bounced to login.
+	res, _ = do(t, h, "GET", "/admin/macs", nil, jar1)
+	if res.StatusCode != 303 {
+		t.Errorf("other admin session should be killed; got %d", res.StatusCode)
+	}
+	// jar2 (us) still works.
+	res, _ = do(t, h, "GET", "/admin/macs", nil, jar2)
+	if res.StatusCode != 200 {
+		t.Errorf("our own admin session should still work; got %d", res.StatusCode)
+	}
+}
+
 func TestSQLiteDBFileIsOwnerOnly(t *testing.T) {
 	app := setupTestApp(t)
 	info, err := os.Stat(app.Cfg.DBPath)

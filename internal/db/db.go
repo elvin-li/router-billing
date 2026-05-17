@@ -472,6 +472,61 @@ func (d *DB) DeleteSessionsByUserID(ctx context.Context, userID int64) (int64, e
 	return n, nil
 }
 
+// SessionRecord is one row of the live-sessions list used by /admin/sessions.
+type SessionRecord struct {
+	Token     string // server-side primary key — shown truncated in UI
+	Kind      string // "admin" | "user"
+	Subject   string // username for admin, phone for user
+	UserID    *int64 // present for kind=user
+	ExpiresAt time.Time
+	IsCurrent bool // filled by the handler, not from SQL
+}
+
+// ListActiveSessions returns every unexpired session. Sort: most-recently-
+// expiring last (so the soon-to-die ones surface first).
+func (d *DB) ListActiveSessions(ctx context.Context, limit int) ([]SessionRecord, error) {
+	if limit <= 0 || limit > 500 {
+		limit = 200
+	}
+	rows, err := d.conn.QueryContext(ctx, `
+		SELECT token, kind, subject, user_id, expires_at
+		FROM sessions
+		WHERE expires_at > CURRENT_TIMESTAMP
+		ORDER BY expires_at ASC
+		LIMIT ?`, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []SessionRecord
+	for rows.Next() {
+		var s SessionRecord
+		var uid sql.NullInt64
+		if err := rows.Scan(&s.Token, &s.Kind, &s.Subject, &uid, &s.ExpiresAt); err != nil {
+			return nil, err
+		}
+		if uid.Valid {
+			v := uid.Int64
+			s.UserID = &v
+		}
+		out = append(out, s)
+	}
+	return out, rows.Err()
+}
+
+// DeleteAllAdminSessionsExcept logs out every admin session except `keep`.
+// Useful for "I lost my laptop" — keep current cookie alive, kill the rest.
+// Returns the number of sessions deleted.
+func (d *DB) DeleteAllAdminSessionsExcept(ctx context.Context, keep string) (int64, error) {
+	res, err := d.conn.ExecContext(ctx,
+		`DELETE FROM sessions WHERE kind = 'admin' AND token != ?`, keep)
+	if err != nil {
+		return 0, err
+	}
+	n, _ := res.RowsAffected()
+	return n, nil
+}
+
 func (d *DB) PurgeExpiredSessions(ctx context.Context) error {
 	_, err := d.conn.ExecContext(ctx, `DELETE FROM sessions WHERE expires_at <= CURRENT_TIMESTAMP`)
 	return err
