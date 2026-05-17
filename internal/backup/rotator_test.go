@@ -56,12 +56,12 @@ func TestPruneRespectsRetainDays(t *testing.T) {
 		name string
 		age  time.Duration
 	}{
-		{"billing-1.db", 10 * 24 * time.Hour}, // old → should prune
-		{"billing-2.db", 5 * 24 * time.Hour},  // old → should prune (over retain)
-		{"billing-3.db", 4 * 24 * time.Hour},  // old → kept if among latest 3
-		{"billing-4.db", 2 * 24 * time.Hour},  // fresh
-		{"billing-5.db", 1 * 24 * time.Hour},  // fresh
-		{"billing-6.db", 6 * time.Hour},       // fresh (latest)
+		{"billing-1.db", 10 * 24 * time.Hour},   // old → should prune
+		{"billing-2.db", 5 * 24 * time.Hour},    // old → should prune (over retain)
+		{"billing-3.db", 4 * 24 * time.Hour},    // old → kept if among latest 3
+		{"billing-4.db", 2 * 24 * time.Hour},    // fresh
+		{"billing-5.db", 1 * 24 * time.Hour},    // fresh
+		{"billing-6.db", 6 * time.Hour},         // fresh (latest)
 		{"random-file.db", 30 * 24 * time.Hour}, // wrong prefix → ignored
 	}
 	for _, c := range cases {

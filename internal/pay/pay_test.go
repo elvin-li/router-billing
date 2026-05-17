@@ -176,7 +176,7 @@ func TestAlipaySignDeterministic(t *testing.T) {
 		"method":      "alipay.trade.precreate",
 		"timestamp":   "2025-01-01 12:00:00",
 		"biz_content": `{"out_trade_no":"O1"}`,
-		"":            "skip-empty-value-key",      // empty value → skipped
+		"":            "skip-empty-value-key", // empty value → skipped
 	}
 	s1, err := a.sign(params)
 	if err != nil {

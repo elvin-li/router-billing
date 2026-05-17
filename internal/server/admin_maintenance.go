@@ -17,12 +17,12 @@ func (a *App) handleAdminMaintenance(w http.ResponseWriter, r *http.Request) {
 		dbSize = uint64(st.Size())
 	}
 	a.render(w, "admin_maintenance.html", a.adminCtx(r, "maintenance", map[string]any{
-		"DBPath":         a.Cfg.DBPath,
-		"DBSize":         dbSize,
-		"PendingPath":    pending,
-		"PendingSize":    pendingSize,
-		"BackupDir":      a.Cfg.Backup.Dir,
-		"BackupEnabled":  a.Cfg.Backup.Enabled,
-		"BackupRetain":   a.Cfg.Backup.RetainDays,
+		"DBPath":        a.Cfg.DBPath,
+		"DBSize":        dbSize,
+		"PendingPath":   pending,
+		"PendingSize":   pendingSize,
+		"BackupDir":     a.Cfg.Backup.Dir,
+		"BackupEnabled": a.Cfg.Backup.Enabled,
+		"BackupRetain":  a.Cfg.Backup.RetainDays,
 	}))
 }
