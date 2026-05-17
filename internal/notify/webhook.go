@@ -37,8 +37,9 @@ type Event struct {
 }
 
 type Notifier struct {
-	URL    string
-	Secret string
+	URL        string
+	Secret     string
+	RetryDelay time.Duration // 0 = default 2s; tests inject short values
 
 	HTTPClient *http.Client
 	queue      chan Event
@@ -51,6 +52,7 @@ func New(url, secret string) *Notifier {
 	return &Notifier{
 		URL:        url,
 		Secret:     secret,
+		RetryDelay: 2 * time.Second,
 		HTTPClient: &http.Client{Timeout: 8 * time.Second},
 		queue:      make(chan Event, 64),
 	}
@@ -111,8 +113,16 @@ func (n *Notifier) deliver(ctx context.Context, ev Event, attempt int) {
 		err = fmt.Errorf("http %d", resp.StatusCode)
 	}
 	if attempt < 1 {
-		// one retry after 2s
-		time.Sleep(2 * time.Second)
+		// One retry, default 2s. Tests set RetryDelay to ~10ms.
+		delay := n.RetryDelay
+		if delay <= 0 {
+			delay = 2 * time.Second
+		}
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(delay):
+		}
 		n.deliver(ctx, ev, attempt+1)
 		return
 	}
