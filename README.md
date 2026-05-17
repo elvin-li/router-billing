@@ -1,6 +1,6 @@
 # 路由器计费系统（router-billing）
 
-OpenWrt（aarch64）上运行的 MAC 地址计费认证系统。**完全不影响免费 SSID**，只对收费 SSID 上的客户端执行 MAC 白名单准入。
+OpenWrt（aarch64）上运行的 MAC 地址计费认证系统。**只对收费 SSID 上的客户端执行 MAC 白名单准入**；熟人/管理 SSID（Free_WiFi · WPA2 加密）完全不受计费逻辑影响。
 
 ## 三套 SSID
 
