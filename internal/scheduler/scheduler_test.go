@@ -73,7 +73,7 @@ func TestRunSurvivesExpirerError(t *testing.T) {
 
 func TestRunDefaultsIntervalWhenZero(t *testing.T) {
 	// If interval ≤ 0, scheduler should default to 1 hour. We can't wait
-	// an hour, so verify by cancelling fast and noting only the initial fired.
+	// an hour, so verify by canceling fast and noting only the initial fired.
 	e := &fakeExpirer{}
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})

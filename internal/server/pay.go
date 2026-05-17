@@ -39,7 +39,7 @@ func (a *App) handlePayCreate(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "method", http.StatusMethodNotAllowed)
 		return
 	}
-	// Cheap defence against payment-intent flood from a single source — both
+	// Cheap defense against payment-intent flood from a single source — both
 	// WeChat and Alipay rate-limit downstream, but every flood-create costs
 	// us a sqlite write + outbound HTTPS roundtrip. 20/min/IP is generous
 	// for the worst legitimate user (fat-finger reload spam).

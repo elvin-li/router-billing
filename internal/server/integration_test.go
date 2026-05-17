@@ -457,6 +457,76 @@ func TestPortalAnnouncesPWAAssets(t *testing.T) {
 	}
 }
 
+func TestAdminPlansPageRenders(t *testing.T) {
+	app := setupTestApp(t)
+	h := app.Routes()
+	jar := loginAdmin(t, h)
+	_, body := do(t, h, "GET", "/admin/plans", nil, jar)
+	for _, want := range []string{"套餐管理", "新增 / 修改套餐", `name="key"`, `name="days"`} {
+		if !strings.Contains(body, want) {
+			t.Errorf("plans page missing %q", want)
+		}
+	}
+}
+
+func TestAdminAuditPageRendersAndFilters(t *testing.T) {
+	ctx := context.Background()
+	app := setupTestApp(t)
+	// Seed a few audit rows so the filter has something to find.
+	app.DB.Audit(ctx, "admin", "login", "", "ok")
+	app.DB.Audit(ctx, "admin", "grant", "AA:BB:CC:DD:EE:FF", "30 days")
+	app.DB.Audit(ctx, "user:13800138000", "redeem", "AA:BB:CC:DD:EE:FF", "voucher=X")
+
+	h := app.Routes()
+	jar := loginAdmin(t, h)
+
+	_, all := do(t, h, "GET", "/admin/audit", nil, jar)
+	for _, want := range []string{"审计日志", "grant", "redeem", "login"} {
+		if !strings.Contains(all, want) {
+			t.Errorf("audit page missing %q", want)
+		}
+	}
+
+	// Filter by action=grant should not include the redeem/login rows.
+	_, filtered := do(t, h, "GET", "/admin/audit?action=grant", nil, jar)
+	if !strings.Contains(filtered, "grant") {
+		t.Error("filtered page lost the grant row")
+	}
+	if strings.Contains(filtered, "voucher=X") {
+		t.Error("filtered page should not include redeem row (filter by action=grant)")
+	}
+}
+
+func TestAdminVoucherPrintPageRenders(t *testing.T) {
+	ctx := context.Background()
+	app := setupTestApp(t)
+	for i, code := range []string{"TESTCODE2222", "TESTCODE3333", "TESTCODE4444"} {
+		if _, err := app.DB.CreateVoucher(ctx, code, 30, "lab", "print-batch", nil); err != nil {
+			t.Fatalf("seed %d: %v", i, err)
+		}
+	}
+	h := app.Routes()
+	jar := loginAdmin(t, h)
+
+	_, body := do(t, h, "GET", "/admin/vouchers/print?batch=print-batch", nil, jar)
+	// Pretty-codes are formatted 4-4-4
+	for _, want := range []string{"TEST-CODE-2222", "TEST-CODE-3333", "TEST-CODE-4444",
+		"30 天", "充值卡", "@media print"} {
+		if !strings.Contains(body, want) {
+			t.Errorf("print page missing %q", want)
+		}
+	}
+
+	// The QR endpoint should return PNG.
+	res, _ := do(t, h, "GET", "/admin/vouchers/print/qr?code=TESTCODE2222", nil, jar)
+	if res.StatusCode != 200 {
+		t.Fatalf("qr endpoint: %d", res.StatusCode)
+	}
+	if ct := res.Header.Get("Content-Type"); ct != "image/png" {
+		t.Errorf("qr content-type = %q", ct)
+	}
+}
+
 func TestRedeemRateLimit(t *testing.T) {
 	app := setupTestApp(t)
 	// Shrink the window so the test runs fast.
