@@ -1,5 +1,43 @@
 # Changelog
 
+## v0.10.2 — 安全审计：6 项发现，5 项已修
+
+针对内部代码的系统性安全 review，发现 6 项问题，全部修复（1 项 LOW 一起做）。
+详细威胁模型、findings 表、reporting 流程见 [SECURITY.md](SECURITY.md)。
+
+### 修复
+- **H1 — 用户被停用后旧 session 仍有效（HIGH）**
+  `/admin/users/suspend` 翻了 `users.suspended` 但没动 `sessions` 表 → 刚被停用的用户
+  可以继续用到 30 天的 cookie 过期。新增 `db.DeleteSessionsByUserID()`；suspend 处理器
+  调用后审计行记录被吊销的 session 数
+- **H2 — 防御深度：每次请求重查 Suspended（HIGH）**
+  `currentUserID` 重新加载 User 行；Suspended=true 即返 0 → 即便 H1 的 DELETE 失败也兜得住
+- **H3 — Cookie 缺 `Secure` 标记（HIGH）**
+  rb_admin / rb_user / rb_csrf 始终非 Secure。新增 `isHTTPS(r)` 辅助函数（检测 r.TLS
+  或 X-Forwarded-Proto: https），4 处 SetCookie 全部接上
+- **M1 — SQLite DB 文件世界可读（MEDIUM）**
+  含 bcrypt 哈希 + 支付交易号。`db.Open` Ping 后立即 chmod 0600 主文件 + WAL + SHM
+- **M2 — 管理员登录限流只按 IP（MEDIUM）**
+  新增 `adminLoginByUser` 限流器（5 次/5 分钟/用户名）→ IP 轮换的 botnet 也突破不了
+- **L1 — grant/revoke 审计未记客户端 IP（LOW）**
+  detail 列新增 `ip=...` 字段，便于多管理员场景下溯源
+
+### 测试（103 → 108）
+- `TestSuspendKicksLoggedInUser` — H1 happy path
+- `TestSuspendedFlagAlsoBlocksValidSession` — H2 防御深度
+- `TestSecureCookieSetWhenBehindTLS` — H3，两种场景：HTTP + 模拟反向代理
+- `TestAdminLoginRateLimitByUsername` — M2，用 X-Forwarded-For 变 IP，证明
+  仅 IP 限流被绕过、按用户名限流挡住第 4 次
+- `TestSQLiteDBFileIsOwnerOnly` — M1，断言 mode 0600
+
+### 文档
+- **新增 [SECURITY.md](SECURITY.md)**：威胁模型 7 类、现有控制 8 大类（auth/session/CSRF/
+  输入/支付/磁盘/HTTP头/审计）、本轮 6 个发现的 root cause + 修复方案、明确"不修"项
+  （无 TLS in-process、明文密码可选、MAC 欺骗、无 2FA、/redeem 不反 replay）
+- 报告漏洞流程：GitHub 私有 advisory（不公开 issue）
+
+---
+
 ## v0.10.1 — 可测性、Release 自动化、PWA、Docker
 
 ### 可测性
