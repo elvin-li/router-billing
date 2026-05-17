@@ -21,9 +21,9 @@ jobs:
           git diff --exit-code -- go.mod go.sum
       - name: go vet
         run: go vet ./...
-      - name: go test (verbose)
-        run: CGO_ENABLED=0 go test -v -race ./...
-      - name: go build local
+      - name: go test (race — needs cgo, default on linux runners)
+        run: CGO_ENABLED=1 go test -v -race ./...
+      - name: go build local (static, no cgo)
         run: CGO_ENABLED=0 go build -o /tmp/router-billing ./cmd/router-billing
       - name: --check-config
         run: /tmp/router-billing --check-config -config config.example.yaml || true

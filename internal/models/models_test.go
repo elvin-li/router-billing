@@ -41,8 +41,8 @@ func TestValidPhone(t *testing.T) {
 		{"19999999999", true},
 		{"12000000000", false}, // 12-xxx is not a valid prefix
 		{"10000000000", false},
-		{"1380013800", false}, // 10 digits
-		{"138001380000", false}, // 12 digits
+		{"1380013800", false},     // 10 digits
+		{"138001380000", false},   // 12 digits
 		{"+8613800138000", false}, // with country code — not supported
 		{"abcdefghijk", false},
 		{"", false},

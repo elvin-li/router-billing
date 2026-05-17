@@ -9,10 +9,10 @@ import (
 // CSRF — double-submit cookie pattern. SameSite=Lax on our session cookies
 // already blocks most cross-site POSTs, but this is belt-and-suspenders.
 //
-//   * Every response includes an `rb_csrf` cookie (set on first request).
-//   * Templates inject the cookie value via the {{csrf .}} helper
+//   - Every response includes an `rb_csrf` cookie (set on first request).
+//   - Templates inject the cookie value via the {{csrf .}} helper
 //     (reads from request context).
-//   * Authed POST handlers reject when the form value (or X-CSRF-Token
+//   - Authed POST handlers reject when the form value (or X-CSRF-Token
 //     header) doesn't match the cookie.
 //
 // Skipped paths: /notify/* (signed by upstream), /metrics, /redeem,

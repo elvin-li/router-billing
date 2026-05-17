@@ -27,13 +27,13 @@ import (
 //	                 iifname "br-paid" drop }
 //	}
 type Manager struct {
-	Family  string // inet
-	Table   string // billing
-	Set     string // mac_paid
-	Iface   string // br-paid (for logging only)
-	NftBin  string // /usr/sbin/nft
-	mu      sync.Mutex
-	dryRun  bool
+	Family string // inet
+	Table  string // billing
+	Set    string // mac_paid
+	Iface  string // br-paid (for logging only)
+	NftBin string // /usr/sbin/nft
+	mu     sync.Mutex
+	dryRun bool
 }
 
 func New(family, table, setName, iface string) *Manager {

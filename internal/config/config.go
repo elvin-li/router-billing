@@ -12,23 +12,23 @@ import (
 )
 
 type Config struct {
-	Listen        string          `yaml:"listen"`
-	DBPath        string          `yaml:"db_path"`
-	WebRoot       string          `yaml:"web_root"`
-	PaidIface     string          `yaml:"paid_iface"`
-	PortalHost    string          `yaml:"portal_host"`
-	PortalPort    int             `yaml:"portal_port"`
-	Admin         Admin           `yaml:"admin"`                // legacy single-admin
-	Admins        []Admin         `yaml:"admins"`               // multi-admin list
-	MetricsToken  string          `yaml:"metrics_token"`        // optional bearer for /metrics
-	SSIDs         SSIDInfo        `yaml:"ssids"`                // displayed on /admin/ssid-cards
-	Plans         map[string]Plan `yaml:"plans"`
-	Pay           Pay             `yaml:"pay"`
-	Firewall      Firewall        `yaml:"firewall"`
-	Scheduler     Scheduler       `yaml:"scheduler"`
-	Backup        Backup          `yaml:"backup"`
-	Webhook       Webhook         `yaml:"webhook"`
-	WalledGarden  WalledGarden    `yaml:"walled_garden"`
+	Listen       string          `yaml:"listen"`
+	DBPath       string          `yaml:"db_path"`
+	WebRoot      string          `yaml:"web_root"`
+	PaidIface    string          `yaml:"paid_iface"`
+	PortalHost   string          `yaml:"portal_host"`
+	PortalPort   int             `yaml:"portal_port"`
+	Admin        Admin           `yaml:"admin"`         // legacy single-admin
+	Admins       []Admin         `yaml:"admins"`        // multi-admin list
+	MetricsToken string          `yaml:"metrics_token"` // optional bearer for /metrics
+	SSIDs        SSIDInfo        `yaml:"ssids"`         // displayed on /admin/ssid-cards
+	Plans        map[string]Plan `yaml:"plans"`
+	Pay          Pay             `yaml:"pay"`
+	Firewall     Firewall        `yaml:"firewall"`
+	Scheduler    Scheduler       `yaml:"scheduler"`
+	Backup       Backup          `yaml:"backup"`
+	Webhook      Webhook         `yaml:"webhook"`
+	WalledGarden WalledGarden    `yaml:"walled_garden"`
 }
 
 // Admin is either {username,password} or {username,password_hash}.

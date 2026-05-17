@@ -239,8 +239,8 @@ func (a *App) handleAdminDevices(w http.ResponseWriter, r *http.Request) {
 	sortDevices(devices)
 
 	a.render(w, "admin_devices.html", a.adminCtx(r, "devices", map[string]any{
-		"Iface":      iface,
-		"Devices":    devices,
+		"Iface":       iface,
+		"Devices":     devices,
 		"AutoRefresh": 30, // seconds
 	}))
 }

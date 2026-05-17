@@ -24,14 +24,14 @@ func (a *App) handleAdminStatsStream(w http.ResponseWriter, r *http.Request) {
 		stats, _ := a.DB.Stats(r.Context())
 		att, _ := a.DB.Attention(r.Context())
 		buf, _ := json.Marshal(map[string]any{
-			"total":          stats.Total,
-			"active":         stats.Active,
-			"expired":        stats.Expired,
-			"users":          stats.Users,
-			"revenue_cents":  stats.RevenueCents,
-			"attention":      att,
+			"total":           stats.Total,
+			"active":          stats.Active,
+			"expired":         stats.Expired,
+			"users":           stats.Users,
+			"revenue_cents":   stats.RevenueCents,
+			"attention":       att,
 			"attention_total": att.Total(),
-			"ts":             time.Now().Unix(),
+			"ts":              time.Now().Unix(),
 		})
 		fmt.Fprintf(w, "event: stats\ndata: %s\n\n", buf)
 		flusher.Flush()

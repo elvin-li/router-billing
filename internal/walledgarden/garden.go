@@ -27,8 +27,8 @@ type Resolver struct {
 	// Lookup overrides DNS (used in tests). nil → net.DefaultResolver.
 	Lookup func(ctx context.Context, host string) ([]string, error)
 
-	mu       sync.Mutex
-	lastIPs  map[string]bool // most recent resolved set (lowercase host stripped, IPs)
+	mu      sync.Mutex
+	lastIPs map[string]bool // most recent resolved set (lowercase host stripped, IPs)
 }
 
 func (r *Resolver) Run(ctx context.Context) {

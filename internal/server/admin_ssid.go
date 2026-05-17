@@ -11,7 +11,9 @@ import (
 )
 
 // SSID join QR follows the de-facto Wi-Fi QR convention:
-//   WIFI:T:<auth>;S:<ssid>;P:<password>;H:<hidden>;;
+//
+//	WIFI:T:<auth>;S:<ssid>;P:<password>;H:<hidden>;;
+//
 // nopassword → T:nopass, omit P
 //
 // Most modern phones recognise it from the camera.

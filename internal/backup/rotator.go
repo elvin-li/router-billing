@@ -16,12 +16,12 @@ import (
 )
 
 type Rotator struct {
-	DB           *db.DB
-	DBPath       string        // /var/lib/router-billing/billing.db
-	Dir          string        // /var/lib/router-billing/backups
-	RetainDays   int           // 7
-	Interval     time.Duration // 24h
-	Enabled      bool
+	DB         *db.DB
+	DBPath     string        // /var/lib/router-billing/billing.db
+	Dir        string        // /var/lib/router-billing/backups
+	RetainDays int           // 7
+	Interval   time.Duration // 24h
+	Enabled    bool
 }
 
 func (r *Rotator) Run(ctx context.Context) {

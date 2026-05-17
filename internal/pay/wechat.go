@@ -39,9 +39,9 @@ type WeChat struct {
 	// platformCerts is the auto-fetched, AES-GCM-decrypted set of WeChat
 	// platform certificates used to verify notify-webhook signatures.
 	// Refreshed lazily; cached in memory only.
-	certMu       sync.Mutex
+	certMu        sync.Mutex
 	platformCerts map[string]*x509.Certificate
-	certsFetched time.Time
+	certsFetched  time.Time
 }
 
 const wxPayBase = "https://api.mch.weixin.qq.com"
@@ -63,12 +63,12 @@ func NewWeChat(mchID, appID, apiV3Key, serialNo, privKeyPath, notifyURL string) 
 }
 
 type wxNativeReq struct {
-	AppID       string       `json:"appid"`
-	MchID       string       `json:"mchid"`
-	Description string       `json:"description"`
-	OutTradeNo  string       `json:"out_trade_no"`
-	NotifyURL   string       `json:"notify_url"`
-	Amount      wxNativeAmt  `json:"amount"`
+	AppID       string      `json:"appid"`
+	MchID       string      `json:"mchid"`
+	Description string      `json:"description"`
+	OutTradeNo  string      `json:"out_trade_no"`
+	NotifyURL   string      `json:"notify_url"`
+	Amount      wxNativeAmt `json:"amount"`
 }
 
 type wxNativeAmt struct {

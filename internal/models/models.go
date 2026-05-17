@@ -80,7 +80,7 @@ type Sighting struct {
 
 type Voucher struct {
 	ID             int64      `json:"id"`
-	Code           string     `json:"code"`            // canonical, dash-less
+	Code           string     `json:"code"` // canonical, dash-less
 	Days           int        `json:"days"`
 	Label          string     `json:"label"`
 	Batch          string     `json:"batch"`

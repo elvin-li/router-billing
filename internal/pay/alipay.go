@@ -24,12 +24,12 @@ import (
 //
 // Reference: https://opendocs.alipay.com/open/02ekfg
 type Alipay struct {
-	AppID       string
-	PrivKey     *rsa.PrivateKey
-	AliPubKey   *rsa.PublicKey
-	NotifyURL   string
-	Gateway     string
-	HTTPClient  *http.Client
+	AppID      string
+	PrivKey    *rsa.PrivateKey
+	AliPubKey  *rsa.PublicKey
+	NotifyURL  string
+	Gateway    string
+	HTTPClient *http.Client
 }
 
 func NewAlipay(appID, privKeyPath, alipayPubKeyPath, notifyURL, gateway string) (*Alipay, error) {

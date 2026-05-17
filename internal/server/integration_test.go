@@ -318,4 +318,3 @@ func TestSecurityHeaders(t *testing.T) {
 		t.Errorf("CSP missing default-src self: %s", csp)
 	}
 }
-

@@ -19,12 +19,12 @@ import (
 // captureSrv records every request body + signature header and returns the
 // status code dictated by `respondWith` (callable: each call may return a new code).
 type captureSrv struct {
-	srv      *httptest.Server
-	mu       sync.Mutex
-	bodies   [][]byte
-	headers  []http.Header
-	respFn   func(call int) int
-	calls    int32
+	srv     *httptest.Server
+	mu      sync.Mutex
+	bodies  [][]byte
+	headers []http.Header
+	respFn  func(call int) int
+	calls   int32
 }
 
 func newCaptureSrv(t *testing.T, respFn func(int) int) *captureSrv {

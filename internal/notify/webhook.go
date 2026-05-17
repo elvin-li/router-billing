@@ -24,16 +24,16 @@ import (
 )
 
 type Event struct {
-	Type      string    `json:"type"`       // "pay" / "redeem" / "grant" / "revoke" / "user_login" / ...
-	At        time.Time `json:"at"`
-	Actor     string    `json:"actor,omitempty"`
-	MAC       string    `json:"mac,omitempty"`
-	UserID    int64     `json:"user_id,omitempty"`
-	Amount    int       `json:"amount_cents,omitempty"`
-	Days      int       `json:"days,omitempty"`
-	Detail    string    `json:"detail,omitempty"`
-	OrderNo   string    `json:"order_no,omitempty"`
-	Voucher   string    `json:"voucher,omitempty"`
+	Type    string    `json:"type"` // "pay" / "redeem" / "grant" / "revoke" / "user_login" / ...
+	At      time.Time `json:"at"`
+	Actor   string    `json:"actor,omitempty"`
+	MAC     string    `json:"mac,omitempty"`
+	UserID  int64     `json:"user_id,omitempty"`
+	Amount  int       `json:"amount_cents,omitempty"`
+	Days    int       `json:"days,omitempty"`
+	Detail  string    `json:"detail,omitempty"`
+	OrderNo string    `json:"order_no,omitempty"`
+	Voucher string    `json:"voucher,omitempty"`
 }
 
 type Notifier struct {
