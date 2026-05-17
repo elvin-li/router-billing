@@ -49,12 +49,21 @@ func ListOnInterface(ctx context.Context, iface string) ([]Entry, error) {
 	if err := cmd.Run(); err != nil {
 		return nil, fmt.Errorf("ip neigh show dev %s: %w", iface, err)
 	}
+	return parseNeighOutput(out.String()), nil
+}
+
+// parseNeighOutput is the pure-function half of ListOnInterface so it can be
+// covered by tests without spawning `ip`. Returns entries in source order,
+// deduped by MAC (devices with both IPv4 and IPv6 neigh entries produce just
+// one Entry — the first seen).
+func parseNeighOutput(out string) []Entry {
 	var entries []Entry
 	seen := map[string]bool{}
-	for _, line := range strings.Split(out.String(), "\n") {
+	for _, line := range strings.Split(out, "\n") {
 		// Examples:
 		//   192.168.5.42 lladdr aa:bb:cc:dd:ee:ff REACHABLE
 		//   192.168.5.43 FAILED
+		//   fe80::1 lladdr aa:bb:cc:dd:ee:ff router STALE
 		fields := strings.Fields(line)
 		if len(fields) < 2 {
 			continue
@@ -77,12 +86,11 @@ func ListOnInterface(ctx context.Context, iface string) ([]Entry, error) {
 		if mac == "" || state == "FAILED" || state == "INCOMPLETE" {
 			continue
 		}
-		// Dedupe by MAC (a device may have IPv4 + IPv6 entries).
 		if seen[mac] {
 			continue
 		}
 		seen[mac] = true
 		entries = append(entries, Entry{IP: ipStr, MAC: mac, State: state})
 	}
-	return entries, nil
+	return entries
 }
