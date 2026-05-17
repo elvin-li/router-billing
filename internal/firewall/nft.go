@@ -322,7 +322,10 @@ func (m *Manager) run(ctx context.Context, args ...string) error {
 	}
 	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
-	cmd := exec.CommandContext(ctx, m.NftBin, args...)
+	// G204 nolint: NftBin is resolved by exec.LookPath at construction time
+	// from a fixed list ("nft" / "/usr/sbin/nft"), never user-controlled. args
+	// are built internally (set/element ops), not from external input.
+	cmd := exec.CommandContext(ctx, m.NftBin, args...) //nolint:gosec
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
 	if err := cmd.Run(); err != nil {
@@ -337,7 +340,7 @@ func (m *Manager) runOut(ctx context.Context, args ...string) (string, error) {
 	}
 	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
-	cmd := exec.CommandContext(ctx, m.NftBin, args...)
+	cmd := exec.CommandContext(ctx, m.NftBin, args...) //nolint:gosec // see run()
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
