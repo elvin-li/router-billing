@@ -34,6 +34,7 @@ type App struct {
 	loginByPhoneLimit *rateLimiter // user login, keyed by phone
 	registerLimiter   *rateLimiter
 	adminLoginLimiter *rateLimiter
+	redeemLimiter     *rateLimiter // voucher redemption, keyed by IP
 
 	waitMu  sync.Mutex
 	waiters map[string][]chan struct{} // order_no → pending wait channels
@@ -50,6 +51,7 @@ func NewApp(cfg *config.Config, dbx *db.DB, svc *service.MACService) (*App, erro
 		loginByPhoneLimit: newRateLimiter(5, 5*time.Minute),
 		registerLimiter:   newRateLimiter(4, 1*time.Hour),
 		adminLoginLimiter: newRateLimiter(8, 5*time.Minute),
+		redeemLimiter:     newRateLimiter(10, 10*time.Minute),
 		waiters:           map[string][]chan struct{}{},
 	}
 
@@ -147,6 +149,8 @@ func (a *App) Routes() http.Handler {
 	mux.HandleFunc("/admin/audit", a.requireAdmin(a.handleAdminAudit))
 	mux.HandleFunc("/admin/health", a.requireAdmin(a.handleAdminHealth))
 	mux.HandleFunc("/admin/backup", a.requireAdmin(a.handleAdminBackup))
+	mux.HandleFunc("/admin/backup/restore", a.requireAdmin(a.handleAdminBackupRestore))
+	mux.HandleFunc("/admin/maintenance", a.requireAdmin(a.handleAdminMaintenance))
 	mux.HandleFunc("/admin/ssid-cards", a.requireAdmin(a.handleAdminSSIDCards))
 	mux.HandleFunc("/admin/ssid-cards/qr", a.requireAdmin(a.handleAdminSSIDCardQR))
 	mux.HandleFunc("/admin/devices/stream", a.requireAdmin(a.handleAdminDevicesStream))

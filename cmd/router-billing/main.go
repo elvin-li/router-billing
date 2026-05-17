@@ -34,9 +34,14 @@ func main() {
 	showVersion := flag.Bool("version", false, "print version and exit")
 	checkConfig := flag.Bool("check-config", false, "validate the config file and exit")
 	genHash := flag.Bool("gen-password-hash", false, "read a password from stdin and print its bcrypt hash; ideal for admins[].password_hash")
+	logJSON := flag.Bool("log-json", false, "emit each log line as a JSON object (for ingestion into ELK/Loki/etc.)")
 	flag.Parse()
 
-	log.SetFlags(log.LstdFlags | log.Lmicroseconds)
+	if *logJSON {
+		setupJSONLogger(version)
+	} else {
+		log.SetFlags(log.LstdFlags | log.Lmicroseconds)
+	}
 
 	if *showVersion {
 		fmt.Printf("router-billing %s\n", version)
@@ -62,6 +67,11 @@ func main() {
 		log.Fatalf("config: %v", err)
 	}
 
+	// If the admin uploaded a backup via /admin/backup/restore, the file is
+	// staged as <db>.pending-restore. Apply it BEFORE opening the DB pool.
+	if err := server.MaybeApplyPendingRestore(cfg.DBPath); err != nil {
+		log.Printf("warn: pending restore not applied: %v", err)
+	}
 	dbx, err := db.Open(cfg.DBPath)
 	if err != nil {
 		log.Fatalf("db: %v", err)

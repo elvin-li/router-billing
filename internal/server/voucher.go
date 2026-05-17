@@ -191,6 +191,12 @@ func (a *App) handleRedeem(w http.ResponseWriter, r *http.Request) {
 		http.Redirect(w, r, "/redeem", http.StatusSeeOther)
 		return
 	}
+	// Rate-limit by client IP. 10 tries / 10 minutes is generous for honest
+	// fat-finger typos and prohibitive for brute-forcing the 12-char alphabet.
+	if a.redeemLimiter != nil && !a.redeemLimiter.allow(clientIP(r)) {
+		http.Redirect(w, r, "/redeem?err="+httpEsc("尝试过于频繁，请 10 分钟后再试"), http.StatusSeeOther)
+		return
+	}
 	if err := r.ParseForm(); err != nil {
 		http.Error(w, "form", http.StatusBadRequest)
 		return

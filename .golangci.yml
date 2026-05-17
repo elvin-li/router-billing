@@ -1,0 +1,57 @@
+# golangci-lint config — opinionated but pragmatic for a CGO-light
+# CLI/HTTP-server project. See https://golangci-lint.run/usage/configuration/
+run:
+  timeout: 5m
+  go: "1.22"
+
+linters:
+  disable-all: true
+  enable:
+    - errcheck       # unchecked errors
+    - govet          # shadowing, atomic alignment, etc.
+    - gosimple       # idiom simplifications
+    - ineffassign    # dead assignments
+    - staticcheck    # bug + style smells
+    - unused         # dead code
+    - misspell       # typos in comments + strings
+    - bodyclose      # missing resp.Body.Close()
+    - gosec          # security smells (sql injection, weak rand, etc.)
+    - gocyclo        # complexity ceiling
+    - goimports      # import ordering / unused
+    - prealloc       # missed slice preallocation
+
+linters-settings:
+  gocyclo:
+    min-complexity: 30
+  misspell:
+    locale: US
+    ignore-words:
+      - 路由器
+  gosec:
+    excludes:
+      - G104   # errcheck handles this
+      - G304   # we open paths from validated config (Cfg.DBPath etc.)
+      - G404   # math/rand uses are non-crypto on purpose (e.g. test helpers)
+  goimports:
+    local-prefixes: router-billing
+
+issues:
+  max-issues-per-linter: 0
+  max-same-issues: 0
+  # Don't lint the embedded SQL strings as if they were Go.
+  exclude-dirs:
+    - build
+    - deploy
+  exclude-rules:
+    # Test code is allowed to be a bit fast-and-loose.
+    - path: _test\.go
+      linters:
+        - gocyclo
+        - errcheck
+        - gosec
+        - prealloc
+    # _ = err pattern is intentional for best-effort writes.
+    - text: "Error return value of .* is not checked"
+      linters:
+        - errcheck
+      path: internal/db/db.go

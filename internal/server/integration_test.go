@@ -1,8 +1,10 @@
 package server
 
 import (
+	"bytes"
 	"context"
 	"io"
+	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -11,6 +13,7 @@ import (
 	"runtime"
 	"strings"
 	"testing"
+	"time"
 
 	"router-billing/internal/config"
 	"router-billing/internal/db"
@@ -273,6 +276,145 @@ func TestVoucherFullFlow(t *testing.T) {
 	loc = res.Header.Get("Location")
 	if !strings.Contains(loc, "err=") {
 		t.Errorf("invalid code: %s", loc)
+	}
+}
+
+// loginAdmin posts admin creds and returns a cookie jar with rb_admin + rb_csrf.
+func loginAdmin(t *testing.T, h http.Handler) map[string]string {
+	t.Helper()
+	res, _ := do(t, h, "POST", "/admin/login",
+		url.Values{"username": {"admin"}, "password": {"admin-pw"}}, nil)
+	if res.StatusCode != 303 {
+		t.Fatalf("login: %d", res.StatusCode)
+	}
+	jar := cookieJar(res)
+	// Touch a page to pick up an rb_csrf cookie.
+	res, _ = do(t, h, "GET", "/admin/macs", nil, jar)
+	for k, v := range cookieJar(res) {
+		jar[k] = v
+	}
+	return jar
+}
+
+func TestMaintenancePageRenders(t *testing.T) {
+	app := setupTestApp(t)
+	h := app.Routes()
+	jar := loginAdmin(t, h)
+	res, body := do(t, h, "GET", "/admin/maintenance", nil, jar)
+	if res.StatusCode != 200 {
+		t.Fatalf("status: %d", res.StatusCode)
+	}
+	for _, want := range []string{"下载完整备份", "从备份恢复", "上传 + 暂存", `name="backup"`} {
+		if !strings.Contains(body, want) {
+			t.Errorf("missing %q in body", want)
+		}
+	}
+}
+
+func TestBackupRestoreRejectsNonSQLite(t *testing.T) {
+	app := setupTestApp(t)
+	h := app.Routes()
+	jar := loginAdmin(t, h)
+	tok := jar[csrfCookieName]
+	if tok == "" {
+		t.Fatal("no csrf token in jar")
+	}
+
+	body, ct := multipartBackup(t, "junk.db", []byte("definitely not a sqlite file"))
+	req := httptest.NewRequest("POST", "/admin/backup/restore", body)
+	req.Header.Set("Content-Type", ct)
+	req.Header.Set("X-CSRF-Token", tok)
+	for k, v := range jar {
+		req.AddCookie(&http.Cookie{Name: k, Value: v})
+	}
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, req)
+	if rr.Code != 400 {
+		t.Errorf("expected 400 for bad sqlite; got %d: %s", rr.Code, rr.Body.String())
+	}
+	if !strings.Contains(rr.Body.String(), "magic") && !strings.Contains(rr.Body.String(), "SQLite") {
+		t.Errorf("error body should mention SQLite magic; got: %s", rr.Body.String())
+	}
+}
+
+func TestBackupRestoreAcceptsValidDB(t *testing.T) {
+	app := setupTestApp(t)
+	h := app.Routes()
+	jar := loginAdmin(t, h)
+	tok := jar[csrfCookieName]
+
+	// Use the live test DB file itself as the "upload" — guaranteed to pass
+	// both magic-header and macs-table checks.
+	_, _ = app.DB.Exec(context.Background(), "PRAGMA wal_checkpoint(TRUNCATE)")
+	raw, err := os.ReadFile(app.Cfg.DBPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	body, ct := multipartBackup(t, "billing-good.db", raw)
+	req := httptest.NewRequest("POST", "/admin/backup/restore", body)
+	req.Header.Set("Content-Type", ct)
+	req.Header.Set("X-CSRF-Token", tok)
+	for k, v := range jar {
+		req.AddCookie(&http.Cookie{Name: k, Value: v})
+	}
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, req)
+	if rr.Code != 200 {
+		t.Errorf("expected 200; got %d: %s", rr.Code, rr.Body.String())
+	}
+	if !strings.Contains(rr.Body.String(), "等待重启切换") {
+		t.Errorf("body missing staged message")
+	}
+	if _, err := os.Stat(app.Cfg.DBPath + ".pending-restore"); err != nil {
+		t.Errorf("expected pending file: %v", err)
+	}
+}
+
+// multipartBackup builds a multipart/form-data body with a `backup` field.
+func multipartBackup(t *testing.T, filename string, data []byte) (io.Reader, string) {
+	t.Helper()
+	var buf bytes.Buffer
+	w := multipart.NewWriter(&buf)
+	fw, err := w.CreateFormFile("backup", filename)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := fw.Write(data); err != nil {
+		t.Fatal(err)
+	}
+	if err := w.Close(); err != nil {
+		t.Fatal(err)
+	}
+	return &buf, w.FormDataContentType()
+}
+
+func TestRedeemRateLimit(t *testing.T) {
+	app := setupTestApp(t)
+	// Shrink the window so the test runs fast.
+	app.redeemLimiter = newRateLimiter(3, time.Hour)
+	h := app.Routes()
+
+	// First 3 attempts go through (each fails with "code not found" but the
+	// limiter still counts them).
+	for i := 0; i < 3; i++ {
+		res, _ := do(t, h, "POST", "/redeem",
+			url.Values{"code": {"AAAAAAAAAA22"}, "mac": {"aa:bb:cc:dd:ee:ff"}}, nil)
+		if res.StatusCode != 303 {
+			t.Fatalf("attempt %d: %d", i, res.StatusCode)
+		}
+		loc := res.Header.Get("Location")
+		if strings.Contains(loc, "尝试过于频繁") || strings.Contains(loc, "%e5%b0%9d") {
+			t.Errorf("attempt %d should not be rate-limited yet: %s", i, loc)
+		}
+	}
+	// 4th hit gets the rate-limit redirect.
+	res, _ := do(t, h, "POST", "/redeem",
+		url.Values{"code": {"AAAAAAAAAA22"}, "mac": {"aa:bb:cc:dd:ee:ff"}}, nil)
+	loc := res.Header.Get("Location")
+	// URL-encoded "尝试" prefix
+	if !strings.Contains(loc, "%e5%b0%9d%e8%af%95") {
+		t.Errorf("4th attempt should be rate-limited; got %s", loc)
 	}
 }
 

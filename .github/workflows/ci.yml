@@ -68,3 +68,8 @@ jobs:
             echo "$out"
             exit 1
           fi
+      - name: golangci-lint
+        uses: golangci/golangci-lint-action@v6
+        with:
+          version: v1.61.0
+          args: --timeout=5m

@@ -1,0 +1,67 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>维护 · router-billing</title>
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body class="admin">
+<div class="admin-shell">
+  {{template "admin-sidebar" .}}
+  <main class="admin-main">
+    <div class="admin-header">
+      <div>
+        <h1>维护</h1>
+        <div class="crumbs">备份下载 · 恢复上传 · 健康检查</div>
+      </div>
+      <a href="/admin/health" target="_blank" class="btn outline small" style="width:auto;">查看 /health JSON</a>
+    </div>
+
+    {{template "flash" .}}
+
+    {{if gt .PendingSize 0}}
+    <section class="admin-card" style="border-left:4px solid var(--warning); background:#fffbeb;">
+      <h2 style="color:#b45309;">⚠ 待应用的恢复</h2>
+      <p>已上传的备份 <code>{{.PendingPath}}</code>（{{humanBytes .PendingSize}}）正在等待重启切换。</p>
+      <p>执行以下命令让新 DB 生效：</p>
+      <pre style="background:#0f172a;color:#f1f5f9;padding:12px 14px;border-radius:6px;overflow:auto;">/etc/init.d/router-billing restart</pre>
+      <p style="color:var(--text-soft);font-size:13px;">不想恢复了？删暂存文件即可：<code>rm {{.PendingPath}}</code></p>
+    </section>
+    {{end}}
+
+    <section class="admin-card">
+      <h2>下载完整备份</h2>
+      <p class="desc">即下即得 · 含所有 MAC / 订单 / 用户 / 充值码 / 审计日志。WAL checkpoint 后流式输出。</p>
+      <p>当前 DB：<code>{{.DBPath}}</code>（{{humanBytes .DBSize}}）</p>
+      <a href="/admin/backup" class="btn primary" style="width:auto;display:inline-block;">立即下载 .db 文件</a>
+    </section>
+
+    <section class="admin-card">
+      <h2>从备份恢复</h2>
+      <p class="desc">上传之前 <code>/admin/backup</code> 下载的 <code>.db</code> 文件。文件会被校验（SQLite magic + 含 macs 表）后暂存。</p>
+      <p style="color:var(--warning);">⚠ 当前 DB 不会立刻被替换；上传完成后必须 SSH 进路由器执行 <code>/etc/init.d/router-billing restart</code> 让切换生效。重启时旧 DB 会自动备份为 <code>{{.DBPath}}.before-restore-YYYYMMDD-HHMMSS</code>。</p>
+      <form method="post" action="/admin/backup/restore" enctype="multipart/form-data" class="form-grid" style="margin-top:14px;">
+        {{template "csrf" .}}
+        <div class="field" style="grid-column:1/-1;">
+          <label>.db 文件（≤ 256 MB）</label>
+          <input type="file" name="backup" accept=".db,application/x-sqlite3" required>
+        </div>
+        <div class="field-actions">
+          <button class="btn primary" type="submit" onclick="return confirm('确定要用上传的文件替换当前 DB？\n旧 DB 会备份保留。')">上传 + 暂存</button>
+        </div>
+      </form>
+    </section>
+
+    <section class="admin-card">
+      <h2>自动备份状态</h2>
+      <p>启用：<strong>{{if .BackupEnabled}}是{{else}}否（在 config.yaml 中设 backup.enabled: true 开启）{{end}}</strong></p>
+      {{if .BackupEnabled}}
+      <p>目录：<code>{{.BackupDir}}</code></p>
+      <p>保留：最近 <strong>{{.BackupRetain}}</strong> 天</p>
+      {{end}}
+    </section>
+  </main>
+</div>
+</body>
+</html>
