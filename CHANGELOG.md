@@ -39,6 +39,37 @@ Authy, 1Password, Bitwarden — every popular authenticator.
   - 5 wrong codes locks the pending session
   - No `totp_secret` → old single-stage flow still works
 
+### Programmatic admin API (Bearer auth)
+- `config.api_tokens: [{token, label}]` — list of Bearer tokens
+- Endpoints (Bearer-only, no CSRF):
+  - `GET  /api/admin/health` — same JSON as the cookie-gated version
+  - `GET  /api/admin/macs` — full MAC list as JSON
+  - `POST /api/admin/macs/grant` — `{mac, days, label?}` extends or adds
+  - `POST /api/admin/macs/revoke` — `{mac}` deletes from DB + firewall
+- Constant-time token compare; audit log records `actor: "api:<label>"`
+- 4 integration tests (401 path, valid grant, bad token, revoke round-trip)
+
+### SMS provider abstraction
+- `internal/sms` — `Provider` interface + `Sender` wrapper
+- `ConsoleProvider` for dev (writes to log + ring-buffers last N for tests)
+- Lays groundwork for Aliyun / Tencent / Twilio implementations that the
+  admin-reset-password flow will use; concrete adapters wait for real creds
+- 3 tests (nil sender → ErrNotConfigured, ring buffer eviction, default cap)
+
+### Sessions admin tool (v0.10.2 follow-on, mentioned for completeness)
+- `/admin/sessions` page lists every live session
+- One-click revoke per row
+- "🚨 revoke all other admin sessions" button for the "I lost my laptop"
+  scenario (keeps the requesting session alive)
+- 3 tests
+
+### Stats
+- 16 packages tested (was 15) — `totp`, `sms` join
+- 130 test functions (was 111)
+- All green on every commit since v0.10.2 except one transient gosec G505
+  flag-and-fix on `crypto/sha1` (immediately suppressed inline since RFC
+  6238 mandates SHA-1)
+
 ---
 
 ## v0.10.2 — 安全审计：6 项发现，5 项已修
