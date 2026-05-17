@@ -83,10 +83,13 @@ func main() {
 	}
 	defer dbx.Close()
 
-	fw := firewall.New(cfg.Firewall.Table, cfg.Firewall.TableName, cfg.Firewall.SetName, cfg.PaidIface)
+	fw, err := firewall.NewBackend(cfg.Firewall.Backend, cfg.Firewall.Table, cfg.Firewall.TableName,
+		cfg.Firewall.SetName, cfg.PaidIface, *dryFirewall)
+	if err != nil {
+		log.Fatalf("firewall: %v", err)
+	}
 	if *dryFirewall {
-		fw.SetDryRun(true)
-		log.Printf("firewall: dry-run mode enabled")
+		log.Printf("firewall: dry-run mode enabled (backend=%s)", strings.ToLower(strings.TrimSpace(cfg.Firewall.Backend)))
 	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
@@ -113,14 +116,21 @@ func main() {
 
 	// Walled garden: resolve and inject configured domains so unpaid users can
 	// reach payment infrastructure without being whitelisted first.
+	// Currently nftables-only — the IP-set side needs daddr matching that
+	// the iptables/ipset backend doesn't manage. Type-assert and skip
+	// gracefully on the iptables backend.
 	if len(cfg.WalledGarden.Domains) > 0 {
-		wg := &walledgarden.Resolver{
-			FW:              fw,
-			SetName:         "wg_paid",
-			Domains:         cfg.WalledGarden.Domains,
-			RefreshInterval: cfg.WalledGarden.RefreshInterval,
+		if nftMgr, ok := fw.(*firewall.Manager); ok {
+			wg := &walledgarden.Resolver{
+				FW:              nftMgr,
+				SetName:         "wg_paid",
+				Domains:         cfg.WalledGarden.Domains,
+				RefreshInterval: cfg.WalledGarden.RefreshInterval,
+			}
+			go wg.Run(ctx)
+		} else {
+			log.Printf("walled garden: configured but skipped — only the nftables backend supports it")
 		}
-		go wg.Run(ctx)
 	}
 
 	if cfg.Backup.Enabled {
