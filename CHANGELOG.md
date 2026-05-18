@@ -1,12 +1,12 @@
 # Changelog
 
-## v0.16 — 仪表盘 · 测试短信 (UI + API) · 可配置 HSTS · 可逆封禁
+## v0.16 — 仪表盘 · 测试短信 (UI + API) · 可配置 HSTS · 可逆封禁 · 会话 TTL
 
-Small but visible polish round. The dashboard is the big one — a
-proper landing page replacing the redirect-to-macs that v0.0 has
-shipped with. Plus four smaller items including a reversible MAC
-ban (fills the gap between "extend" and "delete") and an API
-endpoint that lets monitoring scripts text the operator.
+Polish round, mostly admin-side. The dashboard is the big one — a
+proper landing page replacing the redirect-to-macs that's shipped
+with every prior release. Plus five smaller items: programmatic
+SMS, reversible MAC ban, configurable session lifetimes, HSTS
+preload knobs, and a verify-your-SMS-provider button.
 
 ### `/admin/dashboard` landing page
 
@@ -95,6 +95,28 @@ API-originated SMS from admin-UI SMS.
 
 6 tests including the read-only-token regression guard.
 
+### Configurable session TTLs
+
+Previously hardcoded — admin 12h, user 30d. Now opt-in overrides:
+
+```yaml
+security:
+  admin_session_hours: 4    # default 12; range 1..168 (1w)
+  user_session_days: 90     # default 30; range 1..365 (1y)
+```
+
+Defaults stay safe. Out-of-range values fall back to the defaults
+(an unbounded TTL is a worse footgun than a typo). The previous
+package consts are gone — call sites go through
+`Security.AdminSessionTTL()` / `Security.UserSessionTTL()` which
+bake in the validation.
+
+Drive-by: post-login redirect now points to /admin/dashboard
+(matches the v0.16 root-redirect change).
+
+6 tests covering defaults, custom values, and out-of-range fallback
+for both knobs.
+
 ### Configurable HSTS
 
 The existing security middleware emitted a hardcoded
@@ -120,7 +142,7 @@ set).
 
 ### Stats
 - 17 packages tested
-- 286 test functions (was 258 in v0.15)
+- 292 test functions (was 258 in v0.15)
 
 ## v0.15 — 退款 · 用户详情页 · 搜索过滤 · 审计盲区清零 · 充值码 API
 
