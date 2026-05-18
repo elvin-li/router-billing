@@ -110,6 +110,72 @@ type apiUserSummary struct {
 	CreatedAt   time.Time `json:"created_at"`
 }
 
+// apiVoucher mirrors models.Voucher minus the raw code — we deliberately
+// truncate to a prefix in the JSON so a leaked monitoring token can't
+// harvest unredeemed codes for redemption. Same anti-leak posture as
+// /api/admin/users hiding password hashes.
+type apiVoucher struct {
+	ID             int64      `json:"id"`
+	CodePrefix     string     `json:"code_prefix"` // first 4 chars + "…"
+	Days           int        `json:"days"`
+	Label          string     `json:"label,omitempty"`
+	Batch          string     `json:"batch,omitempty"`
+	ExpiresAt      *time.Time `json:"expires_at,omitempty"`
+	RedeemedAt     *time.Time `json:"redeemed_at,omitempty"`
+	RedeemedByMac  string     `json:"redeemed_by_mac,omitempty"`
+	RedeemedUserID *int64     `json:"redeemed_user_id,omitempty"`
+	Revoked        bool       `json:"revoked"`
+	CreatedAt      time.Time  `json:"created_at"`
+}
+
+// GET /api/admin/vouchers?batch=&limit=
+//
+// Returns vouchers (default 200, max 1000). Optional `batch` filter mirrors
+// the /admin/vouchers UI. Codes are returned as 4-char prefixes only — the
+// usable plaintext stays out of the JSON since a token leak shouldn't enable
+// free MAC time.
+func (a *App) handleAPIVoucherList(w http.ResponseWriter, r *http.Request, _ string) {
+	q := r.URL.Query()
+	limit := 200
+	if s := q.Get("limit"); s != "" {
+		if n, err := strconv.Atoi(s); err == nil && n > 0 && n <= 1000 {
+			limit = n
+		}
+	}
+	vouchers, err := a.DB.ListVouchers(r.Context(), q.Get("batch"), limit)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+	out := make([]apiVoucher, 0, len(vouchers))
+	for _, v := range vouchers {
+		out = append(out, apiVoucher{
+			ID:             v.ID,
+			CodePrefix:     voucherCodePrefix(v.Code),
+			Days:           v.Days,
+			Label:          v.Label,
+			Batch:          v.Batch,
+			ExpiresAt:      v.ExpiresAt,
+			RedeemedAt:     v.RedeemedAt,
+			RedeemedByMac:  v.RedeemedByMac,
+			RedeemedUserID: v.RedeemedUserID,
+			Revoked:        v.Revoked,
+			CreatedAt:      v.CreatedAt,
+		})
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"vouchers": out})
+}
+
+// voucherCodePrefix is the truncation used in the JSON response — 4 chars +
+// "…". Anything shorter (defensive only — real codes are 12 chars) returns
+// the code as-is.
+func voucherCodePrefix(code string) string {
+	if len(code) <= 4 {
+		return code
+	}
+	return code[:4] + "…"
+}
+
 // apiAuditEntry is the JSON shape returned by /api/admin/audit. Mirrors
 // db.AuditEntry but with explicit JSON tags so the API contract is stable
 // even if the DB type changes.
