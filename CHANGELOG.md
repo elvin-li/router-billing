@@ -1,5 +1,111 @@
 # Changelog
 
+## v0.15 — 退款 · 用户详情页 · 搜索过滤 · 审计盲区清零
+
+Operational tooling round — the things admins actually do every day
+get faster. Plus closes the two state-mutators that weren't going
+to the audit log.
+
+### Refund flow (`/admin/orders/refund`)
+
+The big one — there was no way to record a refund. Admins had to
+either delete the order (losing the audit trail) or let it sit as
+"paid" while the gateway showed it as refunded.
+
+Flow:
+1. Admin processes the actual refund in WeChat/Alipay's own console
+   (we deliberately don't auto-call the refund API — that would need
+   another credentials set + a new failure surface).
+2. Admin clicks "退款" on /admin/orders, which opens a confirm
+   dialog showing order_no / MAC / days / amount.
+3. They type the full order_no into a confirm box to dodge fat-
+   finger mistakes, optionally note a reason.
+4. POST /admin/orders/refund runs MarkOrderRefunded in one
+   transaction: status → "refunded", trade_no appends "refund:
+   <reason>", MAC.expires_at rolls back by the order's `days`.
+5. If the rollback puts expires_at in the past, MAC status flips
+   to "expired" and a background a.MACSvc.Resync() pulls it from
+   the firewall set.
+
+`models.OrderRefunded = "refunded"` is the new status value.
+`MarkOrderRefunded` rejects pending / refunded orders ("only paid
+orders can be refunded"), so a fat-fingered double-click can't loop.
+Refunds audit as `order_refunded` with the reason + IP.
+
+9 tests covering DB rollback math, MAC expiry transition, error
+shape for unpaid/missing/already-refunded, confirm-box mismatch,
+audit-entry written, and the 已退款 pill rendering.
+
+### Per-user drill-down (`/admin/users/detail?id=N`)
+
+Support workflow win: a customer calls, admin clicks their phone on
+/admin/users, lands on ONE page with everything relevant.
+
+- Profile (phone, suspended pill, 2FA pill, backup-codes remaining).
+- Account actions card (suspend, reset password ± SMS, reset 2FA,
+  delete — all the /admin/users buttons consolidated here).
+- MAC table (all owned MACs + status + expiry).
+- Order table (last 50 with amount + status).
+- Active session table (token-prefix + expires).
+- Trusted device table (only when 2FA is enrolled).
+- Last 30 audit-log entries with IP extracted.
+
+Phone + ID cells on /admin/users now link to the detail page.
+
+New DB helper: `ListSessionsForUser(userID)` — symmetric to the
+existing `ListActiveSessions` but filtered to one user's live
+user-kind rows.
+
+7 tests covering full-profile render, TOTP/backup-codes display,
+missing/nonexistent-id redirects, trusted-device section only when
+enrolled, list-page links to detail, and session helper filters
+correctly.
+
+### Search + status filter on /admin/macs and /admin/orders
+
+Once a deploy has 50+ MACs or 500+ orders, the flat list becomes
+unworkable. Both pages now have a search box + status dropdown
+above the table:
+
+- /admin/macs: q matches MAC OR label; status=active/expired/blocked.
+- /admin/orders: q matches order_no OR mac OR trade_no;
+  status=pending/paid/failed/expired/refunded (the last value is
+  v0.15-new from the refund flow).
+- 已过滤 indicator + 清除 link when a filter is active.
+
+New DB helpers: `SearchMACs(q, status, limit)` and
+`SearchOrders(q, status, limit)`. Single parameterized SELECT.
+Empty q + empty status falls through to the un-filtered path so
+the common case stays a single index scan. Limits default 200,
+cap 1000 (matches SearchAudit).
+
+7 tests across the two endpoints + their DB helpers.
+
+### Audit gaps closed
+
+Two state-changing admin actions weren't going to the audit log.
+Found via a sweep: `grep "^func.*handleAdmin"` + check for
+`DB.Audit` calls in body.
+
+- POST /admin/macs/extend (per-row "续期" button) — now logs
+  `admin / extend / <MAC> / days=N ip=...`.
+- POST /admin/resync (sidebar "重建防火墙") — logs
+  `admin / firewall_resync` on success or
+  `admin / firewall_resync_failed / err=...` on failure.
+
+Other mutators were already audited: plan_save / plan_delete /
+schedule_set / schedule_clear / backup / restore_staged / suspend /
+delete / reset_password / reset_2fa / refunded / register / grant /
+revoke. Re-running the grep should now return zero unaudited
+mutators.
+
+2 tests POST each endpoint then ListAudit + assert the expected
+shape.
+
+### Stats
+- 17 packages tested
+- 252 test functions (was 226 in v0.14)
+
 ## v0.14 — API surface complete + reliability polish
 
 Five small improvements that round out what v0.13 started: complete
