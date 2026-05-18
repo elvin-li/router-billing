@@ -1,9 +1,80 @@
 # Changelog
 
-## v0.13 — SMS end-to-end + 用户自助二步验证
+## v0.13 — SMS end-to-end + 用户自助二步验证 + 备用码 + 管理员重置 2FA
 
-Three flows that all share the same trust model: prove control of a
-second factor before something sensitive happens.
+Four flows that all share the same trust model: prove control of a
+second factor before something sensitive happens. Plus the recovery
+paths (SMS reset, backup codes, admin reset) so the second factor
+never becomes a permanent lock-out.
+
+### TOTP 备用码 (10 个一次性恢复码)
+
+Without this an enrolled user who loses their phone is stuck. With
+this they keep going.
+
+- At successful 2FA enrollment we generate 10 fresh 8-char codes
+  (alphabet `ABCDEFGHJKLMNPQRSTUVWXYZ23456789` — visually
+  unambiguous, no 0/O/1/I/L), bcrypt-hash them into the new
+  `user_backup_codes` table, and render them ONCE on the page
+  immediately after confirm. The plaintext only exists in process
+  memory at that single render — refresh, navigate, anything →
+  gone forever.
+- `/user/2fa` for enrolled users now shows "N / 10" remaining with a
+  warning pill at ≤3 left and "已用完" at 0. A "重新生成备用码"
+  button wipes the existing 10 and shows fresh ones (same one-time
+  display).
+- `/user/login/2fa` now accepts either a 6-digit TOTP code OR an
+  8-char backup code as the value of the `code` form field. We
+  detect the difference by length + alphabet (`looksLikeBackupCode`).
+  Backup-code path:
+  1. Bcrypt-walks every unused row for the user (constant time per
+     row; for 10 rows ~700ms worst case at default cost).
+  2. On match, UPDATE sets `used_at` so the code can't be replayed.
+  3. The audit log records `via=backup_code` instead of `via=totp`.
+- Input is normalized (uppercase, strip space/dash) so "abcd-1234",
+  "abcd 1234", "ABCD1234" all match the same stored hash.
+- Disabling 2FA via `/user/2fa/disable` also wipes the backup codes
+  (folded into `ClearUserTOTP` so admin-reset cleans them too).
+
+**Tests** (11 new in `user_backup_codes_test.go`):
+- Generator shape: length, alphabet, uniqueness within a batch.
+- `looksLikeBackupCode` table test (TOTP-shaped input rejected,
+  bad chars rejected, length boundaries respected).
+- `normalizeBackupCode` table test.
+- Enrollment stores exactly 10 bcrypt hashes, each matching exactly
+  one plaintext from the rendered page.
+- Backup code unlocks login when TOTP is wrong; reusing the same
+  code fails; a different unused code still works.
+- Lowercase + dashed input ("abcd-1234") matches.
+- Regenerate invalidates old codes (login with old fails, with
+  new succeeds).
+- Disable wipes backup codes.
+- Regenerate rejected for users without 2FA enrolled.
+- `/user/2fa` page shows the "10 / 10" counter.
+- The 5-attempt cap at `/user/login/2fa` applies to backup-code
+  attempts too (a backup-code-shaped wrong code still counts).
+
+### 管理员重置用户 2FA (`/admin/users/reset-2fa`)
+
+For when the user has lost their phone AND their backup codes (or
+never saved them). Belt-and-suspenders so the second factor doesn't
+turn into a one-way lock.
+
+- New "重置 2FA" button on `/admin/users` (only shown for users with
+  `TOTPSecret != ""`).
+- Handler clears `totp_secret`, `totp_pending`, AND all backup codes
+  via `ClearUserTOTP`. Then `DeleteSessionsByUserID` so any
+  post-2FA-cookie attacker on the same browser also loses access.
+- Audit log records `user_reset_2fa` with phone + IP.
+- New "2FA" column in the user list with a ✓ pill so admins can see
+  at a glance who's enrolled.
+
+2 new tests:
+- `TestAdminCanResetUserTOTPWhenLocked` — full round trip: enroll
+  → admin resets → password-only login bypasses 2FA gate AND sets
+  `rb_user` directly (the regression guard for this whole flow).
+- `TestAdminReset2FANoOpForUserWithoutTOTP` — idempotent for users
+  who never enrolled.
 
 ### 用户自助二步验证 (`/user/2fa`)
 
@@ -164,7 +235,7 @@ up on next startup without manual migration.
 
 ### Stats
 - 17 packages tested
-- 165 test functions (was 143)
+- 178 test functions (was 143)
 
 ## v0.12 — iptables 后端 + Aliyun SMS
 

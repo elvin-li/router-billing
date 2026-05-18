@@ -72,6 +72,18 @@ type User struct {
 	UpdatedAt   time.Time `json:"updated_at"`
 }
 
+// --- TOTP Backup Codes ---
+
+// BackupCode is one emergency single-use 2FA code. Stored bcrypt-hashed;
+// `UsedAt` non-nil means it's been consumed and won't verify again.
+type BackupCode struct {
+	ID        int64      `json:"id"`
+	UserID    int64      `json:"user_id"`
+	CodeHash  string     `json:"-"`
+	UsedAt    *time.Time `json:"used_at,omitempty"`
+	CreatedAt time.Time  `json:"created_at"`
+}
+
 // --- PasswordReset ---
 
 // PasswordReset is one outstanding SMS-issued reset code. Only one row per

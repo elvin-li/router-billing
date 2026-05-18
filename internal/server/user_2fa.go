@@ -108,8 +108,23 @@ func (a *App) handleUserLogin2FA(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	code := extractDigits(r.PostForm.Get("code"))
-	if !totp.Verify(user.TOTPSecret, code, time.Now()) {
+	raw := r.PostForm.Get("code")
+	totpCode := extractDigits(raw)
+	via := "totp"
+	ok := totp.Verify(user.TOTPSecret, totpCode, time.Now())
+	if !ok && looksLikeBackupCode(raw) {
+		// Fallback path: the user lost their authenticator but kept the
+		// backup codes printout. Each code is single-use.
+		used, err := a.verifyAndConsumeBackupCode(r.Context(), *sess.UserID, raw)
+		if err != nil {
+			log.Printf("backup-code verify %d: %v", *sess.UserID, err)
+		}
+		if used {
+			ok = true
+			via = "backup_code"
+		}
+	}
+	if !ok {
 		a.DB.Audit(r.Context(), "user-attempt:"+user.Phone, "2fa_failed", "", "ip="+clientIP(r))
 		a.render(w, "user_2fa_login.html", a.userCtx(r, "2fa", map[string]any{
 			"Phone": user.Phone,
@@ -129,7 +144,7 @@ func (a *App) handleUserLogin2FA(w http.ResponseWriter, r *http.Request) {
 		Name: userPendingCookie, Value: "", Path: "/user", MaxAge: -1, HttpOnly: true,
 	})
 	a.startUserSession(w, r, user)
-	a.DB.Audit(r.Context(), "user:"+user.Phone, "login", "", "via=2fa ip="+clientIP(r))
+	a.DB.Audit(r.Context(), "user:"+user.Phone, "login", "", "via="+via+" ip="+clientIP(r))
 	http.Redirect(w, r, next, http.StatusSeeOther)
 }
 
@@ -142,14 +157,27 @@ func (a *App) handleUser2FA(w http.ResponseWriter, r *http.Request) {
 		http.Redirect(w, r, "/user/login", http.StatusSeeOther)
 		return
 	}
+	var backupTotal, backupRemaining int
+	if user.TOTPSecret != "" {
+		codes, _ := a.DB.ListBackupCodes(r.Context(), uid)
+		backupTotal = len(codes)
+		for _, c := range codes {
+			if c.UsedAt == nil {
+				backupRemaining++
+			}
+		}
+	}
 	a.render(w, "user_2fa.html", a.userCtx(r, "2fa", map[string]any{
-		"User":          user,
-		"Enabled":       user.TOTPSecret != "",
-		"HasPending":    user.TOTPPending != "",
-		"PendingSecret": user.TOTPPending,
-		// Display formatted (groups of 4) — easier to read off / type into apps that don't QR-scan.
-		"PendingPretty": prettySecret(user.TOTPPending),
-		"OTPAuthURL":    "/user/2fa/qr",
+		"User":            user,
+		"Enabled":         user.TOTPSecret != "",
+		"HasPending":      user.TOTPPending != "",
+		"PendingSecret":   user.TOTPPending,
+		"PendingPretty":   prettySecret(user.TOTPPending),
+		"OTPAuthURL":      "/user/2fa/qr",
+		"BackupTotal":     backupTotal,
+		"BackupRemaining": backupRemaining,
+		"BackupLow":       backupRemaining > 0 && backupRemaining <= 3,
+		"BackupEmpty":     user.TOTPSecret != "" && backupRemaining == 0,
 	}))
 }
 
@@ -214,8 +242,22 @@ func (a *App) handleUser2FAConfirm(w http.ResponseWriter, r *http.Request) {
 		http.Redirect(w, r, "/user/2fa?err=internal", http.StatusSeeOther)
 		return
 	}
+	// Re-load so the rendered "Codes" page shows the now-enabled state.
+	user, _ = a.DB.GetUser(r.Context(), uid)
 	a.DB.Audit(r.Context(), "user:"+user.Phone, "2fa_enrolled", "", "ip="+clientIP(r))
-	http.Redirect(w, r, "/user/2fa?ok=2fa_enabled", http.StatusSeeOther)
+
+	// Generate + display backup codes — last chance to save them before
+	// they're hashed-and-forgotten. If generation fails we still leave 2FA
+	// on (it's already confirmed in the DB); the user can hit
+	// /user/2fa/regenerate-codes manually.
+	codes, err := a.generateAndStoreBackupCodes(r.Context(), uid)
+	if err != nil {
+		log.Printf("backup codes after enrollment %d: %v", uid, err)
+		http.Redirect(w, r, "/user/2fa?ok=2fa_enabled&err=backup_codes_failed", http.StatusSeeOther)
+		return
+	}
+	a.DB.Audit(r.Context(), "user:"+user.Phone, "2fa_backup_codes_issued", "", "count=10 ip="+clientIP(r))
+	a.renderBackupCodesOnce(w, r, user, codes)
 }
 
 // POST /user/2fa/disable — require current password + current TOTP, then wipe.

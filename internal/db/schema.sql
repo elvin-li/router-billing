@@ -110,6 +110,20 @@ CREATE TABLE IF NOT EXISTS plans (
     updated_at    DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 
+-- TOTP backup codes — emergency single-use codes for when the user loses
+-- their authenticator device. Generated 10 at enrollment + on demand;
+-- bcrypt-hashed so a DB dump doesn't leak. Each row marked used_at on
+-- consumption; the row is kept (not deleted) for audit but won't verify.
+CREATE TABLE IF NOT EXISTS user_backup_codes (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id     INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    code_hash   TEXT NOT NULL,
+    used_at     DATETIME,
+    created_at  DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+CREATE INDEX IF NOT EXISTS idx_backup_user ON user_backup_codes(user_id);
+CREATE INDEX IF NOT EXISTS idx_backup_used ON user_backup_codes(used_at);
+
 -- Password-reset codes — issued via SMS from /user/forgot-password. At most
 -- one row per user; issuing a new code deletes any prior. Verified by bcrypt
 -- compare so a DB dump doesn't leak in-flight codes.

@@ -613,11 +613,14 @@ func (d *DB) ConfirmUserTOTP(ctx context.Context, userID int64) error {
 }
 
 // ClearUserTOTP turns 2FA off and wipes any half-enrolled pending secret.
+// Also clears backup codes so a future enrollment starts fresh.
 func (d *DB) ClearUserTOTP(ctx context.Context, userID int64) error {
-	_, err := d.conn.ExecContext(ctx,
+	if _, err := d.conn.ExecContext(ctx,
 		`UPDATE users SET totp_secret = '', totp_pending = '', updated_at = ? WHERE id = ?`,
-		time.Now().UTC(), userID)
-	return err
+		time.Now().UTC(), userID); err != nil {
+		return err
+	}
+	return d.ClearBackupCodes(ctx, userID)
 }
 
 func (d *DB) ListUsers(ctx context.Context, limit int) ([]models.User, error) {
@@ -672,6 +675,93 @@ func (d *DB) SuspendUser(ctx context.Context, id int64, suspended bool) error {
 func (d *DB) DeleteUser(ctx context.Context, id int64) error {
 	_, _ = d.conn.ExecContext(ctx, `DELETE FROM sessions WHERE kind='user' AND user_id = ?`, id)
 	_, err := d.conn.ExecContext(ctx, `DELETE FROM users WHERE id = ?`, id)
+	return err
+}
+
+// ---------- TOTP Backup codes ----------
+
+// ReplaceBackupCodes wipes any prior codes for userID and inserts fresh
+// bcrypt-hashed codes in one transaction. Order of `hashes` is preserved
+// so callers can correlate with the original plaintexts they're displaying.
+func (d *DB) ReplaceBackupCodes(ctx context.Context, userID int64, hashes []string) error {
+	tx, err := d.conn.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
+	if _, err := tx.ExecContext(ctx, `DELETE FROM user_backup_codes WHERE user_id = ?`, userID); err != nil {
+		return err
+	}
+	now := time.Now().UTC()
+	for _, h := range hashes {
+		if _, err := tx.ExecContext(ctx,
+			`INSERT INTO user_backup_codes (user_id, code_hash, created_at) VALUES (?, ?, ?)`,
+			userID, h, now); err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
+}
+
+// ListBackupCodes returns every row for userID (both used and unused), newest
+// last. Used by the /user/2fa page to show "N remaining".
+func (d *DB) ListBackupCodes(ctx context.Context, userID int64) ([]models.BackupCode, error) {
+	rows, err := d.conn.QueryContext(ctx,
+		`SELECT id, user_id, code_hash, used_at, created_at FROM user_backup_codes
+		 WHERE user_id = ? ORDER BY id ASC`, userID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []models.BackupCode
+	for rows.Next() {
+		var b models.BackupCode
+		var used sql.NullTime
+		if err := rows.Scan(&b.ID, &b.UserID, &b.CodeHash, &used, &b.CreatedAt); err != nil {
+			return nil, err
+		}
+		if used.Valid {
+			t := used.Time
+			b.UsedAt = &t
+		}
+		out = append(out, b)
+	}
+	return out, rows.Err()
+}
+
+// UnusedBackupCodes returns rows where used_at IS NULL. Used during verify.
+func (d *DB) UnusedBackupCodes(ctx context.Context, userID int64) ([]models.BackupCode, error) {
+	rows, err := d.conn.QueryContext(ctx,
+		`SELECT id, user_id, code_hash, used_at, created_at FROM user_backup_codes
+		 WHERE user_id = ? AND used_at IS NULL ORDER BY id ASC`, userID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []models.BackupCode
+	for rows.Next() {
+		var b models.BackupCode
+		var used sql.NullTime
+		if err := rows.Scan(&b.ID, &b.UserID, &b.CodeHash, &used, &b.CreatedAt); err != nil {
+			return nil, err
+		}
+		out = append(out, b)
+	}
+	return out, rows.Err()
+}
+
+// MarkBackupCodeUsed flips used_at on a specific row. Idempotent.
+func (d *DB) MarkBackupCodeUsed(ctx context.Context, id int64) error {
+	_, err := d.conn.ExecContext(ctx,
+		`UPDATE user_backup_codes SET used_at = ? WHERE id = ? AND used_at IS NULL`,
+		time.Now().UTC(), id)
+	return err
+}
+
+// ClearBackupCodes wipes every row for userID. Called from ClearUserTOTP so
+// disabling 2FA also cleans up backup codes.
+func (d *DB) ClearBackupCodes(ctx context.Context, userID int64) error {
+	_, err := d.conn.ExecContext(ctx, `DELETE FROM user_backup_codes WHERE user_id = ?`, userID)
 	return err
 }
 

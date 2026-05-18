@@ -90,14 +90,14 @@ func TestUser2FAConfirmPromotesPendingToLive(t *testing.T) {
 	do(t, h, "POST", "/user/2fa/begin", url.Values{"_csrf": {csrf}}, jar)
 	code := validTOTPForUser(t, app, "13800139002")
 
-	res, _ := do(t, h, "POST", "/user/2fa/confirm",
+	// Confirm now renders the backup-codes one-time page (200), not a 303.
+	res, body := do(t, h, "POST", "/user/2fa/confirm",
 		url.Values{"_csrf": {csrf}, "code": {code}}, jar)
-	if res.StatusCode != 303 {
+	if res.StatusCode != 200 {
 		t.Fatalf("confirm: %d", res.StatusCode)
 	}
-	loc := res.Header.Get("Location")
-	if !strings.Contains(loc, "ok=2fa_enabled") {
-		t.Errorf("confirm location: %s", loc)
+	if !strings.Contains(body, "备用码") {
+		t.Errorf("expected backup-codes page; body=%s", truncate(body, 300))
 	}
 
 	u, _ := app.DB.GetUserByPhone(context.Background(), "13800139002")
@@ -106,6 +106,17 @@ func TestUser2FAConfirmPromotesPendingToLive(t *testing.T) {
 	}
 	if u.TOTPPending != "" {
 		t.Fatal("pending must be cleared after confirm")
+	}
+
+	// 10 backup codes were created — exactly what the user just saw.
+	codes, _ := app.DB.ListBackupCodes(context.Background(), u.ID)
+	if len(codes) != 10 {
+		t.Errorf("expected 10 backup codes; got %d", len(codes))
+	}
+	for _, c := range codes {
+		if c.UsedAt != nil {
+			t.Errorf("fresh backup code already marked used: %+v", c)
+		}
 	}
 }
 

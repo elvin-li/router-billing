@@ -151,6 +151,7 @@ func (a *App) Routes() http.Handler {
 	mux.HandleFunc("/user/2fa/confirm", a.requireUser(a.handleUser2FAConfirm))
 	mux.HandleFunc("/user/2fa/disable", a.requireUser(a.handleUser2FADisable))
 	mux.HandleFunc("/user/2fa/qr", a.requireUser(a.handleUser2FAQR))
+	mux.HandleFunc("/user/2fa/regenerate-codes", a.requireUser(a.handleUser2FARegenerateCodes))
 	mux.HandleFunc("/user/me", a.requireUser(a.handleUserMe))
 	mux.HandleFunc("/user/macs/replace", a.requireUser(a.handleUserReplaceMAC))
 	mux.HandleFunc("/user/macs/claim", a.requireUser(a.handleUserClaimMAC))
