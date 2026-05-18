@@ -713,6 +713,8 @@ func (a *App) handleAdminMACExtend(w http.ResponseWriter, r *http.Request) {
 		http.Redirect(w, r, redirectBack(r, "err=internal"), http.StatusSeeOther)
 		return
 	}
+	a.DB.Audit(r.Context(), "admin", "extend", mac,
+		"days="+strconv.Itoa(days)+" ip="+clientIP(r))
 	http.Redirect(w, r, redirectBack(r, "ok=1"), http.StatusSeeOther)
 }
 
@@ -791,9 +793,11 @@ func (a *App) handleAdminOrderRefund(w http.ResponseWriter, r *http.Request) {
 func (a *App) handleAdminResync(w http.ResponseWriter, r *http.Request) {
 	if err := a.MACSvc.Resync(r.Context()); err != nil {
 		log.Printf("admin resync: %v", err)
+		a.DB.Audit(r.Context(), "admin", "firewall_resync_failed", "", "err="+err.Error()+" ip="+clientIP(r))
 		http.Redirect(w, r, "/admin/macs?err=internal", http.StatusSeeOther)
 		return
 	}
+	a.DB.Audit(r.Context(), "admin", "firewall_resync", "", "ip="+clientIP(r))
 	http.Redirect(w, r, "/admin/macs?ok=1", http.StatusSeeOther)
 }
 
