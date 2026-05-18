@@ -58,12 +58,18 @@ type Order struct {
 // --- User ---
 
 type User struct {
-	ID           int64     `json:"id"`
-	Phone        string    `json:"phone"`
-	PasswordHash string    `json:"-"`
-	Suspended    bool      `json:"suspended"`
-	CreatedAt    time.Time `json:"created_at"`
-	UpdatedAt    time.Time `json:"updated_at"`
+	ID           int64  `json:"id"`
+	Phone        string `json:"phone"`
+	PasswordHash string `json:"-"`
+	Suspended    bool   `json:"suspended"`
+	// TOTPSecret is the confirmed base32 TOTP secret. Empty = 2FA off.
+	TOTPSecret string `json:"-"`
+	// TOTPPending is a freshly-generated secret waiting for the user to type
+	// their first valid code. Cleared on confirm or replaced if the user
+	// re-clicks "enable" before confirming.
+	TOTPPending string    `json:"-"`
+	CreatedAt   time.Time `json:"created_at"`
+	UpdatedAt   time.Time `json:"updated_at"`
 }
 
 // --- PasswordReset ---

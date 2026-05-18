@@ -1,6 +1,74 @@
 # Changelog
 
-## v0.13 — SMS end-to-end: 自助找回密码 + 重置密码短信下发
+## v0.13 — SMS end-to-end + 用户自助二步验证
+
+Three flows that all share the same trust model: prove control of a
+second factor before something sensitive happens.
+
+### 用户自助二步验证 (`/user/2fa`)
+
+Self-service TOTP — same RFC 6238 implementation that backs admin 2FA,
+opt-in from `/user/me → 管理二步验证`. Designed to mirror the admin
+flow so we don't ship two slightly-different lockout policies.
+
+Flow:
+1. `POST /user/2fa/begin` generates a 160-bit base32 secret, stores it
+   in `users.totp_pending` (overwrites any prior pending so re-clicks
+   give a fresh QR).
+2. The page renders a QR (`GET /user/2fa/qr` → PNG of the
+   `otpauth://totp/router-billing:13800138888?secret=...&...` URL) plus
+   the secret in 4-character groups for users whose authenticator
+   doesn't QR-scan.
+3. `POST /user/2fa/confirm` verifies the typed code against
+   `totp_pending`; on success the secret is promoted to live
+   (`users.totp_secret`) and pending is cleared in one UPDATE.
+4. `POST /user/2fa/disable` requires **both** the current password
+   AND a current valid TOTP code — just-password lets a stolen-cookie
+   attacker turn 2FA off; just-TOTP defeats lost-phone recovery; both
+   together is the standard pattern.
+
+Login-time gating in `handleUserLogin`:
+- After password validates, if `user.TOTPSecret != ""` we don't
+  `startUserSession` — instead create a 5-minute `user_pending_2fa`
+  session, set the `rb_user_pending` cookie (scoped to `/user` only
+  so the admin-side cookies stay isolated), and redirect to
+  `/user/login/2fa?next=...`.
+- The 2FA page accepts the code, swaps pending → real session,
+  wipes the pending cookie. Same 5-wrong-attempts-then-destroy cap
+  as the admin flow, with its own counter (`userTwoFAAttempts` —
+  separate map so admin attempts don't share a budget with user
+  attempts).
+
+Schema additions (migration via existing `addColumnIfMissing`):
+```sql
+ALTER TABLE users ADD COLUMN totp_secret  TEXT NOT NULL DEFAULT '';
+ALTER TABLE users ADD COLUMN totp_pending TEXT NOT NULL DEFAULT '';
+```
+
+DB API: `SetUserTOTPPending` / `ConfirmUserTOTP` (atomic promote) /
+`ClearUserTOTP` + `userColumns` constant + `scanUserRow` helper so
+all four user-row reads stay in lockstep when more columns land.
+
+Refactored `GetUser` / `GetUserByPhone` / `SearchUsers` / `ListUsers`
+to share `scanUserRow` — no behaviour change, just removes the
+copy-paste between three identical Scan calls.
+
+**Tests** (12 new in `user_2fa_test.go`):
+- Begin generates pending secret; re-click rotates it.
+- Confirm with right code promotes pending → live and clears pending.
+- Confirm with wrong code leaves pending intact (no half-promote).
+- Enrolled user's password-only login produces `rb_user_pending`,
+  NOT `rb_user` — the test fails loudly if 2FA gets bypassed.
+- 2FA login with right code finally issues `rb_user`.
+- Wrong 2FA code re-renders 200 with the error banner; no cookie.
+- 6 wrong codes destroy the pending session (locked/expired).
+- Disable rejects wrong password and wrong code separately, then
+  accepts both → secret + pending cleared.
+- No `rb_user_pending` cookie → 2FA URL bounces to login.
+- `/user/2fa/qr` returns a real PNG (magic-byte check).
+- `prettySecret` / `extractDigits` table tests for the small helpers.
+
+### `/user/forgot-password` — user-driven SMS reset
 
 v0.11 added the SMS abstraction; v0.12 added the Aliyun adapter. v0.13
 wires both into the two flows users actually touch.
@@ -96,7 +164,7 @@ up on next startup without manual migration.
 
 ### Stats
 - 17 packages tested
-- 153 test functions (was 143)
+- 165 test functions (was 143)
 
 ## v0.12 — iptables 后端 + Aliyun SMS
 

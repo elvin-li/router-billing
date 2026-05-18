@@ -1,0 +1,102 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+  <title>二步验证 · router-billing</title>
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body class="portal">
+  <header class="portal-hero" style="max-width:680px;">
+    <div class="logo">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+        <rect x="3" y="11" width="18" height="11" rx="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/>
+      </svg>
+    </div>
+    <div style="flex:1;">
+      <h1>二步验证</h1>
+      <p class="sub">{{.User.Phone}} · 强化登录安全</p>
+    </div>
+    <a href="/user/me" class="btn outline small" style="width:auto;">返回</a>
+  </header>
+
+  <main class="portal-main" style="max-width:680px;">
+    {{if .Err}}<div class="flash err">{{.Err}}</div>{{end}}
+    {{if eq .OK "2fa_enabled"}}<div class="flash ok">二步验证已开启 ✓ 下次登录时需要输入认证 App 验证码</div>{{end}}
+    {{if eq .OK "2fa_disabled"}}<div class="flash ok">二步验证已关闭</div>{{end}}
+
+    <section class="card">
+      <h2 style="margin-top:0;">当前状态：
+        {{if .Enabled}}
+          <span class="pill active">已开启</span>
+        {{else if .HasPending}}
+          <span class="pill" style="background:#f5a623; color:#fff;">待确认</span>
+        {{else}}
+          <span class="pill blocked">未开启</span>
+        {{end}}
+      </h2>
+
+      {{if .Enabled}}
+        <p style="color:var(--text-soft); margin:6px 0 16px;">
+          登录时除手机号 + 密码外，还需要输入认证 App 显示的 6 位验证码。
+          如果丢失认证设备，请联系管理员。
+        </p>
+        <form method="post" action="/user/2fa/disable"
+              onsubmit="return confirm('关闭二步验证？关闭后只用密码即可登录，安全性会降低。')">
+          {{template "csrf" .}}
+          <h3 style="margin-bottom:6px;">关闭二步验证</h3>
+          <p class="hint" style="font-size:12px; color:var(--text-soft); margin-top:0;">
+            需要同时输入当前密码和当前的 6 位验证码以确认是本人操作。
+          </p>
+          <div class="field">
+            <label>当前密码</label>
+            <input name="password" type="password" autocomplete="current-password" required>
+          </div>
+          <div class="field">
+            <label>当前 6 位验证码</label>
+            <input name="code" type="text" inputmode="numeric" pattern="[0-9]{6}" maxlength="6" required
+                   autocomplete="one-time-code" placeholder="6 位数字">
+          </div>
+          <button class="btn danger" type="submit">关闭二步验证</button>
+        </form>
+      {{else if .HasPending}}
+        <p style="color:var(--text-soft); margin:6px 0 16px;">
+          请用认证 App（如 Google Authenticator、Authy、1Password）扫描下方二维码，
+          然后输入应用显示的 6 位验证码以完成绑定。
+        </p>
+        <div style="display:flex; gap:18px; align-items:center; flex-wrap:wrap; margin:14px 0 16px;">
+          <img src="{{.OTPAuthURL}}" alt="otpauth QR" width="220" height="220"
+               style="border:1px solid var(--border); border-radius:8px; background:#fff; padding:8px;">
+          <div style="min-width:200px;">
+            <div style="font-size:12px; color:var(--text-soft);">或手动输入密钥：</div>
+            <code style="display:block; padding:8px 10px; background:rgba(0,0,0,0.04); border-radius:6px; margin:6px 0; word-break:break-all; font-size:13px;">{{.PendingPretty}}</code>
+            <div style="font-size:12px; color:var(--text-soft);">算法：SHA1 · 6 位 · 30 秒</div>
+          </div>
+        </div>
+        <form method="post" action="/user/2fa/confirm">
+          {{template "csrf" .}}
+          <div class="field">
+            <label>认证 App 显示的 6 位验证码</label>
+            <input name="code" type="text" inputmode="numeric" pattern="[0-9]{6}" maxlength="6" required
+                   autocomplete="one-time-code" autofocus placeholder="6 位数字">
+          </div>
+          <button class="btn primary" type="submit">确认开启</button>
+        </form>
+        <form method="post" action="/user/2fa/begin" style="margin-top:10px;">
+          {{template "csrf" .}}
+          <button class="btn outline small" type="submit" style="width:auto;">重新生成密钥</button>
+        </form>
+      {{else}}
+        <p style="color:var(--text-soft); margin:6px 0 16px;">
+          开启后，登录时除手机号 + 密码外还需要输入一次性验证码。
+          推荐使用 Google Authenticator、Authy 或 1Password。
+        </p>
+        <form method="post" action="/user/2fa/begin">
+          {{template "csrf" .}}
+          <button class="btn primary" type="submit">开启二步验证</button>
+        </form>
+      {{end}}
+    </section>
+  </main>
+</body>
+</html>

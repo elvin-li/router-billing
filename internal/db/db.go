@@ -546,33 +546,13 @@ func (d *DB) CreateUser(ctx context.Context, phone, passwordHash string) (*model
 	return &models.User{ID: id, Phone: phone, PasswordHash: passwordHash, CreatedAt: now, UpdatedAt: now}, nil
 }
 
-func (d *DB) GetUserByPhone(ctx context.Context, phone string) (*models.User, error) {
-	row := d.conn.QueryRowContext(ctx,
-		`SELECT id, phone, password_hash, suspended, created_at, updated_at FROM users WHERE phone = ?`, phone)
-	var u models.User
-	var susp int
-	err := row.Scan(&u.ID, &u.Phone, &u.PasswordHash, &susp, &u.CreatedAt, &u.UpdatedAt)
-	if err == nil {
-		u.Suspended = susp != 0
-	}
-	if errors.Is(err, sql.ErrNoRows) {
-		return nil, nil
-	}
-	if err != nil {
-		return nil, err
-	}
-	return &u, nil
-}
+// userColumns is the canonical SELECT list — extend here when adding columns.
+const userColumns = "id, phone, password_hash, suspended, totp_secret, totp_pending, created_at, updated_at"
 
-func (d *DB) GetUser(ctx context.Context, id int64) (*models.User, error) {
-	row := d.conn.QueryRowContext(ctx,
-		`SELECT id, phone, password_hash, suspended, created_at, updated_at FROM users WHERE id = ?`, id)
+func scanUserRow(row interface{ Scan(...any) error }) (*models.User, error) {
 	var u models.User
 	var susp int
-	err := row.Scan(&u.ID, &u.Phone, &u.PasswordHash, &susp, &u.CreatedAt, &u.UpdatedAt)
-	if errors.Is(err, sql.ErrNoRows) {
-		return nil, nil
-	}
+	err := row.Scan(&u.ID, &u.Phone, &u.PasswordHash, &susp, &u.TOTPSecret, &u.TOTPPending, &u.CreatedAt, &u.UpdatedAt)
 	if err != nil {
 		return nil, err
 	}
@@ -580,10 +560,63 @@ func (d *DB) GetUser(ctx context.Context, id int64) (*models.User, error) {
 	return &u, nil
 }
 
+func (d *DB) GetUserByPhone(ctx context.Context, phone string) (*models.User, error) {
+	row := d.conn.QueryRowContext(ctx,
+		`SELECT `+userColumns+` FROM users WHERE phone = ?`, phone)
+	u, err := scanUserRow(row)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	return u, nil
+}
+
+func (d *DB) GetUser(ctx context.Context, id int64) (*models.User, error) {
+	row := d.conn.QueryRowContext(ctx,
+		`SELECT `+userColumns+` FROM users WHERE id = ?`, id)
+	u, err := scanUserRow(row)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	return u, nil
+}
+
 func (d *DB) UpdateUserPassword(ctx context.Context, userID int64, passwordHash string) error {
 	_, err := d.conn.ExecContext(ctx,
 		`UPDATE users SET password_hash = ?, updated_at = ? WHERE id = ?`,
 		passwordHash, time.Now().UTC(), userID)
+	return err
+}
+
+// SetUserTOTPPending stashes a not-yet-confirmed base32 secret. Overwrites any
+// prior pending so re-clicking "enable" gives a fresh QR.
+func (d *DB) SetUserTOTPPending(ctx context.Context, userID int64, secret string) error {
+	_, err := d.conn.ExecContext(ctx,
+		`UPDATE users SET totp_pending = ?, updated_at = ? WHERE id = ?`,
+		secret, time.Now().UTC(), userID)
+	return err
+}
+
+// ConfirmUserTOTP promotes the pending secret to live, clearing the pending
+// slot. Caller should verify the code first.
+func (d *DB) ConfirmUserTOTP(ctx context.Context, userID int64) error {
+	_, err := d.conn.ExecContext(ctx,
+		`UPDATE users SET totp_secret = totp_pending, totp_pending = '', updated_at = ?
+		 WHERE id = ? AND totp_pending != ''`,
+		time.Now().UTC(), userID)
+	return err
+}
+
+// ClearUserTOTP turns 2FA off and wipes any half-enrolled pending secret.
+func (d *DB) ClearUserTOTP(ctx context.Context, userID int64) error {
+	_, err := d.conn.ExecContext(ctx,
+		`UPDATE users SET totp_secret = '', totp_pending = '', updated_at = ? WHERE id = ?`,
+		time.Now().UTC(), userID)
 	return err
 }
 
@@ -600,10 +633,10 @@ func (d *DB) SearchUsers(ctx context.Context, q string, limit int) ([]models.Use
 	var err error
 	if q == "" {
 		rows, err = d.conn.QueryContext(ctx,
-			`SELECT id, phone, password_hash, suspended, created_at, updated_at FROM users ORDER BY created_at DESC LIMIT ?`, limit)
+			`SELECT `+userColumns+` FROM users ORDER BY created_at DESC LIMIT ?`, limit)
 	} else {
 		rows, err = d.conn.QueryContext(ctx,
-			`SELECT id, phone, password_hash, suspended, created_at, updated_at FROM users WHERE phone LIKE ? ORDER BY created_at DESC LIMIT ?`,
+			`SELECT `+userColumns+` FROM users WHERE phone LIKE ? ORDER BY created_at DESC LIMIT ?`,
 			"%"+q+"%", limit)
 	}
 	if err != nil {
@@ -612,13 +645,11 @@ func (d *DB) SearchUsers(ctx context.Context, q string, limit int) ([]models.Use
 	defer rows.Close()
 	var out []models.User
 	for rows.Next() {
-		var u models.User
-		var susp int
-		if err := rows.Scan(&u.ID, &u.Phone, &u.PasswordHash, &susp, &u.CreatedAt, &u.UpdatedAt); err != nil {
+		u, err := scanUserRow(rows)
+		if err != nil {
 			return nil, err
 		}
-		u.Suspended = susp != 0
-		out = append(out, u)
+		out = append(out, *u)
 	}
 	return out, rows.Err()
 }

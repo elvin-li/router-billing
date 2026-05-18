@@ -25,6 +25,8 @@ func runMigrations(d *sql.DB) error {
 		{"sessions", "subject", "TEXT NOT NULL DEFAULT ''"},
 		{"sessions", "user_id", "INTEGER"},
 		{"users", "suspended", "INTEGER NOT NULL DEFAULT 0"},
+		{"users", "totp_secret", "TEXT NOT NULL DEFAULT ''"},
+		{"users", "totp_pending", "TEXT NOT NULL DEFAULT ''"},
 		{"macs", "schedule_json", "TEXT NOT NULL DEFAULT ''"},
 	}
 	for _, c := range columns {

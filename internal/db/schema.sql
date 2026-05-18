@@ -6,6 +6,8 @@ CREATE TABLE IF NOT EXISTS users (
     phone           TEXT NOT NULL UNIQUE,
     password_hash   TEXT NOT NULL,
     suspended       INTEGER NOT NULL DEFAULT 0,
+    totp_secret     TEXT NOT NULL DEFAULT '',   -- empty = 2FA off; base32 = enrolled
+    totp_pending    TEXT NOT NULL DEFAULT '',   -- base32 of a yet-to-be-confirmed enrollment
     created_at      DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
     updated_at      DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
 );

@@ -4,6 +4,7 @@ import (
 	"log"
 	"net"
 	"net/http"
+	"net/url"
 	"strings"
 	"sync"
 	"time"
@@ -14,7 +15,9 @@ import (
 )
 
 const userCookieName = "rb_user"
+const userPendingCookie = "rb_user_pending"
 const userSessionTTL = 30 * 24 * time.Hour // 30 days
+const userPending2FATTL = 5 * time.Minute
 
 // userCtx assembles the common data passed to every user-facing template.
 func (a *App) userCtx(r *http.Request, page string, extra map[string]any) map[string]any {
@@ -58,6 +61,20 @@ func userErrLabel(code string) string {
 	case "too_many_attempts":
 		return "验证次数过多，请重新申请验证码"
 	case "password_reset":
+		return ""
+	case "2fa_expired":
+		return "二步验证会话已过期，请重新登录"
+	case "2fa_failed":
+		return "验证码错误，请重试"
+	case "2fa_locked":
+		return "验证失败次数过多，请重新登录"
+	case "2fa_required":
+		return "请输入二步验证码"
+	case "2fa_already_on":
+		return "二步验证已开启，无需重复开启"
+	case "2fa_not_enrolled":
+		return "尚未开启二步验证"
+	case "2fa_disabled":
 		return ""
 	case "no_mac":
 		return "未检测到本设备 MAC，请连接到收费 SSID 后重试"
@@ -151,12 +168,37 @@ func (a *App) handleUserLogin(w http.ResponseWriter, r *http.Request) {
 		http.Redirect(w, r, "/user/login?err=suspended", http.StatusSeeOther)
 		return
 	}
-	a.startUserSession(w, r, user)
-	a.DB.Audit(r.Context(), "user:"+user.Phone, "login", "", clientIP(r))
+
 	next := r.PostForm.Get("next")
 	if !strings.HasPrefix(next, "/") {
 		next = "/user/me"
 	}
+
+	// If 2FA is enrolled, hold the session in pending state until the user
+	// submits a valid TOTP code. Same shape as the admin 2FA flow (see
+	// admin_2fa.go) so the security guarantees match.
+	if user.TOTPSecret != "" {
+		ptok := randomToken(32)
+		if err := a.DB.CreateSession(r.Context(), ptok, "user_pending_2fa", user.Phone, &user.ID, userPending2FATTL); err != nil {
+			log.Printf("create user pending 2fa session: %v", err)
+			http.Redirect(w, r, "/user/login?err=internal", http.StatusSeeOther)
+			return
+		}
+		http.SetCookie(w, &http.Cookie{
+			Name:     userPendingCookie,
+			Value:    ptok,
+			Path:     "/user",
+			HttpOnly: true,
+			Secure:   isHTTPS(r),
+			SameSite: http.SameSiteLaxMode,
+			MaxAge:   int(userPending2FATTL.Seconds()),
+		})
+		http.Redirect(w, r, "/user/login/2fa?next="+url.QueryEscape(next), http.StatusSeeOther)
+		return
+	}
+
+	a.startUserSession(w, r, user)
+	a.DB.Audit(r.Context(), "user:"+user.Phone, "login", "", clientIP(r))
 	http.Redirect(w, r, next, http.StatusSeeOther)
 }
 
