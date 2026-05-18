@@ -1200,6 +1200,46 @@ func (d *DB) Stats(ctx context.Context) (Stats, error) {
 	return s, nil
 }
 
+// DashboardSnapshot is a roll-up tailored for /admin/dashboard. Fits in
+// one SQL round-trip per stat so the page renders fast even on a low-end
+// router. All counts are best-effort — errors are returned but the
+// caller decides whether to swallow them.
+type DashboardSnapshot struct {
+	TodayRevenueCents int
+	TodayPaidOrders   int
+	TodayNewUsers     int
+	TodayNewMACs      int
+	Week7RevenueCents int
+	Week7PaidOrders   int
+	ActiveSessions    int
+}
+
+func (d *DB) DashboardSnapshot(ctx context.Context) (DashboardSnapshot, error) {
+	var s DashboardSnapshot
+	// Use datetime comparisons against start-of-day so the format that
+	// modernc.org/sqlite writes for time.Time (RFC3339-ish with timezone
+	// offset) isn't tripped up by the date() function's expectation of a
+	// plain YYYY-MM-DD prefix.
+	queries := []struct {
+		q   string
+		out *int
+	}{
+		{`SELECT COALESCE(SUM(amount_cents),0) FROM orders WHERE status='paid' AND paid_at >= datetime('now','start of day')`, &s.TodayRevenueCents},
+		{`SELECT COUNT(*) FROM orders WHERE status='paid' AND paid_at >= datetime('now','start of day')`, &s.TodayPaidOrders},
+		{`SELECT COUNT(*) FROM users WHERE created_at >= datetime('now','start of day')`, &s.TodayNewUsers},
+		{`SELECT COUNT(*) FROM macs WHERE created_at >= datetime('now','start of day')`, &s.TodayNewMACs},
+		{`SELECT COALESCE(SUM(amount_cents),0) FROM orders WHERE status='paid' AND paid_at >= datetime('now','-7 days')`, &s.Week7RevenueCents},
+		{`SELECT COUNT(*) FROM orders WHERE status='paid' AND paid_at >= datetime('now','-7 days')`, &s.Week7PaidOrders},
+		{`SELECT COUNT(*) FROM sessions WHERE expires_at > CURRENT_TIMESTAMP`, &s.ActiveSessions},
+	}
+	for _, q := range queries {
+		if err := d.conn.QueryRowContext(ctx, q.q).Scan(q.out); err != nil {
+			return s, err
+		}
+	}
+	return s, nil
+}
+
 // AttentionCounts surfaces things admin should probably look at.
 // Empty counts → green; non-zero → render highlighted in the dashboard.
 type AttentionCounts struct {

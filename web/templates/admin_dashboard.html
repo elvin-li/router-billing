@@ -1,0 +1,177 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>仪表盘 · router-billing</title>
+  <link rel="stylesheet" href="/static/style.css">
+  <style>
+    .dash-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+      gap: 12px;
+      margin: 14px 0 18px;
+    }
+    .dash-tile {
+      background: var(--card);
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      padding: 14px 16px;
+    }
+    .dash-tile .label {
+      font-size: 12px;
+      color: var(--text-soft);
+      text-transform: uppercase;
+      letter-spacing: 0.04em;
+    }
+    .dash-tile .value {
+      font-size: 26px;
+      font-weight: 700;
+      margin-top: 4px;
+    }
+    .dash-tile .sub {
+      font-size: 12px;
+      color: var(--text-soft);
+      margin-top: 4px;
+    }
+    .dash-tile.accent .value { color: var(--accent, #4f46e5); }
+    .quick-links {
+      display: flex;
+      gap: 8px;
+      flex-wrap: wrap;
+      margin: 14px 0;
+    }
+  </style>
+</head>
+<body class="admin">
+<div class="admin-shell">
+  {{template "admin-sidebar" .}}
+  <main class="admin-main">
+    <div class="admin-header">
+      <div>
+        <h1>仪表盘</h1>
+        <div class="crumbs">今日 / 7 天 / 累计 · 一眼看清运营情况</div>
+      </div>
+    </div>
+
+    {{if .Attention.Total}}
+    <div class="attention">
+      <div class="attention-head">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>
+        <span>需要关注 <strong>{{.Attention.Total}}</strong> 项</span>
+      </div>
+      <div class="attention-grid">
+        {{if .Attention.ExpiringSoon}}<a class="attention-item" href="/admin/macs?status=active"><strong>{{.Attention.ExpiringSoon}}</strong> 个 MAC 7 天内到期</a>{{end}}
+        {{if .Attention.StalePending}}<a class="attention-item" href="/admin/orders?status=pending"><strong>{{.Attention.StalePending}}</strong> 个订单超 10 分钟未支付</a>{{end}}
+        {{if .Attention.SuspendedUsers}}<a class="attention-item" href="/admin/users"><strong>{{.Attention.SuspendedUsers}}</strong> 个用户已停用</a>{{end}}
+        {{if .Attention.FailedToday}}<a class="attention-item" href="/admin/orders?status=failed"><strong>{{.Attention.FailedToday}}</strong> 笔订单今日失败</a>{{end}}
+      </div>
+    </div>
+    {{end}}
+
+    <h2 style="margin:18px 0 4px; font-size:15px;">今天</h2>
+    <div class="dash-grid">
+      <div class="dash-tile accent">
+        <div class="label">今日营收</div>
+        <div class="value">¥{{formatYuan .Snapshot.TodayRevenueCents}}</div>
+        <div class="sub">{{.Snapshot.TodayPaidOrders}} 笔已支付订单</div>
+      </div>
+      <div class="dash-tile">
+        <div class="label">今日新增用户</div>
+        <div class="value">{{.Snapshot.TodayNewUsers}}</div>
+      </div>
+      <div class="dash-tile">
+        <div class="label">今日新增 MAC</div>
+        <div class="value">{{.Snapshot.TodayNewMACs}}</div>
+      </div>
+      <div class="dash-tile">
+        <div class="label">活动会话</div>
+        <div class="value">{{.Snapshot.ActiveSessions}}</div>
+        <div class="sub">含管理员 + 用户 + 待 2FA</div>
+      </div>
+    </div>
+
+    <h2 style="margin:18px 0 4px; font-size:15px;">最近 7 天</h2>
+    <div class="dash-grid">
+      <div class="dash-tile">
+        <div class="label">7 天营收</div>
+        <div class="value">¥{{formatYuan .Snapshot.Week7RevenueCents}}</div>
+        <div class="sub">{{.Snapshot.Week7PaidOrders}} 笔已支付订单</div>
+      </div>
+    </div>
+
+    <h2 style="margin:18px 0 4px; font-size:15px;">累计</h2>
+    <div class="dash-grid">
+      <div class="dash-tile">
+        <div class="label">已授权 MAC</div>
+        <div class="value">{{.Stats.Total}}</div>
+        <div class="sub">活跃 {{.Stats.Active}} · 过期 {{.Stats.Expired}}</div>
+      </div>
+      <div class="dash-tile">
+        <div class="label">注册用户</div>
+        <div class="value">{{.Stats.Users}}</div>
+      </div>
+      <div class="dash-tile">
+        <div class="label">累计营收</div>
+        <div class="value">¥{{formatYuan .Stats.RevenueCents}}</div>
+      </div>
+    </div>
+
+    {{if .PlanSales}}
+    <section class="admin-card">
+      <h2 style="margin-top:0;">最近 30 天按套餐</h2>
+      <div class="table-wrap">
+        <table class="data">
+          <thead><tr><th>套餐</th><th>笔数</th><th>营收</th></tr></thead>
+          <tbody>
+            {{range .PlanSales}}
+            <tr>
+              <td>{{.Plan}}</td>
+              <td>{{.Count}}</td>
+              <td><strong>¥{{formatYuan .Revenue}}</strong></td>
+            </tr>
+            {{end}}
+          </tbody>
+        </table>
+      </div>
+    </section>
+    {{end}}
+
+    <section class="admin-card">
+      <h2 style="margin-top:0;">最近活动</h2>
+      <div class="table-wrap">
+        <table class="data">
+          <thead><tr><th>时间</th><th>谁</th><th>动作</th><th>目标</th></tr></thead>
+          <tbody>
+            {{range .Recent}}
+            <tr>
+              <td style="color:var(--text-soft); white-space:nowrap;">{{formatTime .At}}</td>
+              <td class="mono" style="font-size:12px;">{{.Actor}}</td>
+              <td>{{.Action}}</td>
+              <td class="mono" style="font-size:12px;">{{.Target}}</td>
+            </tr>
+            {{else}}
+            <tr><td colspan="4" class="empty-state">暂无活动</td></tr>
+            {{end}}
+          </tbody>
+        </table>
+      </div>
+      <p style="margin-top:8px; font-size:12px; color:var(--text-soft);">
+        <a href="/admin/audit">查看完整审计 →</a>
+      </p>
+    </section>
+
+    <section class="admin-card">
+      <h2 style="margin-top:0;">快捷操作</h2>
+      <div class="quick-links">
+        <a href="/admin/macs" class="btn outline" style="width:auto;">添加 / 续费 MAC</a>
+        <a href="/admin/vouchers" class="btn outline" style="width:auto;">生成充值码</a>
+        <a href="/admin/orders" class="btn outline" style="width:auto;">查看订单</a>
+        <a href="/admin/users" class="btn outline" style="width:auto;">用户管理</a>
+        <a href="/admin/maintenance" class="btn outline" style="width:auto;">备份 / 恢复</a>
+      </div>
+    </section>
+  </main>
+</div>
+</body>
+</html>

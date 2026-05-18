@@ -385,6 +385,26 @@ func (a *App) handleAdminUserDetail(w http.ResponseWriter, r *http.Request) {
 	}))
 }
 
+// GET /admin/dashboard — landing page with today/week stats, attention
+// counts, recent activity, and quick links. The previous "/admin" redirect
+// pointed to /admin/macs, which is fine but buries the operational
+// summary that admins look at every morning.
+func (a *App) handleAdminDashboard(w http.ResponseWriter, r *http.Request) {
+	stats, _ := a.DB.Stats(r.Context())
+	snap, _ := a.DB.DashboardSnapshot(r.Context())
+	att, _ := a.DB.Attention(r.Context())
+	planSales, _ := a.DB.PlanSalesSince(r.Context(), 30)
+	recent, _ := a.DB.SearchAudit(r.Context(), db.AuditFilter{Limit: 10})
+
+	a.render(w, "admin_dashboard.html", a.adminCtx(r, "dashboard", map[string]any{
+		"Stats":     stats,
+		"Snapshot":  snap,
+		"Attention": att,
+		"PlanSales": planSales,
+		"Recent":    recent,
+	}))
+}
+
 // /admin/users — list with optional ?q= phone search.
 func (a *App) handleAdminUsers(w http.ResponseWriter, r *http.Request) {
 	q := strings.TrimSpace(r.URL.Query().Get("q"))
