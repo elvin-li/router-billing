@@ -24,6 +24,7 @@ import (
 	"time"
 
 	"router-billing/internal/config"
+	"router-billing/internal/db"
 	"router-billing/internal/models"
 )
 
@@ -107,6 +108,52 @@ type apiUserSummary struct {
 	TOTPEnabled bool      `json:"totp_enabled"`
 	MACs        int       `json:"macs"`
 	CreatedAt   time.Time `json:"created_at"`
+}
+
+// apiAuditEntry is the JSON shape returned by /api/admin/audit. Mirrors
+// db.AuditEntry but with explicit JSON tags so the API contract is stable
+// even if the DB type changes.
+type apiAuditEntry struct {
+	ID     int64     `json:"id"`
+	At     time.Time `json:"at"`
+	Actor  string    `json:"actor"`
+	Action string    `json:"action"`
+	Target string    `json:"target,omitempty"`
+	Detail string    `json:"detail,omitempty"`
+}
+
+// GET /api/admin/audit?actor=&action=&target=&since=&until=&limit=
+//
+// Read-only view of the audit_log table. Same filter knobs as the admin
+// /admin/audit page. Default limit 200, max 1000.
+func (a *App) handleAPIAuditList(w http.ResponseWriter, r *http.Request, _ string) {
+	q := r.URL.Query()
+	limit := 200
+	if s := q.Get("limit"); s != "" {
+		if n, err := strconv.Atoi(s); err == nil && n > 0 && n <= 1000 {
+			limit = n
+		}
+	}
+	entries, err := a.DB.SearchAudit(r.Context(), db.AuditFilter{
+		Actor:  q.Get("actor"),
+		Action: q.Get("action"),
+		Target: q.Get("target"),
+		Since:  q.Get("since"),
+		Until:  q.Get("until"),
+		Limit:  limit,
+	})
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+	out := make([]apiAuditEntry, 0, len(entries))
+	for _, e := range entries {
+		out = append(out, apiAuditEntry{
+			ID: e.ID, At: e.At, Actor: e.Actor, Action: e.Action,
+			Target: e.Target, Detail: e.Detail,
+		})
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"entries": out})
 }
 
 // GET /api/admin/orders?limit=&status=
