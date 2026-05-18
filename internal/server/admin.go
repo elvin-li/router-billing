@@ -1,6 +1,7 @@
 package server
 
 import (
+	"context"
 	"crypto/rand"
 	"encoding/hex"
 	"fmt"
@@ -667,6 +668,67 @@ func (a *App) handleAdminOrders(w http.ResponseWriter, r *http.Request) {
 	a.render(w, "admin_orders.html", a.adminCtx(r, "orders", map[string]any{
 		"Orders": orders,
 	}))
+}
+
+// POST /admin/orders/refund  {order_no, confirm_order_no, reason?}
+//
+// Marks a paid order as refunded AND rolls back the MAC's expires_at by
+// the order's `days` value (so a refund of a 30-day order pulls 30 days
+// off the MAC's clock). The actual gateway-side refund is out of band —
+// this handler just records the local-state transition once the merchant
+// has confirmed the upstream refund is done.
+//
+// Anti-fat-finger: the form must include `confirm_order_no` matching the
+// order_no exactly. The admin_orders.html template uses JS to demand the
+// user type it.
+func (a *App) handleAdminOrderRefund(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Redirect(w, r, "/admin/orders", http.StatusSeeOther)
+		return
+	}
+	if err := r.ParseForm(); err != nil {
+		http.Error(w, "form", http.StatusBadRequest)
+		return
+	}
+	orderNo := strings.TrimSpace(r.PostForm.Get("order_no"))
+	confirm := strings.TrimSpace(r.PostForm.Get("confirm_order_no"))
+	reason := strings.TrimSpace(r.PostForm.Get("reason"))
+	if orderNo == "" || orderNo != confirm {
+		http.Redirect(w, r, "/admin/orders?err=refund_confirm", http.StatusSeeOther)
+		return
+	}
+	if len(reason) > 200 {
+		reason = reason[:200]
+	}
+	mac, err := a.DB.MarkOrderRefunded(r.Context(), orderNo, reason)
+	if err != nil {
+		log.Printf("refund %s: %v", orderNo, err)
+		// Surface the error type so admins see "order is already refunded"
+		// vs. "order not found" — pretty straightforward triage.
+		msg := "refund_failed"
+		if strings.Contains(err.Error(), "not found") {
+			msg = "refund_no_order"
+		} else if strings.Contains(err.Error(), "only paid") {
+			msg = "refund_not_paid"
+		}
+		http.Redirect(w, r, "/admin/orders?err="+msg, http.StatusSeeOther)
+		return
+	}
+	// If the MAC was rolled back into the past, the firewall reconciler
+	// needs a kick to revoke it from the active set immediately.
+	if mac != nil && mac.Status == models.MACExpired {
+		go func(macStr string) {
+			ctx := context.Background()
+			if err := a.MACSvc.Resync(ctx); err != nil {
+				log.Printf("refund post-resync: %v", err)
+			} else {
+				log.Printf("refund: %s expired and removed from firewall", macStr)
+			}
+		}(mac.Mac)
+	}
+	a.DB.Audit(r.Context(), "admin", "order_refunded", orderNo,
+		"reason="+reason+" ip="+clientIP(r))
+	http.Redirect(w, r, "/admin/orders?ok=refunded", http.StatusSeeOther)
 }
 
 func (a *App) handleAdminResync(w http.ResponseWriter, r *http.Request) {

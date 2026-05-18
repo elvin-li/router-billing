@@ -416,6 +416,95 @@ func (d *DB) MarkOrderPaid(ctx context.Context, orderNo, tradeNo string) (bool, 
 	return true, o, nil
 }
 
+// MarkOrderRefunded transitions a paid order to refunded and rolls back the
+// MAC's expires_at by the order's `days` value. If the rollback puts
+// expires_at in the past, the MAC's status flips to expired so the firewall
+// reconciler revokes the entry on the next pass.
+//
+// Returns the rolled-back MAC row (or nil if the order's MAC no longer
+// exists). Only `paid` orders can be refunded — calling for any other
+// status returns an error so the admin gets a clear signal.
+//
+// All steps run in one transaction so a crash mid-refund either does the
+// whole thing or none of it.
+func (d *DB) MarkOrderRefunded(ctx context.Context, orderNo, reason string) (*models.MAC, error) {
+	tx, err := d.conn.BeginTx(ctx, nil)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	row := tx.QueryRowContext(ctx, `SELECT `+orderCols+` FROM orders WHERE order_no = ?`, orderNo)
+	o, err := scanOrder(row)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, fmt.Errorf("order %s not found", orderNo)
+	}
+	if err != nil {
+		return nil, err
+	}
+	if o.Status != models.OrderPaid {
+		return nil, fmt.Errorf("order %s is %s, only paid orders can be refunded", orderNo, o.Status)
+	}
+
+	now := time.Now().UTC()
+	// Record the refund reason in the order's trade_no append OR a dedicated
+	// column — but adding a column for one-off use is wasteful. Append to
+	// trade_no with a separator so the original gateway ID survives.
+	newTradeNo := o.TradeNo
+	if reason != "" {
+		if newTradeNo != "" {
+			newTradeNo += " | "
+		}
+		newTradeNo += "refund: " + reason
+	}
+	if _, err := tx.ExecContext(ctx,
+		`UPDATE orders SET status = 'refunded', trade_no = ? WHERE order_no = ?`,
+		newTradeNo, orderNo); err != nil {
+		return nil, err
+	}
+
+	// Roll back the MAC's expires_at by `days`. If the MAC is gone (deleted
+	// manually) we silently succeed — the order refund still stands.
+	macRow := tx.QueryRowContext(ctx,
+		`SELECT id, mac, label, status, expires_at, user_id, schedule_json, created_at, updated_at
+		 FROM macs WHERE mac = ?`, o.Mac)
+	var m models.MAC
+	var uid sql.NullInt64
+	err = macRow.Scan(&m.ID, &m.Mac, &m.Label, &m.Status, &m.ExpiresAt, &uid, &m.ScheduleJSON, &m.CreatedAt, &m.UpdatedAt)
+	if errors.Is(err, sql.ErrNoRows) {
+		if err := tx.Commit(); err != nil {
+			return nil, err
+		}
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	if uid.Valid {
+		v := uid.Int64
+		m.UserID = &v
+	}
+
+	newExpiry := m.ExpiresAt.Add(-time.Duration(o.Days) * 24 * time.Hour)
+	newStatus := m.Status
+	if !newExpiry.After(now) {
+		newStatus = models.MACExpired
+	}
+	if _, err := tx.ExecContext(ctx,
+		`UPDATE macs SET expires_at = ?, status = ?, updated_at = ? WHERE id = ?`,
+		newExpiry, string(newStatus), now, m.ID); err != nil {
+		return nil, err
+	}
+	m.ExpiresAt = newExpiry
+	m.Status = newStatus
+	m.UpdatedAt = now
+
+	if err := tx.Commit(); err != nil {
+		return nil, err
+	}
+	return &m, nil
+}
+
 // ---------- Sessions ----------
 
 func (d *DB) CreateSession(ctx context.Context, token, kind, subject string, userID *int64, ttl time.Duration) error {

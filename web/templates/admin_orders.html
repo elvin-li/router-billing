@@ -21,6 +21,14 @@
       </a>
     </div>
 
+    {{if eq .OK "refunded"}}
+    <div class="flash ok">订单已标记为已退款 ✓ MAC 的剩余天数已按订单天数回滚（若已过期则下次防火墙同步会移除）</div>
+    {{end}}
+    {{if eq .Err "refund_confirm"}}<div class="flash err">退款失败：请在确认框中输入完整订单号</div>{{end}}
+    {{if eq .Err "refund_no_order"}}<div class="flash err">退款失败：找不到该订单</div>{{end}}
+    {{if eq .Err "refund_not_paid"}}<div class="flash err">退款失败：只能退款已支付的订单</div>{{end}}
+    {{if eq .Err "refund_failed"}}<div class="flash err">退款失败：请查看服务日志</div>{{end}}
+
     <section class="admin-card">
       <div class="table-wrap">
         <table class="data">
@@ -38,7 +46,13 @@
               <td><span class="pill {{.Status}}">{{.Status}}</span></td>
               <td>{{formatTimePtr .PaidAt}}</td>
               <td style="color:#64748b;">{{formatTime .CreatedAt}}</td>
-              <td>{{if eq (printf "%s" .Status) "paid"}}<a href="/receipt?order_no={{.OrderNo}}" target="_blank" class="btn outline tiny" style="width:auto;">收据</a>{{end}}</td>
+              <td class="row-actions">
+                {{if eq (printf "%s" .Status) "paid"}}
+                  <a href="/receipt?order_no={{.OrderNo}}" target="_blank" class="btn outline tiny" style="width:auto;">收据</a>
+                  <button class="btn danger tiny" type="button" onclick="confirmRefund('{{.OrderNo}}', '{{.Mac}}', '{{.Days}}', '{{formatYuan .AmountCents}}')">退款</button>
+                {{end}}
+                {{if eq (printf "%s" .Status) "refunded"}}<span class="pill blocked">已退款</span>{{end}}
+              </td>
             </tr>
             {{else}}
             <tr><td colspan="9" class="empty-state">
@@ -52,5 +66,50 @@
     </section>
   </main>
 </div>
+
+<!-- Refund modal — populated by confirmRefund() then submitted as a regular form. -->
+<dialog id="refundDialog" style="border:1px solid var(--border); border-radius:10px; padding:24px 28px; max-width:460px;">
+  <h3 style="margin-top:0;">确认退款</h3>
+  <p style="color:var(--text-soft); font-size:13px; line-height:1.6;">
+    操作后，订单状态会变成 <strong>refunded</strong>，并把该 MAC 的到期时间往回拉
+    <strong id="refundDays">…</strong> 天。<br>
+    <span style="color:#dc2626;">注意：本系统不会自动调起微信/支付宝的退款 API，请先到对方后台处理资金，再回来点这里记录状态。</span>
+  </p>
+  <div style="background:rgba(0,0,0,0.04); padding:10px 14px; border-radius:6px; margin:12px 0; font-size:13px;">
+    订单：<span class="mono" id="refundOrderNo">…</span><br>
+    MAC：<span class="mono" id="refundMac">…</span> · 金额 <strong>¥<span id="refundAmt">…</span></strong>
+  </div>
+  <form method="post" action="/admin/orders/refund">
+    {{template "csrf" .}}
+    <input type="hidden" name="order_no" id="refundOrderNoInput">
+    <div class="field" style="margin-top:8px;">
+      <label>请输入完整订单号以确认</label>
+      <input name="confirm_order_no" id="refundConfirmInput" required
+             placeholder="复制粘贴上方订单号"
+             autocomplete="off"
+             style="font-family:ui-monospace, Menlo, monospace;">
+    </div>
+    <div class="field">
+      <label>退款原因（可选，会写入审计日志）</label>
+      <input name="reason" maxlength="200" placeholder="例如：客户投诉、重复支付">
+    </div>
+    <div style="display:flex; gap:10px; justify-content:flex-end; margin-top:14px;">
+      <button class="btn ghost" type="button" onclick="document.getElementById('refundDialog').close()">取消</button>
+      <button class="btn danger" type="submit">确认退款</button>
+    </div>
+  </form>
+</dialog>
+
+<script>
+  function confirmRefund(orderNo, mac, days, amt) {
+    document.getElementById('refundOrderNo').textContent = orderNo;
+    document.getElementById('refundMac').textContent = mac;
+    document.getElementById('refundDays').textContent = days;
+    document.getElementById('refundAmt').textContent = amt;
+    document.getElementById('refundOrderNoInput').value = orderNo;
+    document.getElementById('refundConfirmInput').value = '';
+    document.getElementById('refundDialog').showModal();
+  }
+</script>
 </body>
 </html>

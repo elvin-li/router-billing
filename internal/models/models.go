@@ -33,10 +33,11 @@ type MAC struct {
 type OrderStatus string
 
 const (
-	OrderPending OrderStatus = "pending"
-	OrderPaid    OrderStatus = "paid"
-	OrderFailed  OrderStatus = "failed"
-	OrderExpired OrderStatus = "expired"
+	OrderPending  OrderStatus = "pending"
+	OrderPaid     OrderStatus = "paid"
+	OrderFailed   OrderStatus = "failed"
+	OrderExpired  OrderStatus = "expired"
+	OrderRefunded OrderStatus = "refunded"
 )
 
 type Order struct {
