@@ -203,6 +203,7 @@ func (a *App) Routes() http.Handler {
 	mux.HandleFunc("/admin/backup/restore", a.requireAdmin(a.handleAdminBackupRestore))
 	mux.HandleFunc("/admin/maintenance", a.requireAdmin(a.handleAdminMaintenance))
 	mux.HandleFunc("/admin/sms-log", a.requireAdmin(a.handleAdminSMSLog))
+	mux.HandleFunc("/admin/api-tokens", a.requireAdmin(a.handleAdminAPITokens))
 	mux.HandleFunc("/admin/sms-log/test", a.requireAdmin(a.handleAdminSMSTest))
 	mux.HandleFunc("/admin/sms-log/expiry-reminders", a.requireAdmin(a.handleAdminExpiryReminderTrigger))
 	mux.HandleFunc("/admin/ssid-cards", a.requireAdmin(a.handleAdminSSIDCards))

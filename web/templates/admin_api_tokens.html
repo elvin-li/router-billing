@@ -1,0 +1,76 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>API Tokens · router-billing</title>
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body class="admin">
+<div class="admin-shell">
+  {{template "admin-sidebar" .}}
+  <main class="admin-main">
+    <div class="admin-header">
+      <div>
+        <h1>API Tokens</h1>
+        <div class="crumbs">配置的 Bearer tokens（只读视图 · 编辑请改 config.yaml）</div>
+      </div>
+    </div>
+
+    <section class="admin-card">
+      <h2 style="margin-top:0;">{{len .Tokens}} 个 token</h2>
+      <p class="desc">
+        通过 config 文件的 <code>api_tokens</code> 节配置。新增 / 撤销请编辑 <code>config.yaml</code> 后重启。
+        <br>下方仅显示前 4 位前缀以供识别 — 完整 token 不在 UI 中暴露，泄露后只能旋转。
+      </p>
+      <div class="table-wrap">
+        <table class="data">
+          <thead><tr>
+            <th>Label</th><th>前缀</th><th>权限</th><th>速率限制</th><th>状态</th>
+          </tr></thead>
+          <tbody>
+            {{range .Tokens}}
+            <tr>
+              <td>{{.Label}}</td>
+              <td class="mono" style="font-size:12px;">{{.Prefix}}</td>
+              <td>
+                {{if .ReadOnly}}<span class="pill" style="background:#dbeafe; color:#1e40af;">只读</span>
+                {{else}}<span class="pill active">读写</span>{{end}}
+              </td>
+              <td style="color:var(--text-soft);">
+                {{if .PerMin}}{{.PerMin}}/分钟{{else}}无限制{{end}}
+              </td>
+              <td>
+                {{if .Empty}}<span class="pill blocked">空 token（配置错误）</span>
+                {{else}}<span style="color:var(--text-soft);">—</span>{{end}}
+              </td>
+            </tr>
+            {{else}}
+            <tr><td colspan="5" class="empty-state">
+              没有配置 API token。在 <code>config.yaml</code> 加 <code>api_tokens:</code> 节即可启用 <code>/api/admin/*</code>。
+            </td></tr>
+            {{end}}
+          </tbody>
+        </table>
+      </div>
+    </section>
+
+    <section class="admin-card">
+      <h2 style="margin-top:0;">配置示例</h2>
+      <pre style="background:#0f172a;color:#f1f5f9;padding:14px;border-radius:8px;overflow:auto;font-size:13px;">api_tokens:
+  - token: "rb_generated_token_here"
+    label: "grafana-dashboard"
+    readonly: true
+    rate_limit_per_min: 30
+
+  - token: "rb_another_token"
+    label: "ci-deploy"</pre>
+      <p class="hint" style="font-size:12px; color:var(--text-soft);">
+        生成新 token：<code>router-billing --gen-api-token</code>（32 字节随机 hex）。
+        <br>调用接口：<code>curl -H "Authorization: Bearer rb_..." /api/admin/health</code>
+      </p>
+    </section>
+  </main>
+</div>
+</body>
+</html>
