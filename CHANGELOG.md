@@ -1,5 +1,67 @@
 # Changelog
 
+## v0.18 — 库存盘点 + 报表筛选
+
+Operational tooling continuation of v0.15. Three commits, all
+admin-side reporting improvements.
+
+### 充值码按 batch 库存 (/admin/vouchers)
+
+Adds a top-of-page summary table aggregating vouchers by batch:
+
+  total · 可用 · 已用 · 已撤销 · 已过期 · 最早创建 · CSV button
+
+Each batch name links to a filtered per-row view; the 导出 CSV
+button per row mirrors the existing /admin/vouchers/export.csv
+path. NULL/empty batch names roll up under "(no batch)" so
+vouchers that escaped a labeled generation stay visible.
+
+New DB helper `VoucherBatchStats` — single GROUP BY query, returns
+`[]VoucherBatchStat`.
+
+Wrinkle worth flagging for future me: `MIN(created_at)` over a
+DATETIME column comes back as TEXT in modernc.org/sqlite even
+though the column type is DATETIME. The scan goes through a string
++ multi-layout time.Parse. Same pattern would apply for MAX, MIN,
+or any other aggregate over a time column.
+
+3 tests covering 3-A + 1-B + 1-no-batch aggregation, page render,
+and the section-hidden-on-empty regression guard.
+
+### 订单日期范围筛选 (/admin/orders)
+
+Monthly reconciliation wants "all orders in November". Existing
+filter only knew about substring + status. Two new params:
+
+  /admin/orders?since=2026-05-01&until=2026-05-19
+
+YYYY-MM-DD shape (HTML5 date-input native format), UTC, inclusive
+both ends. The 已过滤 indicator + 清除 link react to date filters
+too.
+
+API addition: `db.OrderFilter` struct + `SearchOrdersFiltered`.
+Old `SearchOrders(q, status, limit)` kept as a 3-arg shim so the
+existing /api/admin/orders endpoint doesn't break.
+
+4 tests: window inclusion, since-only, status+date+substring
+combined, /admin/orders honors ?since= end-to-end.
+
+### CSV 导出按筛选条件
+
+Closes the obvious gap from the date-range commit:
+`/admin/export/orders.csv` now accepts the same q/status/since/
+until params as the page. The 导出 CSV button on /admin/orders
+carries the current filter query so "filter then export" is one
+click. Button label flips to "导出筛选结果" when a filter is
+active so admins notice the export will be narrower.
+
+3 tests covering filter-respected, no-filter-returns-all, and the
+template-link-carries-query path.
+
+### Stats
+- 17 packages tested
+- 318 test functions (was 308 in v0.17)
+
 ## v0.17 — 主动短信通知（到期提醒 + 管理员登录告警）
 
 The first version that uses SMS for outbound notifications instead
