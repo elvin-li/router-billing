@@ -1,5 +1,83 @@
 # Changelog
 
+## v0.16 — 仪表盘 · 测试短信 · 可配置 HSTS
+
+Small but visible polish round. The dashboard is the big one — a
+proper landing page replacing the redirect-to-macs that v0.0 has
+shipped with. Plus two smaller items.
+
+### `/admin/dashboard` landing page
+
+Mornings get an actual morning view. /admin now lands here instead
+of /admin/macs. Sidebar gets a 仪表盘 entry at the top.
+
+Tiles:
+- Today: revenue (with 30-day sparkline) + paid-order count + new
+  users (sparkline) + new MACs (sparkline) + active sessions.
+- 7 days: revenue + paid orders.
+- Cumulative: MAC total / active / expired, registered users,
+  total revenue.
+
+Below: plan-sales breakdown (last 30 days) + most-recent 10 audit
+entries with "查看完整审计 →" link + 5 quick-link buttons.
+
+New DB helper `DashboardSnapshot` — one SQL round-trip per stat,
+all in one Go call. Uses `paid_at >= datetime('now','start of day')`
+style comparisons instead of `date(...)` because modernc.org/sqlite
+writes time.Time in an RFC3339 format that the date() function
+doesn't parse cleanly (caught by a flaky test on first attempt —
+the test catches the format-drift regression now).
+
+Sparklines reuse the existing /static/sparkline.js +
+/admin/charts.json pipeline. No new endpoints, no new JS, just
+`<svg class="spark" data-metric="...">` elements.
+
+5 tests covering page render, root → dashboard redirect, sidebar
+link, DashboardSnapshot reflects seeded data, empty-DB → zeros.
+
+### `/admin/sms-log` — 发送测试短信
+
+When a provider is wired (`Available()==true`), the page shows a
+form at the top: phone + optional message → POST to a new
+`/admin/sms-log/test` handler that calls `a.SMS.Send` and writes
+`sms_test` or `sms_test_failed` to the audit log.
+
+The point is verification — admins can confirm their Aliyun
+signature / template / API key actually works WITHOUT triggering a
+real user-facing flow (reset-password, forgot-password, etc.).
+Default message is "router-billing test message from <IP>" so an
+admin who just hits send sees something useful.
+
+5 tests including the disabled-provider error, bad-phone validation,
+form-visibility gating, and the audit-entry shape.
+
+### Configurable HSTS
+
+The existing security middleware emitted a hardcoded
+`max-age=31536000` on TLS requests. Now configurable:
+
+```yaml
+security:
+  hsts_max_age_seconds: 63072000   # 2 years; default 31536000
+  hsts_include_subdomains: true    # default false (safe)
+  hsts_preload: true               # default false; one-way trip
+```
+
+Defaults stay safe. HSTS is still only emitted on TLS-detected
+requests (TLS!=nil OR X-Forwarded-Proto contains https), so HTTP-
+only deploys get nothing burned. `securityHeaders` became an
+`*App` method so it can read `a.Cfg.Security` once at construction
+and capture the precomputed header string in the closure (zero
+per-request cost).
+
+5 tests including the safety-by-default regression guard
+(plain-HTTP request gets no HSTS header even with security config
+set).
+
+### Stats
+- 17 packages tested
+- 274 test functions (was 258 in v0.15)
+
 ## v0.15 — 退款 · 用户详情页 · 搜索过滤 · 审计盲区清零 · 充值码 API
 
 Operational tooling round — the things admins actually do every day
