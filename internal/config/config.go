@@ -31,6 +31,26 @@ type Config struct {
 	SMS          SMSConfig       `yaml:"sms"` // optional SMS provider
 	Webhook      Webhook         `yaml:"webhook"`
 	WalledGarden WalledGarden    `yaml:"walled_garden"`
+	Security     Security        `yaml:"security"`
+}
+
+// Security holds opt-in hardening knobs that aren't safe-by-default
+// (e.g. HSTS preload is a one-way trip — once a browser caches the
+// preload directive it ignores any later removal for the max-age).
+type Security struct {
+	// HSTSMaxAgeSeconds overrides the default 31536000 (1 year) value.
+	// Set to 63072000 (2 years) to be eligible for hstspreload.org.
+	// Set to 0 to use the default.
+	HSTSMaxAgeSeconds int `yaml:"hsts_max_age_seconds,omitempty"`
+	// HSTSIncludeSubdomains adds "includeSubDomains" to the header.
+	// Only enable when EVERY subdomain of your apex serves TLS; otherwise
+	// a browser that gets this directive will refuse non-TLS subdomain
+	// loads forever (within max-age).
+	HSTSIncludeSubdomains bool `yaml:"hsts_include_subdomains,omitempty"`
+	// HSTSPreload adds "preload". Submit your domain to hstspreload.org
+	// AFTER you've verified your site survives the 2-year max-age +
+	// includeSubdomains commitment. Cannot be undone for cached browsers.
+	HSTSPreload bool `yaml:"hsts_preload,omitempty"`
 }
 
 // Admin is either {username,password} or {username,password_hash}.
