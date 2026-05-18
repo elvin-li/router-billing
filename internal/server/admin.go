@@ -201,7 +201,15 @@ func errLabel(code string) string {
 }
 
 func (a *App) handleAdminMACs(w http.ResponseWriter, r *http.Request) {
-	macs, err := a.DB.ListMACs(r.Context())
+	q := strings.TrimSpace(r.URL.Query().Get("q"))
+	status := strings.TrimSpace(r.URL.Query().Get("status"))
+	var macs []models.MAC
+	var err error
+	if q == "" && status == "" {
+		macs, err = a.DB.ListMACs(r.Context())
+	} else {
+		macs, err = a.DB.SearchMACs(r.Context(), q, status, 500)
+	}
 	if err != nil {
 		http.Error(w, "db", http.StatusInternalServerError)
 		return
@@ -219,6 +227,8 @@ func (a *App) handleAdminMACs(w http.ResponseWriter, r *http.Request) {
 		"Attention": att,
 		"PlanSales": planSales,
 		"Now":       time.Now(),
+		"Query":     q,
+		"Status":    status,
 	}))
 }
 

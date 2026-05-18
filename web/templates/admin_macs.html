@@ -129,7 +129,21 @@
     </section>
 
     <section class="admin-card">
-      <h2>已授权 MAC</h2>
+      <div style="display:flex; align-items:center; justify-content:space-between; gap:10px; flex-wrap:wrap;">
+        <h2 style="margin:0;">已授权 MAC{{if or .Query .Status}} <span style="font-size:13px; color:var(--text-soft); font-weight:normal;">(已过滤 · {{len .MACs}} 条)</span>{{end}}</h2>
+        <form method="get" action="/admin/macs" style="margin:0; display:flex; gap:6px; align-items:center;">
+          <input name="q" value="{{.Query}}" placeholder="搜索 MAC 或备注"
+                 style="padding:6px 10px; border:1px solid var(--border); border-radius:6px; font-size:13px; width:200px;">
+          <select name="status" style="padding:6px 8px; border:1px solid var(--border); border-radius:6px; font-size:13px;">
+            <option value="">全部状态</option>
+            <option value="active" {{if eq .Status "active"}}selected{{end}}>active</option>
+            <option value="expired" {{if eq .Status "expired"}}selected{{end}}>expired</option>
+            <option value="blocked" {{if eq .Status "blocked"}}selected{{end}}>blocked</option>
+          </select>
+          <button class="btn outline small" type="submit" style="width:auto;">筛选</button>
+          {{if or .Query .Status}}<a href="/admin/macs" class="btn ghost small" style="width:auto;">清除</a>{{end}}
+        </form>
+      </div>
         <div class="table-wrap">
         <table class="data">
           <thead><tr>

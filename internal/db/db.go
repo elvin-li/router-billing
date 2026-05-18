@@ -89,6 +89,31 @@ func (d *DB) ListMACs(ctx context.Context) ([]models.MAC, error) {
 	return d.queryMACs(ctx, `SELECT `+macCols+` FROM macs ORDER BY expires_at DESC`)
 }
 
+// SearchMACs returns MACs where MAC or label contains q (case-insensitive
+// LIKE). When q is empty, behaves like ListMACs. status (if non-empty)
+// restricts to that exact status. limit defaults to 200, capped at 1000.
+func (d *DB) SearchMACs(ctx context.Context, q, status string, limit int) ([]models.MAC, error) {
+	if limit <= 0 || limit > 1000 {
+		limit = 200
+	}
+	var sb strings.Builder
+	sb.WriteString(`SELECT ` + macCols + ` FROM macs WHERE 1=1`)
+	args := []any{}
+	if q != "" {
+		// SQLite LIKE is case-insensitive for ASCII by default.
+		sb.WriteString(` AND (mac LIKE ? OR label LIKE ?)`)
+		pat := "%" + q + "%"
+		args = append(args, pat, pat)
+	}
+	if status != "" {
+		sb.WriteString(` AND status = ?`)
+		args = append(args, status)
+	}
+	sb.WriteString(` ORDER BY expires_at DESC LIMIT ?`)
+	args = append(args, limit)
+	return d.queryMACs(ctx, sb.String(), args...)
+}
+
 func (d *DB) ListActiveMACs(ctx context.Context) ([]models.MAC, error) {
 	return d.queryMACs(ctx, `SELECT `+macCols+` FROM macs WHERE status = 'active' AND expires_at > CURRENT_TIMESTAMP`)
 }
