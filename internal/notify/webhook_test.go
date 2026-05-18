@@ -175,6 +175,112 @@ func TestRetriesOnceOn5xx(t *testing.T) {
 	}
 }
 
+func TestExponentialBackoffRetriesUntilSchedule(t *testing.T) {
+	// Server fails the first 2 attempts, succeeds on the 3rd. With a
+	// 3-step schedule the worker should make exactly 3 calls.
+	srv := newCaptureSrv(t, func(call int) int {
+		if call <= 2 {
+			return 503
+		}
+		return 200
+	})
+	n := New(srv.srv.URL, "")
+	n.BackoffSchedule = []time.Duration{5 * time.Millisecond, 5 * time.Millisecond, 5 * time.Millisecond}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go n.Run(ctx)
+	n.Send(Event{Type: "pay"})
+
+	deadline := time.After(2 * time.Second)
+	for atomic.LoadInt32(&srv.calls) < 3 {
+		select {
+		case <-deadline:
+			t.Fatalf("only %d calls; want 3", atomic.LoadInt32(&srv.calls))
+		default:
+			time.Sleep(2 * time.Millisecond)
+		}
+	}
+	// Give it a moment to confirm no 4th call.
+	time.Sleep(40 * time.Millisecond)
+	if got := atomic.LoadInt32(&srv.calls); got != 3 {
+		t.Errorf("expected exactly 3 calls; got %d", got)
+	}
+}
+
+func TestPersistentFailureDropsAfterFullSchedule(t *testing.T) {
+	srv := newCaptureSrv(t, func(int) int { return 500 })
+	n := New(srv.srv.URL, "")
+	n.BackoffSchedule = []time.Duration{2 * time.Millisecond, 2 * time.Millisecond}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go n.Run(ctx)
+	n.Send(Event{Type: "pay"})
+
+	// 1 initial + 2 retries = 3 total. Wait for all, then confirm no 4th.
+	deadline := time.After(2 * time.Second)
+	for atomic.LoadInt32(&srv.calls) < 3 {
+		select {
+		case <-deadline:
+			t.Fatalf("only %d calls; want 3", atomic.LoadInt32(&srv.calls))
+		default:
+			time.Sleep(1 * time.Millisecond)
+		}
+	}
+	time.Sleep(30 * time.Millisecond)
+	if got := atomic.LoadInt32(&srv.calls); got != 3 {
+		t.Errorf("expected exactly 3 calls (drop after full schedule); got %d", got)
+	}
+}
+
+func TestLegacyRetryDelayBehavesAsOneShot(t *testing.T) {
+	// Old code-paths set RetryDelay and expect "one retry then drop".
+	// Confirm that still works when BackoffSchedule is nil.
+	srv := newCaptureSrv(t, func(int) int { return 500 })
+	n := New(srv.srv.URL, "")
+	n.RetryDelay = 5 * time.Millisecond
+	n.BackoffSchedule = nil // legacy path
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go n.Run(ctx)
+	n.Send(Event{Type: "pay"})
+
+	deadline := time.After(2 * time.Second)
+	for atomic.LoadInt32(&srv.calls) < 2 {
+		select {
+		case <-deadline:
+			t.Fatalf("only %d calls; want 2", atomic.LoadInt32(&srv.calls))
+		default:
+			time.Sleep(1 * time.Millisecond)
+		}
+	}
+	time.Sleep(30 * time.Millisecond)
+	if got := atomic.LoadInt32(&srv.calls); got != 2 {
+		t.Errorf("legacy RetryDelay should mean 1 retry only; got %d calls", got)
+	}
+}
+
+func TestEmptyScheduleMeansNoRetry(t *testing.T) {
+	// Explicit empty slice = opt out of retries entirely (differs from nil
+	// which falls back to DefaultBackoffSchedule).
+	srv := newCaptureSrv(t, func(int) int { return 500 })
+	n := New(srv.srv.URL, "")
+	n.BackoffSchedule = []time.Duration{}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go n.Run(ctx)
+	n.Send(Event{Type: "pay"})
+
+	// Wait long enough that a retry would have fired if one were scheduled.
+	time.Sleep(80 * time.Millisecond)
+	if got := atomic.LoadInt32(&srv.calls); got != 1 {
+		t.Errorf("empty schedule should mean exactly 1 attempt; got %d", got)
+	}
+}
+
 func TestQueueDropsWhenFull(t *testing.T) {
 	// Slow receiver — first request blocks; queue fills.
 	block := make(chan struct{})

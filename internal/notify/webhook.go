@@ -7,7 +7,8 @@
 //   - Single worker goroutine — events are serialized (preserves order)
 //   - HMAC-SHA256 signature in `X-Router-Billing-Signature` header
 //   - Drops on full queue, logs to standard logger
-//   - One retry after 2 seconds; further failures are dropped (with log)
+//   - Exponential backoff retries — by default 2s, 30s, 5m; tests inject
+//     a tighter schedule via BackoffSchedule.
 package notify
 
 import (
@@ -23,6 +24,16 @@ import (
 	"time"
 )
 
+// DefaultBackoffSchedule is the wait between successive retries. The
+// initial delivery is attempt 0; failure schedules attempt 1 after
+// DefaultBackoffSchedule[0], and so on. After len(schedule) failures the
+// event is dropped with a log entry.
+var DefaultBackoffSchedule = []time.Duration{
+	2 * time.Second,
+	30 * time.Second,
+	5 * time.Minute,
+}
+
 type Event struct {
 	Type    string    `json:"type"` // "pay" / "redeem" / "grant" / "revoke" / "user_login" / ...
 	At      time.Time `json:"at"`
@@ -37,9 +48,18 @@ type Event struct {
 }
 
 type Notifier struct {
-	URL        string
-	Secret     string
-	RetryDelay time.Duration // 0 = default 2s; tests inject short values
+	URL    string
+	Secret string
+
+	// RetryDelay is the LEGACY single-shot delay. When set and
+	// BackoffSchedule is nil, the worker uses [RetryDelay] as a 1-element
+	// schedule for back-compat with the original 2s-one-retry behavior.
+	// New code should set BackoffSchedule directly.
+	RetryDelay time.Duration
+
+	// BackoffSchedule controls the retry timing. Empty / nil falls back to
+	// DefaultBackoffSchedule. Length 0 = no retries (initial attempt only).
+	BackoffSchedule []time.Duration
 
 	HTTPClient *http.Client
 	queue      chan Event
@@ -50,12 +70,29 @@ func New(url, secret string) *Notifier {
 		return &Notifier{} // no-op
 	}
 	return &Notifier{
-		URL:        url,
-		Secret:     secret,
-		RetryDelay: 2 * time.Second,
-		HTTPClient: &http.Client{Timeout: 8 * time.Second},
-		queue:      make(chan Event, 64),
+		URL:             url,
+		Secret:          secret,
+		BackoffSchedule: DefaultBackoffSchedule,
+		HTTPClient:      &http.Client{Timeout: 8 * time.Second},
+		queue:           make(chan Event, 64),
 	}
+}
+
+// schedule returns the effective retry-delay slice. Semantics:
+//   - nil BackoffSchedule  → use DefaultBackoffSchedule (3 retries).
+//   - empty BackoffSchedule → caller opted out of retries entirely.
+//   - non-empty BackoffSchedule → use as-is.
+//
+// Legacy RetryDelay > 0 (with nil BackoffSchedule) yields the original
+// one-shot behavior for callers that haven't migrated.
+func (n *Notifier) schedule() []time.Duration {
+	if n.BackoffSchedule != nil {
+		return n.BackoffSchedule
+	}
+	if n.RetryDelay > 0 {
+		return []time.Duration{n.RetryDelay}
+	}
+	return DefaultBackoffSchedule
 }
 
 // Run blocks until ctx is canceled. Spawn it in a goroutine from main.
@@ -112,12 +149,11 @@ func (n *Notifier) deliver(ctx context.Context, ev Event, attempt int) {
 		}
 		err = fmt.Errorf("http %d", resp.StatusCode)
 	}
-	if attempt < 1 {
-		// One retry, default 2s. Tests set RetryDelay to ~10ms.
-		delay := n.RetryDelay
-		if delay <= 0 {
-			delay = 2 * time.Second
-		}
+	sched := n.schedule()
+	if attempt < len(sched) {
+		delay := sched[attempt]
+		log.Printf("notify: %s/%s attempt %d failed (%v); retrying in %s",
+			ev.Type, ev.MAC, attempt+1, err, delay)
 		select {
 		case <-ctx.Done():
 			return
@@ -126,5 +162,5 @@ func (n *Notifier) deliver(ctx context.Context, ev Event, attempt int) {
 		n.deliver(ctx, ev, attempt+1)
 		return
 	}
-	log.Printf("notify: drop %s/%s after retries: %v", ev.Type, ev.MAC, err)
+	log.Printf("notify: drop %s/%s after %d attempts: %v", ev.Type, ev.MAC, attempt+1, err)
 }
