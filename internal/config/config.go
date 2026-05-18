@@ -55,6 +55,12 @@ type Admin struct {
 type APIToken struct {
 	Token string `yaml:"token"`
 	Label string `yaml:"label"`
+	// ReadOnly limits the token to GET endpoints (/api/admin/health,
+	// /api/admin/macs). Default false = legacy full access, so adding
+	// `readonly: true` to a token is a strict tightening — never a break.
+	// Useful for monitoring scripts / dashboards that should never be
+	// able to grant or revoke MAC subscriptions.
+	ReadOnly bool `yaml:"readonly,omitempty"`
 }
 
 // SSIDInfo names + PSK keys for the printable SSID-cards page.
@@ -362,22 +368,34 @@ func (c *Config) LookupAdmin(username string) *Admin {
 
 // MatchAPIToken returns the label of a matching API token, or "" if no match.
 // Walks the whole list to defeat timing-side-channel deduction of which
-// token is configured.
+// token is configured. Kept as a thin wrapper around MatchAPITokenFull for
+// callers that don't care about the readonly bit.
 func (c *Config) MatchAPIToken(presented string) string {
-	if presented == "" {
+	t := c.MatchAPITokenFull(presented)
+	if t == nil {
 		return ""
 	}
-	var label string
-	for _, t := range c.APITokens {
+	if t.Label == "" {
+		return "unnamed-token"
+	}
+	return t.Label
+}
+
+// MatchAPITokenFull returns the full APIToken on success so the caller can
+// also inspect ReadOnly / future scopes. Returns nil on no match.
+// Still walks the whole list for constant-time comparison.
+func (c *Config) MatchAPITokenFull(presented string) *APIToken {
+	if presented == "" {
+		return nil
+	}
+	var match *APIToken
+	for i, t := range c.APITokens {
 		if t.Token == "" {
 			continue
 		}
 		if subtle.ConstantTimeCompare([]byte(presented), []byte(t.Token)) == 1 {
-			label = t.Label
-			if label == "" {
-				label = "unnamed-token"
-			}
+			match = &c.APITokens[i]
 		}
 	}
-	return label
+	return match
 }

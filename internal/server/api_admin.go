@@ -21,27 +21,63 @@ import (
 	"net/http"
 	"strings"
 
+	"router-billing/internal/config"
 	"router-billing/internal/models"
 )
 
-// requireAPIToken extracts Authorization: Bearer <token> and verifies it
-// against config.api_tokens. On success it stuffs the token's label into
-// the request context so handlers can audit who-did-what.
-func (a *App) requireAPIToken(h func(w http.ResponseWriter, r *http.Request, actor string)) http.HandlerFunc {
+// requireAPITokenWrite extracts Authorization: Bearer <token>, verifies it
+// against config.api_tokens, and blocks read-only tokens from non-GET
+// methods. Used for endpoints that mutate state.
+func (a *App) requireAPITokenWrite(h func(w http.ResponseWriter, r *http.Request, actor string)) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		hdr := r.Header.Get("Authorization")
-		if !strings.HasPrefix(hdr, "Bearer ") {
-			writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "missing Bearer token"})
+		tok := a.matchBearerOrUnauthorized(w, r)
+		if tok == nil {
 			return
 		}
-		tok := strings.TrimSpace(strings.TrimPrefix(hdr, "Bearer "))
-		label := a.Cfg.MatchAPIToken(tok)
-		if label == "" {
-			writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "invalid token"})
+		if r.Method != http.MethodGet && tok.ReadOnly {
+			writeJSON(w, http.StatusForbidden, map[string]string{"error": "token is read-only"})
 			return
 		}
-		h(w, r, "api:"+label)
+		h(w, r, "api:"+tokenLabel(tok))
 	}
+}
+
+// requireAPITokenRead accepts any token (read-only or full) for read paths.
+// Today this is functionally identical to requireAPITokenWrite for GET — it
+// exists so the route-table reads as documentation for which endpoint needs
+// which scope.
+func (a *App) requireAPITokenRead(h func(w http.ResponseWriter, r *http.Request, actor string)) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		tok := a.matchBearerOrUnauthorized(w, r)
+		if tok == nil {
+			return
+		}
+		h(w, r, "api:"+tokenLabel(tok))
+	}
+}
+
+// matchBearerOrUnauthorized parses the Authorization header, looks up the
+// token, and writes a 401 response on miss. Returns nil iff the response is
+// already written.
+func (a *App) matchBearerOrUnauthorized(w http.ResponseWriter, r *http.Request) *config.APIToken {
+	hdr := r.Header.Get("Authorization")
+	if !strings.HasPrefix(hdr, "Bearer ") {
+		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "missing Bearer token"})
+		return nil
+	}
+	tok := a.Cfg.MatchAPITokenFull(strings.TrimSpace(strings.TrimPrefix(hdr, "Bearer ")))
+	if tok == nil {
+		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "invalid token"})
+		return nil
+	}
+	return tok
+}
+
+func tokenLabel(t *config.APIToken) string {
+	if t.Label == "" {
+		return "unnamed-token"
+	}
+	return t.Label
 }
 
 // GET /api/admin/health
