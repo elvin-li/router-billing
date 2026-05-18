@@ -40,6 +40,13 @@ type App struct {
 	redeemLimiter     *rateLimiter // voucher redemption, keyed by IP
 	payCreateLimiter  *rateLimiter // payment intent creation, keyed by IP
 
+	// Forgot-password (SMS) — separate counters from login so a hostile actor
+	// can't burn the legitimate user's login budget by spamming reset requests.
+	pwResetIssueIPLimit    *rateLimiter // /user/forgot-password POST, keyed by IP
+	pwResetIssuePhoneLimit *rateLimiter // /user/forgot-password POST, keyed by phone
+	pwResetVerifyIPLimit   *rateLimiter // /user/forgot-password/verify, keyed by IP
+	pwResetVerifyPhoneLim  *rateLimiter // /user/forgot-password/verify, keyed by phone
+
 	waitMu  sync.Mutex
 	waiters map[string][]chan struct{} // order_no → pending wait channels
 }
@@ -59,7 +66,13 @@ func NewApp(cfg *config.Config, dbx *db.DB, svc *service.MACService) (*App, erro
 		adminLoginByUser:  newRateLimiter(5, 5*time.Minute),
 		redeemLimiter:     newRateLimiter(10, 10*time.Minute),
 		payCreateLimiter:  newRateLimiter(20, time.Minute),
-		waiters:           map[string][]chan struct{}{},
+
+		pwResetIssueIPLimit:    newRateLimiter(6, 1*time.Hour),
+		pwResetIssuePhoneLimit: newRateLimiter(3, 1*time.Hour),
+		pwResetVerifyIPLimit:   newRateLimiter(30, 1*time.Hour),
+		pwResetVerifyPhoneLim:  newRateLimiter(10, 1*time.Hour),
+
+		waiters: map[string][]chan struct{}{},
 	}
 
 	if cfg.Pay.WeChat.Enabled {
@@ -130,6 +143,8 @@ func (a *App) Routes() http.Handler {
 	mux.HandleFunc("/user/login", a.handleUserLogin)
 	mux.HandleFunc("/user/register", a.handleUserRegister)
 	mux.HandleFunc("/user/logout", a.handleUserLogout)
+	mux.HandleFunc("/user/forgot-password", a.handleUserForgotPassword)
+	mux.HandleFunc("/user/forgot-password/verify", a.handleUserForgotPasswordVerify)
 	mux.HandleFunc("/user/me", a.requireUser(a.handleUserMe))
 	mux.HandleFunc("/user/macs/replace", a.requireUser(a.handleUserReplaceMAC))
 	mux.HandleFunc("/user/macs/claim", a.requireUser(a.handleUserClaimMAC))

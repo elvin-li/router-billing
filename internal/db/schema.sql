@@ -108,6 +108,20 @@ CREATE TABLE IF NOT EXISTS plans (
     updated_at    DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 
+-- Password-reset codes — issued via SMS from /user/forgot-password. At most
+-- one row per user; issuing a new code deletes any prior. Verified by bcrypt
+-- compare so a DB dump doesn't leak in-flight codes.
+CREATE TABLE IF NOT EXISTS password_resets (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id     INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    code_hash   TEXT NOT NULL,
+    attempts    INTEGER NOT NULL DEFAULT 0,
+    expires_at  DATETIME NOT NULL,
+    created_at  DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+CREATE INDEX IF NOT EXISTS idx_pwreset_user    ON password_resets(user_id);
+CREATE INDEX IF NOT EXISTS idx_pwreset_expires ON password_resets(expires_at);
+
 -- Audit log — admin/user actions (best-effort, last 10k rows).
 CREATE TABLE IF NOT EXISTS audit_log (
     id          INTEGER PRIMARY KEY AUTOINCREMENT,

@@ -66,6 +66,19 @@ type User struct {
 	UpdatedAt    time.Time `json:"updated_at"`
 }
 
+// --- PasswordReset ---
+
+// PasswordReset is one outstanding SMS-issued reset code. Only one row per
+// user is kept (issuing a new code deletes any prior).
+type PasswordReset struct {
+	ID        int64     `json:"id"`
+	UserID    int64     `json:"user_id"`
+	CodeHash  string    `json:"-"` // bcrypt of the 6-digit code
+	Attempts  int       `json:"attempts"`
+	ExpiresAt time.Time `json:"expires_at"`
+	CreatedAt time.Time `json:"created_at"`
+}
+
 // --- Sighting ---
 
 type Sighting struct {

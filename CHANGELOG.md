@@ -1,5 +1,103 @@
 # Changelog
 
+## v0.13 — SMS end-to-end: 自助找回密码 + 重置密码短信下发
+
+v0.11 added the SMS abstraction; v0.12 added the Aliyun adapter. v0.13
+wires both into the two flows users actually touch.
+
+### Admin-initiated reset can now SMS the temp password
+
+`/admin/users` grows a second action when SMS is configured: **"重置 +
+SMS"** posts `via_sms=1` so the new temporary password is texted to
+the user's phone instead of bouncing back through the query string.
+
+- Existing **"重置密码"** still works exactly as before — shows the
+  one-shot password inline so admins without SMS aren't blocked.
+- On SMS failure the handler falls back to the inline-display path with
+  the original temp password, so an Aliyun outage never leaves an admin
+  unable to reset.
+- Both paths are audited with `via=sms provider=...` / `via=inline` so
+  ops can prove what happened later.
+- `/admin/sms-log` (new nav entry) shows the last 50 messages when the
+  console provider is in use (dev mode). For real providers the page
+  points to the provider's own dashboard — we deliberately don't store
+  the message bodies, so leaking a DB dump doesn't leak verification
+  codes.
+
+### `/user/forgot-password` — user-driven SMS reset (the big one)
+
+Two-stage flow gated entirely on `a.SMS.Available()`:
+
+1. `GET /user/forgot-password` — phone form (link from `/user/login`
+   appears only when SMS is wired).
+2. `POST /user/forgot-password` — generates a 6-digit code via
+   `crypto/rand` uniform sampling, bcrypts it into a new
+   `password_resets` row (10-minute TTL, at most one row per user),
+   SMSes the plaintext code, advances to stage 2.
+3. `POST /user/forgot-password/verify` — bcrypt-compares the typed
+   code, validates the new password, rotates `users.password_hash`,
+   deletes the reset row, and `DELETE FROM sessions WHERE
+   kind='user' AND user_id = ?` so prior tabs are kicked.
+
+**Anti-abuse:**
+- Per-IP issuance limiter (6/h) + per-phone issuance limiter (3/h)
+  separate from the login limiter so an attacker can't burn through
+  somebody's login budget by spamming reset requests.
+- Per-IP verify limiter (30/h) + per-phone verify limiter (10/h) on
+  top of the per-row attempt cap (5 wrong codes → row deleted, code
+  invalidated).
+- **No user enumeration** on stage 1: unknown / suspended phones still
+  see "code sent" and advance to stage 2; only the SMS itself is
+  skipped. Wrong code at verify says "验证码错误" regardless of whether
+  the phone is known, so the attacker can't distinguish "no user" from
+  "bad code".
+- bcrypt over the code means a DB dump doesn't leak in-flight codes.
+- Audit log records `password_reset_request`, `password_reset_failed`
+  (with `attempts=N`), and `password_reset` with the resolved
+  provider name + client IP.
+
+**New table** (`internal/db/schema.sql`):
+```sql
+CREATE TABLE password_resets (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    code_hash TEXT NOT NULL,
+    attempts INTEGER NOT NULL DEFAULT 0,
+    expires_at DATETIME NOT NULL,
+    created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+```
+Created by `CREATE TABLE IF NOT EXISTS` so existing deploys pick it
+up on next startup without manual migration.
+
+**Tests** (8 new in `internal/server/user_forgot_test.go`):
+- Happy path: register → request → SMS → verify → new login works,
+  old password rejected, reset row deleted.
+- Wrong code once, then right code — confirms attempts don't poison
+  the row prematurely.
+- 5 wrong attempts → row deleted, 6th attempt shows expired/locked.
+- Unknown phone → still advances to stage 2, but no SMS sent.
+- Per-phone rate limit kicks in after the configured budget.
+- `Available()==false` redirects to `/user/login?err=sms_unavailable`.
+- Login page omits the "忘记密码？" link when SMS is off, includes it
+  when on.
+- The stored `code_hash` is a real bcrypt hash (`bcrypt.Cost` parses).
+
+### Misc
+- `admin/users/reset-password` handler restructured to drop dead
+  `smsSent` boolean flagged by `ineffassign` — early-return on SMS
+  success keeps the code straight.
+- `userErrLabel` gains six new codes for the reset flow
+  (`sms_unavailable`, `sms_failed`, `bad_code`, `expired`,
+  `too_many_attempts`, `password_reset`).
+- `adminCtx.OK` is now a raw query-string value (was `bool`) so
+  templates can branch on the success code, e.g. `{{if eq .OK
+  "reset_sms"}}`.
+
+### Stats
+- 17 packages tested
+- 153 test functions (was 143)
+
 ## v0.12 — iptables 后端 + Aliyun SMS
 
 Two infrastructure additions that don't change any user-facing flow but

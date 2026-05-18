@@ -47,6 +47,18 @@ func userErrLabel(code string) string {
 		return "请求过于频繁，请稍候再试"
 	case "suspended":
 		return "账号已停用，请联系管理员"
+	case "sms_unavailable":
+		return "短信功能未启用，无法重置密码，请联系管理员"
+	case "sms_failed":
+		return "短信发送失败，请稍候重试"
+	case "bad_code":
+		return "验证码错误"
+	case "expired":
+		return "验证码已过期，请重新申请"
+	case "too_many_attempts":
+		return "验证次数过多，请重新申请验证码"
+	case "password_reset":
+		return ""
 	case "no_mac":
 		return "未检测到本设备 MAC，请连接到收费 SSID 后重试"
 	case "replace_failed":
@@ -95,7 +107,8 @@ func (a *App) currentUserID(r *http.Request) int64 {
 func (a *App) handleUserLogin(w http.ResponseWriter, r *http.Request) {
 	if r.Method == http.MethodGet {
 		a.render(w, "user_login.html", a.userCtx(r, "login", map[string]any{
-			"Next": r.URL.Query().Get("next"),
+			"Next":         r.URL.Query().Get("next"),
+			"SMSAvailable": a.SMS.Available(),
 		}))
 		return
 	}

@@ -644,6 +644,82 @@ func (d *DB) DeleteUser(ctx context.Context, id int64) error {
 	return err
 }
 
+// ---------- Password resets (SMS forgot-password) ----------
+
+// CreatePasswordReset stores a fresh reset row for userID. Any prior pending
+// reset for the same user is deleted so codes don't accumulate. The caller
+// supplies a bcrypt hash of the actual code — the plaintext is only ever in
+// the SMS body.
+func (d *DB) CreatePasswordReset(ctx context.Context, userID int64, codeHash string, ttl time.Duration) (*models.PasswordReset, error) {
+	now := time.Now().UTC()
+	exp := now.Add(ttl)
+	tx, err := d.conn.BeginTx(ctx, nil)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = tx.Rollback() }()
+	if _, err := tx.ExecContext(ctx, `DELETE FROM password_resets WHERE user_id = ?`, userID); err != nil {
+		return nil, err
+	}
+	res, err := tx.ExecContext(ctx,
+		`INSERT INTO password_resets (user_id, code_hash, attempts, expires_at, created_at) VALUES (?, ?, 0, ?, ?)`,
+		userID, codeHash, exp, now)
+	if err != nil {
+		return nil, err
+	}
+	id, _ := res.LastInsertId()
+	if err := tx.Commit(); err != nil {
+		return nil, err
+	}
+	return &models.PasswordReset{ID: id, UserID: userID, CodeHash: codeHash, ExpiresAt: exp, CreatedAt: now}, nil
+}
+
+// GetActivePasswordReset returns the unexpired reset row for userID, or nil.
+// Expired rows are filtered out (the verify handler treats them as "no row").
+func (d *DB) GetActivePasswordReset(ctx context.Context, userID int64) (*models.PasswordReset, error) {
+	row := d.conn.QueryRowContext(ctx,
+		`SELECT id, user_id, code_hash, attempts, expires_at, created_at
+		 FROM password_resets WHERE user_id = ? AND expires_at > ? ORDER BY id DESC LIMIT 1`,
+		userID, time.Now().UTC())
+	var r models.PasswordReset
+	err := row.Scan(&r.ID, &r.UserID, &r.CodeHash, &r.Attempts, &r.ExpiresAt, &r.CreatedAt)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	return &r, nil
+}
+
+// BumpPasswordResetAttempts atomically increments attempts. Returns the new
+// count so the caller can decide to expire the code (>= maxAttempts) and
+// audit-log the failure.
+func (d *DB) BumpPasswordResetAttempts(ctx context.Context, id int64) (int, error) {
+	if _, err := d.conn.ExecContext(ctx,
+		`UPDATE password_resets SET attempts = attempts + 1 WHERE id = ?`, id); err != nil {
+		return 0, err
+	}
+	var n int
+	if err := d.conn.QueryRowContext(ctx, `SELECT attempts FROM password_resets WHERE id = ?`, id).Scan(&n); err != nil {
+		return 0, err
+	}
+	return n, nil
+}
+
+// DeletePasswordReset removes the row by primary key. Used on success and
+// when the attempt cap is reached.
+func (d *DB) DeletePasswordReset(ctx context.Context, id int64) error {
+	_, err := d.conn.ExecContext(ctx, `DELETE FROM password_resets WHERE id = ?`, id)
+	return err
+}
+
+// PurgeExpiredPasswordResets sweeps stale rows. Cheap to run from a janitor.
+func (d *DB) PurgeExpiredPasswordResets(ctx context.Context) error {
+	_, err := d.conn.ExecContext(ctx, `DELETE FROM password_resets WHERE expires_at <= ?`, time.Now().UTC())
+	return err
+}
+
 // ---------- Sightings ----------
 
 func (d *DB) UpsertSighting(ctx context.Context, mac, ip, hostname string) error {

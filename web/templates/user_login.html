@@ -20,6 +20,7 @@
       <p class="sub">用手机号登录，管理你的 MAC</p>
 
       {{if .Err}}<div class="flash err">{{.Err}}</div>{{end}}
+      {{if eq .OK "password_reset"}}<div class="flash ok">密码已重置，请用新密码登录</div>{{end}}
 
       <form method="post" action="/user/login">
         <input type="hidden" name="next" value="{{.Next}}">
@@ -34,7 +35,9 @@
         <button class="btn primary" type="submit" style="margin-top:8px;">登录</button>
       </form>
       <p class="hint" style="margin-top:16px; text-align:center;">
-        没有账号？<a href="/user/register">免费注册</a><br>
+        没有账号？<a href="/user/register">免费注册</a>
+        {{if .SMSAvailable}} · <a href="/user/forgot-password">忘记密码？</a>{{end}}
+        <br>
         <a href="/portal" style="color: var(--text-soft);">← 返回付费页</a>
       </p>
     </div>
