@@ -60,8 +60,8 @@
           <tbody>
             {{range .Users}}
             <tr>
-              <td style="color:var(--text-soft);">#{{.ID}}</td>
-              <td class="mono">{{.Phone}}</td>
+              <td style="color:var(--text-soft);"><a href="/admin/users/detail?id={{.ID}}" style="color:inherit;">#{{.ID}}</a></td>
+              <td class="mono"><a href="/admin/users/detail?id={{.ID}}" style="color:inherit;">{{.Phone}}</a></td>
               <td>{{index $.MacCount .ID}}</td>
               <td>{{if .Suspended}}<span class="pill blocked">已停用</span>{{else}}<span class="pill active">正常</span>{{end}}</td>
               <td>{{if .TOTPSecret}}<span class="pill active" title="二步验证已开启">✓ 开启</span>{{else}}<span style="color:var(--text-soft);">—</span>{{end}}</td>

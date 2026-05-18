@@ -603,6 +603,35 @@ func (d *DB) ListActiveSessions(ctx context.Context, limit int) ([]SessionRecord
 	return out, rows.Err()
 }
 
+// ListSessionsForUser returns every non-expired session belonging to userID.
+// Sorted by expires_at ascending so the soonest-to-die appears first — same
+// convention as ListActiveSessions, helpful for "review my sessions" pages.
+func (d *DB) ListSessionsForUser(ctx context.Context, userID int64) ([]SessionRecord, error) {
+	rows, err := d.conn.QueryContext(ctx, `
+		SELECT token, kind, subject, user_id, expires_at
+		FROM sessions
+		WHERE kind = 'user' AND user_id = ? AND expires_at > CURRENT_TIMESTAMP
+		ORDER BY expires_at ASC`, userID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []SessionRecord
+	for rows.Next() {
+		var s SessionRecord
+		var uid sql.NullInt64
+		if err := rows.Scan(&s.Token, &s.Kind, &s.Subject, &uid, &s.ExpiresAt); err != nil {
+			return nil, err
+		}
+		if uid.Valid {
+			v := uid.Int64
+			s.UserID = &v
+		}
+		out = append(out, s)
+	}
+	return out, rows.Err()
+}
+
 // DeleteAllAdminSessionsExcept logs out every admin session except `keep`.
 // Useful for "I lost my laptop" — keep current cookie alive, kill the rest.
 // Returns the number of sessions deleted.

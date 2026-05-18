@@ -1,0 +1,178 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>用户 {{.User.Phone}} · router-billing</title>
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body class="admin">
+<div class="admin-shell">
+  {{template "admin-sidebar" .}}
+  <main class="admin-main">
+    <div class="admin-header">
+      <div>
+        <h1>
+          <a href="/admin/users" style="color:var(--text-soft); text-decoration:none;">← 用户</a>
+          / {{.User.Phone}}
+        </h1>
+        <div class="crumbs">
+          注册于 {{formatTime .User.CreatedAt}}
+          {{if .User.Suspended}} · <span class="pill blocked">已停用</span>{{else}} · <span class="pill active">正常</span>{{end}}
+          {{if .User.TOTPSecret}} · <span class="pill active">2FA 已开启</span>{{else}} · <span class="pill blocked">2FA 未开启</span>{{end}}
+          {{if .User.TOTPSecret}} · 备用码剩 {{.BackupRemaining}}/10{{end}}
+        </div>
+      </div>
+    </div>
+
+    {{template "flash" .}}
+
+    <section class="admin-card">
+      <h2 style="margin-top:0;">账号操作</h2>
+      <div style="display:flex; gap:8px; flex-wrap:wrap;">
+        <form method="post" action="/admin/users/suspend" style="margin:0;">
+          {{template "csrf" .}}
+          <input type="hidden" name="id" value="{{.User.ID}}">
+          <input type="hidden" name="suspended" value="{{if .User.Suspended}}0{{else}}1{{end}}">
+          <button class="btn outline small" type="submit" style="width:auto;">
+            {{if .User.Suspended}}恢复使用{{else}}停用账号{{end}}
+          </button>
+        </form>
+        <form method="post" action="/admin/users/reset-password" style="margin:0;"
+              onsubmit="return confirm('重置 {{.User.Phone}} 的密码？\n旧密码立即失效。')">
+          {{template "csrf" .}}
+          <input type="hidden" name="id" value="{{.User.ID}}">
+          <button class="btn outline small" type="submit" style="width:auto;">重置密码</button>
+        </form>
+        {{if .SMSAvailable}}
+        <form method="post" action="/admin/users/reset-password" style="margin:0;"
+              onsubmit="return confirm('重置密码并通过 {{.SMSProvider}} 发短信给 {{.User.Phone}}？')">
+          {{template "csrf" .}}
+          <input type="hidden" name="id" value="{{.User.ID}}">
+          <input type="hidden" name="via_sms" value="1">
+          <button class="btn outline small" type="submit" style="width:auto;">重置密码 + SMS</button>
+        </form>
+        {{end}}
+        {{if .User.TOTPSecret}}
+        <form method="post" action="/admin/users/reset-2fa" style="margin:0;"
+              onsubmit="return confirm('重置 {{.User.Phone}} 的二步验证？\n本人下次登录将无需 6 位验证码。')">
+          {{template "csrf" .}}
+          <input type="hidden" name="id" value="{{.User.ID}}">
+          <button class="btn outline small" type="submit" style="width:auto;">重置 2FA</button>
+        </form>
+        {{end}}
+        <form method="post" action="/admin/users/delete" style="margin:0;"
+              onsubmit="return confirm('彻底删除 {{.User.Phone}}？该用户的 MAC 仍保留但 owner 被清空。')">
+          {{template "csrf" .}}
+          <input type="hidden" name="id" value="{{.User.ID}}">
+          <button class="btn danger small" type="submit" style="width:auto;">删除账号</button>
+        </form>
+      </div>
+    </section>
+
+    <section class="admin-card">
+      <h2 style="margin-top:0;">MAC ({{len .MACs}})</h2>
+      <div class="table-wrap">
+        <table class="data">
+          <thead><tr><th>MAC</th><th>标签</th><th>状态</th><th>到期</th></tr></thead>
+          <tbody>
+            {{range .MACs}}
+            <tr>
+              <td class="mono">{{.Mac}}</td>
+              <td>{{.Label}}</td>
+              <td><span class="pill {{.Status}}">{{.Status}}</span></td>
+              <td>{{formatTime .ExpiresAt}}</td>
+            </tr>
+            {{else}}
+            <tr><td colspan="4" class="empty-state">该用户没有 MAC</td></tr>
+            {{end}}
+          </tbody>
+        </table>
+      </div>
+    </section>
+
+    <section class="admin-card">
+      <h2 style="margin-top:0;">订单 ({{len .Orders}})</h2>
+      <div class="table-wrap">
+        <table class="data">
+          <thead><tr><th>订单号</th><th>MAC</th><th>金额</th><th>状态</th><th>创建</th></tr></thead>
+          <tbody>
+            {{range .Orders}}
+            <tr>
+              <td class="mono" style="font-size:12px;">{{.OrderNo}}</td>
+              <td class="mono">{{.Mac}}</td>
+              <td><strong>¥{{formatYuan .AmountCents}}</strong></td>
+              <td><span class="pill {{.Status}}">{{.Status}}</span></td>
+              <td style="color:var(--text-soft);">{{formatTime .CreatedAt}}</td>
+            </tr>
+            {{else}}
+            <tr><td colspan="5" class="empty-state">无订单</td></tr>
+            {{end}}
+          </tbody>
+        </table>
+      </div>
+    </section>
+
+    <section class="admin-card">
+      <h2 style="margin-top:0;">活动会话 ({{len .Sessions}})</h2>
+      <div class="table-wrap">
+        <table class="data">
+          <thead><tr><th>Token (前 8 位)</th><th>到期</th></tr></thead>
+          <tbody>
+            {{range .Sessions}}
+            <tr>
+              <td class="mono" style="font-size:12px;">{{slice .Token 0 8}}…</td>
+              <td>{{formatTime .ExpiresAt}}</td>
+            </tr>
+            {{else}}
+            <tr><td colspan="2" class="empty-state">无活动会话</td></tr>
+            {{end}}
+          </tbody>
+        </table>
+      </div>
+    </section>
+
+    {{if .User.TOTPSecret}}{{if .TrustedDevices}}
+    <section class="admin-card">
+      <h2 style="margin-top:0;">受信任设备 ({{len .TrustedDevices}})</h2>
+      <div class="table-wrap">
+        <table class="data">
+          <thead><tr><th>标签</th><th>最近活动</th><th>到期</th></tr></thead>
+          <tbody>
+            {{range .TrustedDevices}}
+            <tr>
+              <td style="font-size:12px;">{{.Label}}</td>
+              <td style="color:var(--text-soft);">{{formatTime .LastSeen}}</td>
+              <td style="color:var(--text-soft);">{{formatTime .ExpiresAt}}</td>
+            </tr>
+            {{end}}
+          </tbody>
+        </table>
+      </div>
+    </section>
+    {{end}}{{end}}
+
+    <section class="admin-card">
+      <h2 style="margin-top:0;">最近 30 条审计</h2>
+      <div class="table-wrap">
+        <table class="data">
+          <thead><tr><th>时间</th><th>事件</th><th>IP</th><th>详情</th></tr></thead>
+          <tbody>
+            {{range .Activity}}
+            <tr>
+              <td style="color:var(--text-soft); white-space:nowrap;">{{.When}}</td>
+              <td>{{.Label}}</td>
+              <td class="mono" style="color:var(--text-soft);">{{if .IP}}{{.IP}}{{else}}—{{end}}</td>
+              <td style="font-size:12px; color:var(--text-soft);">{{.Detail}}</td>
+            </tr>
+            {{else}}
+            <tr><td colspan="4" class="empty-state">无活动</td></tr>
+            {{end}}
+          </tbody>
+        </table>
+      </div>
+    </section>
+  </main>
+</div>
+</body>
+</html>

@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"router-billing/internal/arp"
+	"router-billing/internal/db"
 	"router-billing/internal/dnsmasq"
 	"router-billing/internal/models"
 	"router-billing/internal/notify"
@@ -316,6 +317,62 @@ func sortDevices(d []deviceView) {
 			d[j], d[j-1] = d[j-1], d[j]
 		}
 	}
+}
+
+// GET /admin/users/detail?id=<id>
+//
+// Per-user drill-down — everything we know about one account in one place:
+// profile (phone, suspended, 2FA enabled), all owned MACs (active + expired),
+// recent orders, active sessions, last 30 audit-log entries (both "user:<phone>"
+// successes and "user-attempt:<phone>" failures).
+//
+// Designed for the support workflow: a customer calls, admin opens this page,
+// can immediately see the relevant context without flipping between three other
+// pages.
+func (a *App) handleAdminUserDetail(w http.ResponseWriter, r *http.Request) {
+	id, _ := strconv.ParseInt(r.URL.Query().Get("id"), 10, 64)
+	if id == 0 {
+		http.Redirect(w, r, "/admin/users?err=internal", http.StatusSeeOther)
+		return
+	}
+	user, err := a.DB.GetUser(r.Context(), id)
+	if err != nil || user == nil {
+		http.Redirect(w, r, "/admin/users?err=internal", http.StatusSeeOther)
+		return
+	}
+	macs, _ := a.DB.ListMACsForUser(r.Context(), id)
+	orders, _ := a.DB.ListOrdersForUser(r.Context(), id, 50)
+	sessions, _ := a.DB.ListSessionsForUser(r.Context(), id)
+	activity, _ := a.DB.SearchAudit(r.Context(), db.AuditFilter{
+		Actor: ":" + user.Phone,
+		Limit: 30,
+	})
+	backupCount := 0
+	if user.TOTPSecret != "" {
+		codes, _ := a.DB.ListBackupCodes(r.Context(), id)
+		for _, c := range codes {
+			if c.UsedAt == nil {
+				backupCount++
+			}
+		}
+	}
+	trustedDevices, _ := a.DB.ListTrustedDevices(r.Context(), id)
+	a.render(w, "admin_user_detail.html", a.adminCtx(r, "users", map[string]any{
+		"User":            user,
+		"MACs":            macs,
+		"Orders":          orders,
+		"Sessions":        sessions,
+		"Activity":        formatActivity(activity),
+		"BackupRemaining": backupCount,
+		"TrustedDevices":  trustedDevices,
+		"SMSAvailable":    a.SMS != nil && a.SMS.Available(),
+		"SMSProvider": func() string {
+			if a.SMS == nil {
+				return "none"
+			}
+			return a.SMS.Name()
+		}(),
+	}))
 }
 
 // /admin/users — list with optional ?q= phone search.
