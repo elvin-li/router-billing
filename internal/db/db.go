@@ -89,6 +89,47 @@ func (d *DB) ListMACs(ctx context.Context) ([]models.MAC, error) {
 	return d.queryMACs(ctx, `SELECT `+macCols+` FROM macs ORDER BY expires_at DESC`)
 }
 
+// ListExpiringMACsWithoutRecentReminder returns active MACs that:
+//   - have a user_id (so we have a phone to text),
+//   - expire within `withinDays` from now (but haven't expired yet),
+//   - haven't received an expiry_reminder audit entry in the last 22 hours
+//     (so a daily loop never double-texts the same user).
+//
+// 22h instead of 24h gives the cron loop +/-1h slack — it's fine if a
+// reminder lands at 09:00 one day and 08:58 the next.
+func (d *DB) ListExpiringMACsWithoutRecentReminder(ctx context.Context, withinDays int) ([]models.MAC, error) {
+	if withinDays <= 0 {
+		withinDays = 3
+	}
+	rows, err := d.conn.QueryContext(ctx, `
+		SELECT `+macCols+` FROM macs m
+		WHERE m.status='active'
+		  AND m.user_id IS NOT NULL
+		  AND m.expires_at > CURRENT_TIMESTAMP
+		  AND m.expires_at < datetime('now','+'||?||' days')
+		  AND NOT EXISTS (
+		    SELECT 1 FROM audit_log a
+		    WHERE a.action = 'expiry_reminder'
+		      AND a.target = m.mac
+		      AND a.at >= datetime('now','-22 hours')
+		  )
+		ORDER BY m.expires_at ASC
+		LIMIT 200`, withinDays)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []models.MAC
+	for rows.Next() {
+		m, err := scanMAC(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, *m)
+	}
+	return out, rows.Err()
+}
+
 // SearchMACs returns MACs where MAC or label contains q (case-insensitive
 // LIKE). When q is empty, behaves like ListMACs. status (if non-empty)
 // restricts to that exact status. limit defaults to 200, capped at 1000.

@@ -1,0 +1,95 @@
+package server
+
+import (
+	"context"
+	"log"
+	"time"
+)
+
+// Default settings — over-rideable via config.SMS or per-call args if we ever
+// want to. Tuned conservatively: notify 3 days out, run every hour, skip
+// when SMS isn't configured.
+const (
+	expiryReminderWindow   = 3 * 24 * time.Hour // notify when ≤ this far from expiry
+	expiryReminderInterval = 1 * time.Hour      // background loop frequency
+)
+
+// expiryReminderLoop sends one SMS per affected MAC owner per day when the
+// MAC's subscription expires soon. Runs forever; cancel by ctx.
+//
+// We poll every hour rather than scheduling a per-MAC timer because the
+// set of "expiring soon" MACs is small (capped at 200 in the DB query) and
+// the cron-like cadence is easier to reason about than a forest of timers.
+func (a *App) expiryReminderLoop(ctx context.Context) {
+	if a.SMS == nil || !a.SMS.Available() {
+		log.Printf("expiry reminder: SMS not configured, skipping background loop")
+		return
+	}
+	t := time.NewTicker(expiryReminderInterval)
+	defer t.Stop()
+	// Run once on boot so a freshly-deployed instance doesn't wait an hour.
+	a.sendExpiryReminders(ctx)
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+			a.sendExpiryReminders(ctx)
+		}
+	}
+}
+
+// sendExpiryReminders does one pass — find eligible MACs, look up each
+// owner's phone, send SMS, audit. Returns the (sent, skipped, errored)
+// counts so tests can assert behavior without poking the SMS provider.
+func (a *App) sendExpiryReminders(ctx context.Context) (sent, skipped, errored int) {
+	macs, err := a.DB.ListExpiringMACsWithoutRecentReminder(ctx, int(expiryReminderWindow/(24*time.Hour)))
+	if err != nil {
+		log.Printf("expiry reminder list: %v", err)
+		return 0, 0, 0
+	}
+	for _, m := range macs {
+		if m.UserID == nil {
+			skipped++
+			continue
+		}
+		user, err := a.DB.GetUser(ctx, *m.UserID)
+		if err != nil || user == nil || user.Suspended {
+			skipped++
+			continue
+		}
+		body := formatExpiryReminderBody(m.Mac, m.Label, m.ExpiresAt)
+		if err := a.SMS.Send(ctx, user.Phone, body); err != nil {
+			log.Printf("expiry reminder %s → %s: %v", m.Mac, user.Phone, err)
+			errored++
+			a.DB.Audit(ctx, "system", "expiry_reminder_failed", m.Mac,
+				"phone="+user.Phone+" err="+err.Error())
+			continue
+		}
+		// Audit BEFORE deciding "sent" so the de-dup query (last 22h) finds
+		// this row on the next pass.
+		a.DB.Audit(ctx, "system", "expiry_reminder", m.Mac,
+			"phone="+user.Phone+" provider="+a.SMS.Name())
+		sent++
+	}
+	if sent+errored > 0 {
+		log.Printf("expiry reminder pass: sent=%d skipped=%d errored=%d", sent, skipped, errored)
+	}
+	return sent, skipped, errored
+}
+
+// formatExpiryReminderBody builds the SMS body. Kept as a pure function so
+// it can be unit-tested without spinning up the whole App.
+func formatExpiryReminderBody(mac, label string, expiresAt time.Time) string {
+	days := int(time.Until(expiresAt).Hours() / 24)
+	if days < 1 {
+		days = 1
+	}
+	target := mac
+	if label != "" {
+		target = label + " (" + mac + ")"
+	}
+	return "【router-billing】您的设备 " + target +
+		" 套餐还有 " + itoaSmall(days) + " 天到期（" +
+		expiresAt.Local().Format("01-02") + "）。请及时续费。"
+}

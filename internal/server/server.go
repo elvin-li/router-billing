@@ -266,6 +266,7 @@ func (a *App) Run(ctx context.Context) error {
 	go a.PollPendingOrders(ctx, 4*time.Second)
 	go a.purgeLoop(ctx)
 	go a.Notifier.Run(ctx)
+	go a.expiryReminderLoop(ctx)
 
 	srv := &http.Server{
 		Addr:              a.Cfg.Listen,
