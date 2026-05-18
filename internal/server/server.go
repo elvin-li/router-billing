@@ -217,6 +217,7 @@ func (a *App) Routes() http.Handler {
 	mux.HandleFunc("/api/admin/vouchers", a.requireAPITokenRead(a.handleAPIVoucherList))
 	mux.HandleFunc("/api/admin/macs/grant", a.requireAPITokenWrite(a.handleAPIMACGrant))
 	mux.HandleFunc("/api/admin/macs/revoke", a.requireAPITokenWrite(a.handleAPIMACRevoke))
+	mux.HandleFunc("/api/admin/sms/send", a.requireAPITokenWrite(a.handleAPISMSSend))
 
 	// User extras
 	mux.HandleFunc("/user/macs/label", a.requireUser(a.handleUserLabelMAC))

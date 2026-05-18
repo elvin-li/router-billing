@@ -337,6 +337,59 @@ type apiRevokeReq struct {
 	MAC string `json:"mac"`
 }
 
+type apiSMSReq struct {
+	Phone   string `json:"phone"`
+	Message string `json:"message"`
+}
+
+// POST /api/admin/sms/send  {phone, message}
+//
+// Programmatically send an SMS through whatever provider is wired. Useful
+// for monitoring scripts that want to text the operator when something
+// urgent fires (DB-corruption alert, repeated failed admin logins, etc.).
+//
+// Requires a non-readonly Bearer token. Same validation as the admin UI:
+// phone must match models.ValidPhone, message capped at 500 chars. Writes
+// the same audit entries (sms_test on success, sms_test_failed otherwise).
+func (a *App) handleAPISMSSend(w http.ResponseWriter, r *http.Request, actor string) {
+	if r.Method != http.MethodPost {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "POST only"})
+		return
+	}
+	if a.SMS == nil || !a.SMS.Available() {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "sms provider not configured"})
+		return
+	}
+	var req apiSMSReq
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "bad json: " + err.Error()})
+		return
+	}
+	phone := strings.TrimSpace(req.Phone)
+	msg := strings.TrimSpace(req.Message)
+	if !models.ValidPhone(phone) {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid phone"})
+		return
+	}
+	if msg == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "message is required"})
+		return
+	}
+	if len(msg) > 500 {
+		msg = msg[:500]
+	}
+	if err := a.SMS.Send(r.Context(), phone, msg); err != nil {
+		log.Printf("api sms %s: %v", phone, err)
+		a.DB.Audit(r.Context(), actor, "sms_test_failed", phone,
+			"provider="+a.SMS.Name()+" err="+err.Error()+" ip="+clientIP(r))
+		writeJSON(w, http.StatusBadGateway, map[string]string{"error": err.Error()})
+		return
+	}
+	a.DB.Audit(r.Context(), actor, "sms_test", phone,
+		"provider="+a.SMS.Name()+" via=api ip="+clientIP(r))
+	writeJSON(w, http.StatusOK, map[string]any{"status": "sent", "provider": a.SMS.Name()})
+}
+
 // POST /api/admin/macs/revoke
 func (a *App) handleAPIMACRevoke(w http.ResponseWriter, r *http.Request, actor string) {
 	if r.Method != http.MethodPost {
