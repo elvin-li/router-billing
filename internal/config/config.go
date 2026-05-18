@@ -197,6 +197,11 @@ type SMSConfig struct {
 	// ExpiryReminderDisable turns off the background reminder loop entirely.
 	// Useful if a deployer wants ONLY admin-triggered sends.
 	ExpiryReminderDisable bool `yaml:"expiry_reminder_disable,omitempty"`
+	// AdminLoginAlertPhone, if set to a valid mobile number, gets a text
+	// every time an admin successfully logs in. Useful as a "did I just
+	// log in at 3am?" alarm — surfaces credential compromises fast.
+	// Disabled (no SMS sent) when empty / when no SMS provider is wired.
+	AdminLoginAlertPhone string `yaml:"admin_login_alert_phone,omitempty"`
 }
 
 // ExpiryReminderWindowDays returns the configured window, clamped to

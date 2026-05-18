@@ -125,7 +125,46 @@ func (a *App) issueAdminSession(w http.ResponseWriter, r *http.Request, username
 	http.SetCookie(w, &http.Cookie{
 		Name: adminPendingCookie, Value: "", Path: "/admin", MaxAge: -1, HttpOnly: true,
 	})
+	a.DB.Audit(r.Context(), "admin:"+username, "login", "", "ip="+clientIP(r))
+	a.maybeAlertAdminLogin(r, username)
 	http.Redirect(w, r, "/admin/dashboard", http.StatusSeeOther)
+}
+
+// maybeAlertAdminLogin fires a fire-and-forget SMS to the configured
+// AdminLoginAlertPhone (if set + SMS is wired). Detached goroutine so
+// the actual login response isn't blocked on an upstream provider hiccup.
+func (a *App) maybeAlertAdminLogin(r *http.Request, username string) {
+	phone := a.Cfg.SMS.AdminLoginAlertPhone
+	if phone == "" {
+		return
+	}
+	if a.SMS == nil || !a.SMS.Available() {
+		return
+	}
+	if !models.ValidPhone(phone) {
+		log.Printf("admin-login alert: invalid phone in config (%q), skipping", phone)
+		return
+	}
+	ip := clientIP(r)
+	go func() {
+		// Detach from request context so an in-flight cookie-set + redirect
+		// doesn't cancel the upstream SMS request. 8s budget should cover
+		// the slowest happy path; provider HTTP clients have their own
+		// timeouts on top.
+		ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
+		defer cancel()
+		body := "【router-billing】管理员 " + username + " 于 " +
+			time.Now().Local().Format("01-02 15:04") +
+			" 从 " + ip + " 登录。若非本人请立即修改密码。"
+		if err := a.SMS.Send(ctx, phone, body); err != nil {
+			log.Printf("admin-login alert sms %s: %v", phone, err)
+			a.DB.Audit(ctx, "system", "admin_login_alert_failed", username,
+				"phone="+phone+" err="+err.Error()+" ip="+ip)
+			return
+		}
+		a.DB.Audit(ctx, "system", "admin_login_alert_sent", username,
+			"phone="+phone+" ip="+ip)
+	}()
 }
 
 func (a *App) handleAdminLogout(w http.ResponseWriter, r *http.Request) {
