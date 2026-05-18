@@ -196,6 +196,45 @@ func (a *App) handleAdminExportUsers(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+// GET /admin/export/audit.csv?actor=&action=&target=&since=&until=&limit=
+//
+// CSV companion to /admin/audit. Same filter knobs. Default limit 1000,
+// max 10000 (much bigger than the HTML page's 300 — CSV export is
+// expected for compliance dumps where higher row counts matter).
+func (a *App) handleAdminExportAudit(w http.ResponseWriter, r *http.Request) {
+	q := r.URL.Query()
+	limit := 1000
+	if s := q.Get("limit"); s != "" {
+		if n, err := strconv.Atoi(s); err == nil && n > 0 && n <= 10000 {
+			limit = n
+		}
+	}
+	entries, err := a.DB.SearchAudit(r.Context(), db.AuditFilter{
+		Actor:  strings.TrimSpace(q.Get("actor")),
+		Action: strings.TrimSpace(q.Get("action")),
+		Target: strings.TrimSpace(q.Get("target")),
+		Since:  strings.TrimSpace(q.Get("since")),
+		Until:  strings.TrimSpace(q.Get("until")),
+		Limit:  limit,
+	})
+	if err != nil {
+		http.Error(w, "db", http.StatusInternalServerError)
+		return
+	}
+	w.Header().Set("Content-Type", "text/csv; charset=utf-8")
+	w.Header().Set("Content-Disposition", `attachment; filename="audit.csv"`)
+	cw := csv.NewWriter(w)
+	defer cw.Flush()
+	_ = cw.Write([]string{"id", "at", "actor", "action", "target", "detail"})
+	for _, e := range entries {
+		_ = cw.Write([]string{
+			strconv.FormatInt(e.ID, 10),
+			e.At.UTC().Format(time.RFC3339),
+			e.Actor, e.Action, e.Target, e.Detail,
+		})
+	}
+}
+
 // GET /admin/export/orders.csv?q=&status=&since=&until=
 //
 // Same filter params as /admin/orders so admins can export the exact

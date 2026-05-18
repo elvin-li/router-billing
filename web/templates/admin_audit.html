@@ -15,7 +15,13 @@
         <h1>审计日志</h1>
         <div class="crumbs">最近 300 条 · 登录 / 付款 / 授权 / 替换 / 收回 · 可按字段筛选</div>
       </div>
-      <a href="/admin/health" target="_blank" class="btn outline small" style="width:auto;">查看 /health JSON</a>
+      <div style="display:flex; gap:8px;">
+        <a href="/admin/export/audit.csv?actor={{.Filter.Actor}}&action={{.Filter.Action}}&target={{.Filter.Target}}&since={{.Filter.Since}}&until={{.Filter.Until}}" class="btn outline small" style="width:auto;">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="width:14px;height:14px;"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+          导出 CSV
+        </a>
+        <a href="/admin/health" target="_blank" class="btn outline small" style="width:auto;">查看 /health JSON</a>
+      </div>
     </div>
 
     <section class="admin-card">

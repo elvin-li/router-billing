@@ -216,6 +216,7 @@ func (a *App) Routes() http.Handler {
 	mux.HandleFunc("/admin/export/macs.csv", a.requireAdmin(a.handleAdminExportMACs))
 	mux.HandleFunc("/admin/export/orders.csv", a.requireAdmin(a.handleAdminExportOrders))
 	mux.HandleFunc("/admin/export/users.csv", a.requireAdmin(a.handleAdminExportUsers))
+	mux.HandleFunc("/admin/export/audit.csv", a.requireAdmin(a.handleAdminExportAudit))
 
 	// Public-but-tokened metrics endpoint
 	mux.HandleFunc("/metrics", a.handleMetrics)
