@@ -314,7 +314,7 @@ func (a *App) purgeLoop(ctx context.Context) {
 			return
 		case <-short.C:
 			_ = a.DB.PurgeExpiredSessions(ctx)
-			_ = a.DB.PurgeAuditLog(ctx, 10000)
+			_ = a.DB.PurgeAuditLog(ctx, a.Cfg.Security.AuditLogRetention())
 			// These three were added in v0.13 (password reset codes,
 			// trusted devices) but never plumbed into the janitor — so
 			// stale rows accumulated until the user manually

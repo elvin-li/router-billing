@@ -105,3 +105,31 @@ func TestSecurityUserSessionTTLOutOfRange(t *testing.T) {
 		}
 	}
 }
+
+func TestSecurityAuditLogRetentionDefault(t *testing.T) {
+	s := Security{}
+	if got := s.AuditLogRetention(); got != 10000 {
+		t.Errorf("default: got %d", got)
+	}
+}
+
+func TestSecurityAuditLogRetentionCustom(t *testing.T) {
+	s := Security{AuditLogKeep: 50000}
+	if got := s.AuditLogRetention(); got != 50000 {
+		t.Errorf("50000: got %d", got)
+	}
+}
+
+func TestSecurityAuditLogRetentionClampsMin(t *testing.T) {
+	s := Security{AuditLogKeep: 100}
+	if got := s.AuditLogRetention(); got != 1000 {
+		t.Errorf("100 should clamp to 1000; got %d", got)
+	}
+}
+
+func TestSecurityAuditLogRetentionClampsMax(t *testing.T) {
+	s := Security{AuditLogKeep: 9999999}
+	if got := s.AuditLogRetention(); got != 1000000 {
+		t.Errorf("9999999 should clamp to 1000000; got %d", got)
+	}
+}

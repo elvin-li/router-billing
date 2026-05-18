@@ -60,6 +60,27 @@ type Security struct {
 	// user's rb_user cookie stays valid. Range 1..365. 0/missing → use
 	// default.
 	UserSessionDays int `yaml:"user_session_days,omitempty"`
+	// AuditLogKeep is the max number of audit_log rows to retain. The
+	// 2-hour janitor purges anything older when the table grows past
+	// this count. Default 10000, range 1000..1000000. Set to 0 to use
+	// the default. There's intentionally no "unlimited" — an audit
+	// table that grows forever will eventually hurt query latency.
+	AuditLogKeep int `yaml:"audit_log_keep,omitempty"`
+}
+
+// AuditLogKeep returns the clamped retention count.
+func (s Security) AuditLogRetention() int {
+	n := s.AuditLogKeep
+	if n <= 0 {
+		return 10000
+	}
+	if n < 1000 {
+		return 1000
+	}
+	if n > 1000000 {
+		return 1000000
+	}
+	return n
 }
 
 // AdminSessionTTL returns the configured admin session lifetime, falling
