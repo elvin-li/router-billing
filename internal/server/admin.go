@@ -427,22 +427,18 @@ func (a *App) handleAdminUserResetPassword(w http.ResponseWriter, r *http.Reques
 	// the temp password to the user's phone instead of returning it in
 	// the redirect query. Falls back to the existing inline-display path
 	// when SMS isn't wired or delivery fails.
-	smsRequested := r.PostForm.Get("via_sms") == "1"
-	smsSent := false
-	if smsRequested && a.SMS != nil && a.SMS.Available() {
+	if r.PostForm.Get("via_sms") == "1" && a.SMS != nil && a.SMS.Available() {
 		if user, err := a.DB.GetUser(r.Context(), id); err == nil && user != nil {
-			if err := a.SMS.Send(r.Context(), user.Phone, tmpPwd); err == nil {
-				smsSent = true
+			sErr := a.SMS.Send(r.Context(), user.Phone, tmpPwd)
+			if sErr == nil {
 				a.DB.Audit(r.Context(), "admin", "user_reset_password", strconv.FormatInt(id, 10),
 					"via=sms provider="+a.SMS.Name()+" ip="+clientIP(r))
 				http.Redirect(w, r, "/admin/users?ok=reset_sms&reset_uid="+strconv.FormatInt(id, 10), http.StatusSeeOther)
 				return
-			} else {
-				log.Printf("reset-password sms %s: %v — falling back to inline display", user.Phone, err)
 			}
+			log.Printf("reset-password sms %s: %v — falling back to inline display", user.Phone, sErr)
 		}
 	}
-	_ = smsSent
 	a.DB.Audit(r.Context(), "admin", "user_reset_password", strconv.FormatInt(id, 10), "via=inline ip="+clientIP(r))
 	http.Redirect(w, r, "/admin/users?reset_pwd="+url.QueryEscape(tmpPwd)+"&reset_uid="+strconv.FormatInt(id, 10), http.StatusSeeOther)
 }
