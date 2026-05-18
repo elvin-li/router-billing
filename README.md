@@ -26,16 +26,33 @@ OpenWrt（aarch64）上运行的 MAC 地址计费认证系统。**只对收费 S
 - 强制门户：未授权 MAC 访问 HTTP → 自动跳付费页
 - 套餐：¥1/月、¥10/年（可改）
 - 支付：微信 Native + 支付宝当面付，**支持纯出站轮询（无需公网 HTTPS）**
-- 用户系统：手机号 + 密码登录
-  - 我的设备：看自己所有 MAC、到期时间
-  - 一键绑定本设备
-  - **替换设备**：把 A 设备剩余时长转给 B 设备
-  - 续费、改密码、订单历史
-- 管理后台：
-  - MAC 管理：手动加 / 续期 / 删，统计卡（总数 / 活跃 / 收入 / 用户数）
-  - **在线设备**：实时 ARP + 最近 10 分钟历史 + 主机名（来自 dnsmasq leases），一键授权 IoT
-  - 用户列表
-  - 订单
+- 用户系统（手机号 + 密码）:
+  - 我的设备、订单、活动日志、付款收据
+  - 一键绑定本设备 / 替换设备（A→B 时长转移）
+  - **二步验证**：TOTP（RFC 6238） + 10 个一次性备用码 + 信任此设备 30 天
+  - **找回密码**：手机短信验证码（Aliyun / Console）
+  - **数据可携 + 注销账号**：JSON 导出 / 密码确认后注销
+  - 自助 sign-out-others（踢其他登录设备）
+- 管理后台（一处看全）:
+  - 仪表盘：今日 / 7 天 / 累计 营收、活跃 MAC、当前 session，sparkline
+  - MAC 管理：搜索过滤、批量续费 / 删除、按状态筛选、可逆封禁
+  - 在线设备：实时 ARP + dnsmasq lease + 主机名，一键授权 IoT
+  - 订单：搜索 / 状态 / 日期范围筛选 + CSV 导出（含筛选）+ 退款
+  - 用户：详情下钻（MAC + 订单 + session + 信任设备 + 30 条审计）
+  - 充值码：按 batch 库存 + 打印卡片（含 QR）
+  - SMS：发送测试 / 立即扫描发送到期提醒 / Console ring buffer
+  - 维护：备份 / 恢复 / Webhook 测试 / Session 应急下线
+  - API Tokens：只读查看 / 4 位前缀 / readonly 标记 / 速率限制
+  - 审计日志：搜索 + 日期范围
+- 主动 SMS:
+  - 套餐到期提醒（3 天前；每个 MAC 22h 去重）
+  - 管理员登录告警（可选；发到 ops 手机）
+- API 完整覆盖（`/api/admin/*` Bearer token）:
+  - GET: `/health` / `/macs` / `/users` / `/orders` / `/audit` / `/vouchers`
+  - POST: `/macs/grant` / `/macs/revoke` / `/sms/send`
+  - 只读 token（`readonly: true`）+ 每 token 速率限制（`rate_limit_per_min`）
+  - 字段级安全：用户列表不暴露 password_hash / totp_secret；充值码仅前 4 位
+- 防火墙后端：nftables（默认）+ iptables/ipset（OpenWrt 21.02 兼容）
 - IoT/充电桩友好：完全不用浏览器也能加白名单
 - 体积：单个 ARM64 静态二进制 ≈ 13 MB
 
@@ -75,7 +92,7 @@ OpenWrt（aarch64）上运行的 MAC 地址计费认证系统。**只对收费 S
 
 如果用户已登录后再去付费，订单自动 link 到他的账号，付出来的 MAC 也自动归他名下。
 
-> 当前不发短信验证；手机号纯当用户名用。后续要上 SMS 加个 OTP 即可。
+> v0.13 起手机号是真的手机号 —— 配 SMS provider 后可走找回密码 / 到期提醒 / 二步验证 SMS 通道。
 
 ## 架构
 
