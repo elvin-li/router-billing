@@ -1,11 +1,85 @@
 # Changelog
 
-## v0.13 — SMS end-to-end + 用户自助二步验证 + 备用码 + 管理员重置 2FA
+## v0.13 — 账号安全大改造（SMS · TOTP · 备用码 · 信任设备 · 只读 API token）
 
-Four flows that all share the same trust model: prove control of a
+Six flows that all share the same trust model: prove control of a
 second factor before something sensitive happens. Plus the recovery
 paths (SMS reset, backup codes, admin reset) so the second factor
-never becomes a permanent lock-out.
+never becomes a permanent lock-out, the "trust this device" bypass
+so daily logins aren't painful, and least-privilege API tokens so
+monitoring scripts can't accidentally revoke a paying user.
+
+### 信任此设备 (`rb_user_trusted` cookie, 30-day bypass)
+
+Adds a "信任此设备 30 天" checkbox to `/user/login/2fa`. When ticked:
+
+- A fresh 32-byte random token is stored in the new
+  `user_trusted_devices` table (token + user_id + label + expires_at
+  + last_seen + created_at), and set as the `rb_user_trusted` cookie
+  scoped to `/user`.
+- On subsequent `/user/login` POSTs, if the user has 2FA enrolled
+  AND the cookie matches a non-expired row for that user, we skip
+  the 2FA challenge and issue the real session directly.
+- Crucially the cookie alone never authenticates — it only bypasses
+  the second factor AFTER the password is verified, so a stolen
+  cookie still needs the password to be useful.
+
+Device management on `/user/2fa` for enrolled users:
+
+- A table lists every trusted device (label = truncated User-Agent,
+  last_seen = relative time, expires-in = days remaining).
+- The currently-logged-in device gets a "当前" pill.
+- Expired rows are shown with a "已过期" pill (they don't bypass
+  but the user can see what's stale).
+- Per-row "移除" button (`POST /user/2fa/trusted-devices/revoke`).
+- A "全部移除" button at the bottom
+  (`POST /user/2fa/trusted-devices/revoke-all`), which also clears
+  the cookie on the calling browser.
+
+Stale cookies (token gone from DB / belongs to a different user) are
+silently wiped on the next login attempt — the response carries a
+`Set-Cookie: rb_user_trusted=; Max-Age=-1` so the browser stops
+re-sending.
+
+Disabling 2FA via `/user/2fa/disable` AND admin reset via
+`/admin/users/reset-2fa` both wipe trusted devices via
+`ClearUserTOTP`, so neither leaves trust tokens that would bypass
+the next enrollment.
+
+**Tests** (9 new in `user_trusted_devices_test.go`):
+- Trust checkbox issues cookie + creates DB row with matching token.
+- Trusted-device login skips the 2FA challenge end-to-end.
+- Untrusted browser still hits the 2FA challenge.
+- Revoking one device doesn't kick the others (parallel devices
+  managed independently).
+- Revoke-all wipes the DB and clears the calling browser's cookie.
+- Disabling 2FA wipes trusted devices.
+- Admin reset-2fa wipes trusted devices.
+- Stale / wrong cookie gets cleared and does NOT bypass 2FA.
+- `labelFromUserAgent` / `formatRelativeTime` table tests.
+
+### 只读 API token (`readonly: true` in `api_tokens`)
+
+Tokens with `readonly: true` are accepted on GET endpoints but
+rejected with 403 on non-GET methods. Default remains full access so
+existing `api_tokens` entries keep working unchanged. Routes split:
+
+- `/api/admin/health`, `/api/admin/macs` → `requireAPITokenRead`
+- `/api/admin/macs/grant`, `/macs/revoke` → `requireAPITokenWrite`
+
+The name documents the policy at the registration site.
+`MatchAPITokenFull(string) *APIToken` is the new accessor that
+returns the full struct so the middleware can check ReadOnly;
+`MatchAPIToken(string) string` stays as a thin label-only wrapper
+for callers that don't need scopes.
+
+6 new tests in `api_admin_scope_test.go`:
+- Read-only token gets 403 on POST grant + revoke.
+- Read-only token still works on GET /macs and /health.
+- Legacy (no readonly) tokens still grant + revoke (regression).
+- Mixed tokens enforced independently.
+- `MatchAPITokenFull` nil/non-nil paths.
+- `MatchAPIToken` back-compat (unnamed-token fallback).
 
 ### TOTP 备用码 (10 个一次性恢复码)
 
@@ -235,7 +309,7 @@ up on next startup without manual migration.
 
 ### Stats
 - 17 packages tested
-- 178 test functions (was 143)
+- 195 test functions (was 143)
 
 ## v0.12 — iptables 后端 + Aliyun SMS
 

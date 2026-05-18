@@ -613,14 +613,19 @@ func (d *DB) ConfirmUserTOTP(ctx context.Context, userID int64) error {
 }
 
 // ClearUserTOTP turns 2FA off and wipes any half-enrolled pending secret.
-// Also clears backup codes so a future enrollment starts fresh.
+// Also clears backup codes AND trusted devices so a future enrollment
+// starts from a clean slate — and so an admin reset doesn't leave behind
+// trust-tokens that would bypass the next enrollment.
 func (d *DB) ClearUserTOTP(ctx context.Context, userID int64) error {
 	if _, err := d.conn.ExecContext(ctx,
 		`UPDATE users SET totp_secret = '', totp_pending = '', updated_at = ? WHERE id = ?`,
 		time.Now().UTC(), userID); err != nil {
 		return err
 	}
-	return d.ClearBackupCodes(ctx, userID)
+	if err := d.ClearBackupCodes(ctx, userID); err != nil {
+		return err
+	}
+	return d.DeleteAllTrustedDevices(ctx, userID)
 }
 
 func (d *DB) ListUsers(ctx context.Context, limit int) ([]models.User, error) {
@@ -675,6 +680,98 @@ func (d *DB) SuspendUser(ctx context.Context, id int64, suspended bool) error {
 func (d *DB) DeleteUser(ctx context.Context, id int64) error {
 	_, _ = d.conn.ExecContext(ctx, `DELETE FROM sessions WHERE kind='user' AND user_id = ?`, id)
 	_, err := d.conn.ExecContext(ctx, `DELETE FROM users WHERE id = ?`, id)
+	return err
+}
+
+// ---------- TOTP Trusted devices ----------
+
+// CreateTrustedDevice records a new "remember this browser" entry. Token
+// must be a high-entropy random string the caller will also stuff into a
+// cookie.
+func (d *DB) CreateTrustedDevice(ctx context.Context, userID int64, token, label string, ttl time.Duration) (*models.TrustedDevice, error) {
+	now := time.Now().UTC()
+	exp := now.Add(ttl)
+	res, err := d.conn.ExecContext(ctx,
+		`INSERT INTO user_trusted_devices (user_id, token, label, expires_at, last_seen, created_at)
+		 VALUES (?, ?, ?, ?, ?, ?)`,
+		userID, token, label, exp, now, now)
+	if err != nil {
+		return nil, err
+	}
+	id, _ := res.LastInsertId()
+	return &models.TrustedDevice{
+		ID: id, UserID: userID, Token: token, Label: label,
+		ExpiresAt: exp, LastSeen: now, CreatedAt: now,
+	}, nil
+}
+
+// GetTrustedDevice looks up by raw token, returning nil if missing/expired.
+// On hit it also bumps last_seen so the /user/2fa page shows fresh data.
+func (d *DB) GetTrustedDevice(ctx context.Context, token string) (*models.TrustedDevice, error) {
+	if token == "" {
+		return nil, nil
+	}
+	row := d.conn.QueryRowContext(ctx,
+		`SELECT id, user_id, token, label, expires_at, last_seen, created_at
+		 FROM user_trusted_devices WHERE token = ? AND expires_at > ?`,
+		token, time.Now().UTC())
+	var t models.TrustedDevice
+	err := row.Scan(&t.ID, &t.UserID, &t.Token, &t.Label, &t.ExpiresAt, &t.LastSeen, &t.CreatedAt)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	// Bump last_seen — best effort; failure shouldn't block login.
+	_, _ = d.conn.ExecContext(ctx,
+		`UPDATE user_trusted_devices SET last_seen = ? WHERE id = ?`,
+		time.Now().UTC(), t.ID)
+	return &t, nil
+}
+
+// ListTrustedDevices returns every device row for userID (including expired
+// — the UI shows them separately). Newest first.
+func (d *DB) ListTrustedDevices(ctx context.Context, userID int64) ([]models.TrustedDevice, error) {
+	rows, err := d.conn.QueryContext(ctx,
+		`SELECT id, user_id, token, label, expires_at, last_seen, created_at
+		 FROM user_trusted_devices WHERE user_id = ? ORDER BY id DESC`, userID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []models.TrustedDevice
+	for rows.Next() {
+		var t models.TrustedDevice
+		if err := rows.Scan(&t.ID, &t.UserID, &t.Token, &t.Label, &t.ExpiresAt, &t.LastSeen, &t.CreatedAt); err != nil {
+			return nil, err
+		}
+		out = append(out, t)
+	}
+	return out, rows.Err()
+}
+
+// DeleteTrustedDevice removes one row by ID — but only if it belongs to the
+// given user (defense in depth against IDOR if the form is hand-crafted).
+func (d *DB) DeleteTrustedDevice(ctx context.Context, userID, deviceID int64) error {
+	_, err := d.conn.ExecContext(ctx,
+		`DELETE FROM user_trusted_devices WHERE id = ? AND user_id = ?`,
+		deviceID, userID)
+	return err
+}
+
+// DeleteAllTrustedDevices nukes every row for userID. Called from
+// ClearUserTOTP so disabling 2FA / admin-reset also wipes trust.
+func (d *DB) DeleteAllTrustedDevices(ctx context.Context, userID int64) error {
+	_, err := d.conn.ExecContext(ctx,
+		`DELETE FROM user_trusted_devices WHERE user_id = ?`, userID)
+	return err
+}
+
+// PurgeExpiredTrustedDevices sweeps stale rows. Cheap to run from a janitor.
+func (d *DB) PurgeExpiredTrustedDevices(ctx context.Context) error {
+	_, err := d.conn.ExecContext(ctx,
+		`DELETE FROM user_trusted_devices WHERE expires_at <= ?`, time.Now().UTC())
 	return err
 }
 

@@ -110,6 +110,24 @@ CREATE TABLE IF NOT EXISTS plans (
     updated_at    DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 
+-- TOTP trusted devices — when a user checks "trust this device" at 2FA
+-- verify, we issue a 30-day token + row here so future logins from the
+-- same browser skip the 2FA challenge. Token is the raw 32-byte random
+-- (base64-encoded), stored in the cookie AND as the PK here. DB dump
+-- risk is real but bounded: the token alone doesn't grant access without
+-- the user's password too (login still validates password first).
+CREATE TABLE IF NOT EXISTS user_trusted_devices (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id     INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    token       TEXT NOT NULL UNIQUE,
+    label       TEXT NOT NULL DEFAULT '',
+    expires_at  DATETIME NOT NULL,
+    last_seen   DATETIME NOT NULL,
+    created_at  DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+CREATE INDEX IF NOT EXISTS idx_trusted_user    ON user_trusted_devices(user_id);
+CREATE INDEX IF NOT EXISTS idx_trusted_expires ON user_trusted_devices(expires_at);
+
 -- TOTP backup codes — emergency single-use codes for when the user loses
 -- their authenticator device. Generated 10 at enrollment + on demand;
 -- bcrypt-hashed so a DB dump doesn't leak. Each row marked used_at on

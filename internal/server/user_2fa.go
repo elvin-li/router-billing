@@ -143,6 +143,19 @@ func (a *App) handleUserLogin2FA(w http.ResponseWriter, r *http.Request) {
 	http.SetCookie(w, &http.Cookie{
 		Name: userPendingCookie, Value: "", Path: "/user", MaxAge: -1, HttpOnly: true,
 	})
+
+	// "trust this device" checkbox — opt-in 30-day bypass of the 2FA gate
+	// on this browser. Stored row carries a User-Agent hint so /user/2fa
+	// can render a useful device list.
+	if r.PostForm.Get("trust_device") == "1" {
+		if err := a.issueTrustedDeviceCookie(w, r, user.ID); err != nil {
+			log.Printf("issue trusted device for %d: %v", user.ID, err)
+			// Non-fatal — proceed with login.
+		} else {
+			a.DB.Audit(r.Context(), "user:"+user.Phone, "2fa_trusted_device_issued", "", "ip="+clientIP(r))
+		}
+	}
+
 	a.startUserSession(w, r, user)
 	a.DB.Audit(r.Context(), "user:"+user.Phone, "login", "", "via="+via+" ip="+clientIP(r))
 	http.Redirect(w, r, next, http.StatusSeeOther)
@@ -158,6 +171,21 @@ func (a *App) handleUser2FA(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var backupTotal, backupRemaining int
+	type deviceView struct {
+		ID         int64
+		Label      string
+		LastSeen   string
+		CreatedAt  string
+		ExpiresAt  string
+		IsCurrent  bool
+		IsExpired  bool
+		ExpiresInD int
+	}
+	var devices []deviceView
+	currentToken := ""
+	if c, err := r.Cookie(userTrustedCookie); err == nil {
+		currentToken = c.Value
+	}
 	if user.TOTPSecret != "" {
 		codes, _ := a.DB.ListBackupCodes(r.Context(), uid)
 		backupTotal = len(codes)
@@ -165,6 +193,21 @@ func (a *App) handleUser2FA(w http.ResponseWriter, r *http.Request) {
 			if c.UsedAt == nil {
 				backupRemaining++
 			}
+		}
+		rows, _ := a.DB.ListTrustedDevices(r.Context(), uid)
+		now := time.Now().UTC()
+		for _, d := range rows {
+			dv := deviceView{
+				ID:         d.ID,
+				Label:      d.Label,
+				LastSeen:   formatRelativeTime(d.LastSeen),
+				CreatedAt:  d.CreatedAt.Format("2006-01-02"),
+				ExpiresAt:  d.ExpiresAt.Format("2006-01-02"),
+				IsCurrent:  currentToken != "" && d.Token == currentToken,
+				IsExpired:  d.ExpiresAt.Before(now),
+				ExpiresInD: int(time.Until(d.ExpiresAt).Hours() / 24),
+			}
+			devices = append(devices, dv)
 		}
 	}
 	a.render(w, "user_2fa.html", a.userCtx(r, "2fa", map[string]any{
@@ -178,6 +221,8 @@ func (a *App) handleUser2FA(w http.ResponseWriter, r *http.Request) {
 		"BackupRemaining": backupRemaining,
 		"BackupLow":       backupRemaining > 0 && backupRemaining <= 3,
 		"BackupEmpty":     user.TOTPSecret != "" && backupRemaining == 0,
+		"TrustedDevices":  devices,
+		"HasDevices":      len(devices) > 0,
 	}))
 }
 

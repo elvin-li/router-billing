@@ -72,6 +72,22 @@ type User struct {
 	UpdatedAt   time.Time `json:"updated_at"`
 }
 
+// --- TrustedDevice ---
+
+// TrustedDevice is one browser the user has marked "trust this device"
+// after a successful 2FA verify. The presence of a matching, unexpired
+// cookie on /user/login lets us skip the 2FA challenge — same trust model
+// as "remember me" on GitHub / Google.
+type TrustedDevice struct {
+	ID        int64     `json:"id"`
+	UserID    int64     `json:"user_id"`
+	Token     string    `json:"-"` // raw cookie value; never JSON'd
+	Label     string    `json:"label"`
+	ExpiresAt time.Time `json:"expires_at"`
+	LastSeen  time.Time `json:"last_seen"`
+	CreatedAt time.Time `json:"created_at"`
+}
+
 // --- TOTP Backup Codes ---
 
 // BackupCode is one emergency single-use 2FA code. Stored bcrypt-hashed;

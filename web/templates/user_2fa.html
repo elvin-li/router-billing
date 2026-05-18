@@ -63,6 +63,42 @@
           </form>
         </div>
 
+        {{if .HasDevices}}
+        <div class="card" style="background:rgba(0,0,0,0.03); margin:14px 0;">
+          <h3 style="margin-top:0;">受信任的设备
+            <span class="pill" style="margin-left:6px;">{{len .TrustedDevices}}</span>
+          </h3>
+          <p style="font-size:12px; color:var(--text-soft); margin:0 0 10px;">
+            这些浏览器登录时无需输入二步验证码（仍需手机号 + 密码）。在你认不出来的设备上点「移除」可立即吊销。
+          </p>
+          <table class="data" style="margin-top:8px;">
+            <thead><tr><th>设备</th><th>最近活动</th><th>到期</th><th>操作</th></tr></thead>
+            <tbody>
+            {{range .TrustedDevices}}
+              <tr>
+                <td style="font-size:12px;">{{.Label}} {{if .IsCurrent}}<span class="pill active" style="margin-left:4px;">当前</span>{{end}}{{if .IsExpired}}<span class="pill blocked" style="margin-left:4px;">已过期</span>{{end}}</td>
+                <td style="color:var(--text-soft);">{{.LastSeen}}</td>
+                <td style="color:var(--text-soft);">{{if .IsExpired}}{{.ExpiresAt}}{{else}}还有 {{.ExpiresInD}} 天{{end}}</td>
+                <td class="row-actions">
+                  <form method="post" action="/user/2fa/trusted-devices/revoke" style="display:inline;">
+                    {{template "csrf" $}}
+                    <input type="hidden" name="device_id" value="{{.ID}}">
+                    <button class="btn outline tiny" type="submit">移除</button>
+                  </form>
+                </td>
+              </tr>
+            {{end}}
+            </tbody>
+          </table>
+          <form method="post" action="/user/2fa/trusted-devices/revoke-all"
+                onsubmit="return confirm('移除所有受信任的设备？所有这些浏览器下次登录都需要重新输入验证码。')"
+                style="margin-top:10px;">
+            {{template "csrf" .}}
+            <button class="btn outline small" type="submit" style="width:auto;">全部移除</button>
+          </form>
+        </div>
+        {{end}}
+
         <form method="post" action="/user/2fa/disable"
               onsubmit="return confirm('关闭二步验证？关闭后只用密码即可登录，安全性会降低。')">
           {{template "csrf" .}}

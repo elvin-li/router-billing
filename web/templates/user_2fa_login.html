@@ -26,6 +26,10 @@
           <input name="code" type="text" inputmode="text" maxlength="20"
                  autocomplete="one-time-code" autofocus required placeholder="6 位数字 或 8 位备用码">
         </div>
+        <label style="display:flex; align-items:center; gap:8px; font-size:13px; color:var(--text-soft); margin:6px 0 4px;">
+          <input type="checkbox" name="trust_device" value="1" style="width:auto;">
+          信任此设备 30 天（下次在本浏览器登录免输验证码）
+        </label>
         <button class="btn primary" type="submit" style="margin-top:8px;">登录</button>
       </form>
 

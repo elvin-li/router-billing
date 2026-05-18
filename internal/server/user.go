@@ -16,8 +16,10 @@ import (
 
 const userCookieName = "rb_user"
 const userPendingCookie = "rb_user_pending"
+const userTrustedCookie = "rb_user_trusted"
 const userSessionTTL = 30 * 24 * time.Hour // 30 days
 const userPending2FATTL = 5 * time.Minute
+const userTrustedTTL = 30 * 24 * time.Hour // 30-day trust window
 
 // userCtx assembles the common data passed to every user-facing template.
 func (a *App) userCtx(r *http.Request, page string, extra map[string]any) map[string]any {
@@ -177,7 +179,18 @@ func (a *App) handleUserLogin(w http.ResponseWriter, r *http.Request) {
 	// If 2FA is enrolled, hold the session in pending state until the user
 	// submits a valid TOTP code. Same shape as the admin 2FA flow (see
 	// admin_2fa.go) so the security guarantees match.
+	//
+	// Exception: if the browser presents a valid trusted-device cookie for
+	// this user, the password we just verified is treated as full auth and
+	// we skip the 2FA challenge. The trust cookie alone isn't a free pass —
+	// it requires the user's current password too.
 	if user.TOTPSecret != "" {
+		if a.consumeTrustedDeviceCookie(w, r, user.ID) {
+			a.startUserSession(w, r, user)
+			a.DB.Audit(r.Context(), "user:"+user.Phone, "login", "", "via=trusted_device ip="+clientIP(r))
+			http.Redirect(w, r, next, http.StatusSeeOther)
+			return
+		}
 		ptok := randomToken(32)
 		if err := a.DB.CreateSession(r.Context(), ptok, "user_pending_2fa", user.Phone, &user.ID, userPending2FATTL); err != nil {
 			log.Printf("create user pending 2fa session: %v", err)
