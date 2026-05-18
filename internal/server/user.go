@@ -5,6 +5,7 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -78,6 +79,8 @@ func userErrLabel(code string) string {
 	case "2fa_not_enrolled":
 		return "尚未开启二步验证"
 	case "2fa_disabled":
+		return ""
+	case "signed_out_others":
 		return ""
 	case "no_mac":
 		return "未检测到本设备 MAC，请连接到收费 SSID 后重试"
@@ -324,17 +327,20 @@ func (a *App) handleUserMe(w http.ResponseWriter, r *http.Request) {
 		Actor: ":" + user.Phone,
 		Limit: 10,
 	})
+	sessionCount, _ := a.DB.CountUserSessions(r.Context(), uid)
 
 	a.render(w, "user_me.html", a.userCtx(r, "me", map[string]any{
-		"User":        user,
-		"MACs":        macs,
-		"Orders":      orders,
-		"DeviceMAC":   deviceMAC,
-		"DeviceKnown": deviceKnown,
-		"Plans":       a.planViews(r.Context()),
-		"WeChatOn":    a.WeChat != nil,
-		"AlipayOn":    a.Alipay != nil,
-		"Activity":    formatActivity(activity),
+		"User":           user,
+		"MACs":           macs,
+		"Orders":         orders,
+		"DeviceMAC":      deviceMAC,
+		"DeviceKnown":    deviceKnown,
+		"Plans":          a.planViews(r.Context()),
+		"WeChatOn":       a.WeChat != nil,
+		"AlipayOn":       a.Alipay != nil,
+		"Activity":       formatActivity(activity),
+		"SessionCount":   sessionCount,
+		"HasOtherActive": sessionCount > 1,
 	}))
 }
 
@@ -552,6 +558,35 @@ func (a *App) handleUserLabelMAC(w http.ResponseWriter, r *http.Request) {
 	}
 	a.DB.Audit(r.Context(), "user:"+user.Phone, "label", mac, label)
 	http.Redirect(w, r, "/user/me?ok=label", http.StatusSeeOther)
+}
+
+// POST /user/sessions/sign-out-others — kills every session for this user
+// EXCEPT the one making the request. Useful from /user/me when the user
+// suspects their account was accessed elsewhere.
+func (a *App) handleUserSignOutOthers(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Redirect(w, r, "/user/me", http.StatusSeeOther)
+		return
+	}
+	uid := a.currentUserID(r)
+	user, err := a.DB.GetUser(r.Context(), uid)
+	if err != nil || user == nil {
+		http.Redirect(w, r, "/user/login", http.StatusSeeOther)
+		return
+	}
+	keep := ""
+	if c, _ := r.Cookie(userCookieName); c != nil {
+		keep = c.Value
+	}
+	n, err := a.DB.DeleteUserSessionsExcept(r.Context(), uid, keep)
+	if err != nil {
+		log.Printf("sign-out-others %d: %v", uid, err)
+		http.Redirect(w, r, "/user/me?err=internal", http.StatusSeeOther)
+		return
+	}
+	a.DB.Audit(r.Context(), "user:"+user.Phone, "sessions_revoked_others", "",
+		"killed="+strconv.Itoa(int(n))+" ip="+clientIP(r))
+	http.Redirect(w, r, "/user/me?ok=signed_out_others", http.StatusSeeOther)
 }
 
 // POST /user/password  {old, new}

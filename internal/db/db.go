@@ -527,6 +527,31 @@ func (d *DB) DeleteAllAdminSessionsExcept(ctx context.Context, keep string) (int
 	return n, nil
 }
 
+// DeleteUserSessionsExcept is the user equivalent — logs out every session
+// belonging to userID except `keep`, used by "sign me out of all other
+// devices". Returns the number of sessions deleted.
+func (d *DB) DeleteUserSessionsExcept(ctx context.Context, userID int64, keep string) (int64, error) {
+	res, err := d.conn.ExecContext(ctx,
+		`DELETE FROM sessions WHERE kind = 'user' AND user_id = ? AND token != ?`,
+		userID, keep)
+	if err != nil {
+		return 0, err
+	}
+	n, _ := res.RowsAffected()
+	return n, nil
+}
+
+// CountUserSessions returns the number of non-expired sessions for userID.
+// Cheaper than fetching ListActiveSessions just to count.
+func (d *DB) CountUserSessions(ctx context.Context, userID int64) (int, error) {
+	var n int
+	err := d.conn.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM sessions
+		 WHERE kind = 'user' AND user_id = ? AND expires_at > CURRENT_TIMESTAMP`,
+		userID).Scan(&n)
+	return n, err
+}
+
 func (d *DB) PurgeExpiredSessions(ctx context.Context) error {
 	_, err := d.conn.ExecContext(ctx, `DELETE FROM sessions WHERE expires_at <= CURRENT_TIMESTAMP`)
 	return err

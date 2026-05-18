@@ -158,6 +158,7 @@ func (a *App) Routes() http.Handler {
 	mux.HandleFunc("/user/macs/replace", a.requireUser(a.handleUserReplaceMAC))
 	mux.HandleFunc("/user/macs/claim", a.requireUser(a.handleUserClaimMAC))
 	mux.HandleFunc("/user/password", a.requireUser(a.handleUserPassword))
+	mux.HandleFunc("/user/sessions/sign-out-others", a.requireUser(a.handleUserSignOutOthers))
 
 	// Admin
 	mux.HandleFunc("/admin", a.requireAdmin(func(w http.ResponseWriter, r *http.Request) {
@@ -309,6 +310,7 @@ func tplFuncs() template.FuncMap {
 		"formatYuan": func(cents int) string {
 			return fmt.Sprintf("%d.%02d", cents/100, cents%100)
 		},
+		"minusOne": func(n int) int { return n - 1 },
 		"formatTime": func(t time.Time) string {
 			if t.IsZero() {
 				return ""

@@ -9,6 +9,29 @@ never becomes a permanent lock-out, the "trust this device" bypass
 so daily logins aren't painful, and least-privilege API tokens so
 monitoring scripts can't accidentally revoke a paying user.
 
+### Sign out other devices (`/user/sessions/sign-out-others`)
+
+For when the user looks at the new "最近活动" panel and sees a
+session they don't recognize. The button appears on `/user/me`
+when more than one session is active for the user.
+
+- `POST /user/sessions/sign-out-others` calls
+  `DeleteUserSessionsExcept(uid, currentToken)` so every other
+  rb_user cookie is invalidated immediately.
+- The calling browser keeps its session — no surprise log-out.
+- Audit log records `sessions_revoked_others` with `killed=N`.
+
+New DB helpers:
+- `CountUserSessions(userID)` — cheap COUNT(*) for the badge.
+- `DeleteUserSessionsExcept(userID, keep)` — symmetric to the
+  existing `DeleteAllAdminSessionsExcept`.
+
+3 new tests:
+- Sign-out-others kills only other sessions (caller still works,
+  others now redirect to login).
+- Button is hidden when only one session exists, shown when 2+.
+- `CountUserSessions` returns 2 after two fresh `CreateSession`.
+
 ### 最近活动 on `/user/me` (login + security audit visible to user)
 
 A new "最近活动" table at the bottom of `/user/me` shows the last 10
@@ -338,7 +361,7 @@ up on next startup without manual migration.
 
 ### Stats
 - 17 packages tested
-- 200 test functions (was 143)
+- 203 test functions (was 143)
 
 ## v0.12 — iptables 后端 + Aliyun SMS
 
