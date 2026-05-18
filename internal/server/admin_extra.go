@@ -196,9 +196,25 @@ func (a *App) handleAdminExportUsers(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// GET /admin/export/orders.csv
+// GET /admin/export/orders.csv?q=&status=&since=&until=
+//
+// Same filter params as /admin/orders so admins can export the exact
+// view they're looking at. When no filter is set, falls back to ListOrders
+// with a generous 5000-row cap (the original v0.0 behavior).
 func (a *App) handleAdminExportOrders(w http.ResponseWriter, r *http.Request) {
-	orders, err := a.DB.ListOrders(r.Context(), 5000)
+	q := strings.TrimSpace(r.URL.Query().Get("q"))
+	status := strings.TrimSpace(r.URL.Query().Get("status"))
+	since := strings.TrimSpace(r.URL.Query().Get("since"))
+	until := strings.TrimSpace(r.URL.Query().Get("until"))
+	var orders []models.Order
+	var err error
+	if q == "" && status == "" && since == "" && until == "" {
+		orders, err = a.DB.ListOrders(r.Context(), 5000)
+	} else {
+		orders, err = a.DB.SearchOrdersFiltered(r.Context(), db.OrderFilter{
+			Q: q, Status: status, Since: since, Until: until, Limit: 1000,
+		})
+	}
 	if err != nil {
 		http.Error(w, "db", http.StatusInternalServerError)
 		return

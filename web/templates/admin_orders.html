@@ -34,9 +34,10 @@
           <button class="btn outline small" type="submit" style="width:auto;">筛选</button>
           {{if or .Query .Status .Since .Until}}<a href="/admin/orders" class="btn ghost small" style="width:auto;">清除</a>{{end}}
         </form>
-        <a href="/admin/export/orders.csv" class="btn outline small" style="width:auto;">
+        <a href="/admin/export/orders.csv?q={{.Query}}&status={{.Status}}&since={{.Since}}&until={{.Until}}" class="btn outline small" style="width:auto;"
+           title="按当前筛选条件导出">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="width:14px;height:14px;"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
-          导出 CSV
+          {{if or .Query .Status .Since .Until}}导出筛选结果{{else}}导出 CSV{{end}}
         </a>
       </div>
     </div>
