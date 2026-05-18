@@ -1,10 +1,11 @@
 # Changelog
 
-## v0.15 — 退款 · 用户详情页 · 搜索过滤 · 审计盲区清零
+## v0.15 — 退款 · 用户详情页 · 搜索过滤 · 审计盲区清零 · 充值码 API
 
 Operational tooling round — the things admins actually do every day
 get faster. Plus closes the two state-mutators that weren't going
-to the audit log.
+to the audit log, and finishes the JSON API surface with a
+code-leak-safe voucher listing.
 
 ### Refund flow (`/admin/orders/refund`)
 
@@ -81,6 +82,23 @@ cap 1000 (matches SearchAudit).
 
 7 tests across the two endpoints + their DB helpers.
 
+### `/api/admin/vouchers` (read-only, code-leak-safe)
+
+Last piece of the JSON API completion (after /users, /orders,
+/audit in v0.14). Returns `apiVoucher`: same fields as
+`models.Voucher` MINUS the raw `code` — instead a 4-char prefix
++ ellipsis (e.g. "BATC…").
+
+The truncation is the whole point: a leaked monitoring token must
+not be able to scrape unredeemed voucher codes (which would equal
+free MAC time). A test asserts the raw 12-char code never appears
+in the response body even when seeded directly in the DB.
+
+  GET /api/admin/vouchers?batch=<batch>&limit=<1..1000>
+  -> { "vouchers": [...] }
+
+6 new tests including the no-leak red-line.
+
 ### Audit gaps closed
 
 Two state-changing admin actions weren't going to the audit log.
@@ -104,7 +122,7 @@ shape.
 
 ### Stats
 - 17 packages tested
-- 252 test functions (was 226 in v0.14)
+- 258 test functions (was 226 in v0.14)
 
 ## v0.14 — API surface complete + reliability polish
 
