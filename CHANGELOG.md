@@ -1,5 +1,72 @@
 # Changelog
 
+## v0.17 — 主动短信通知（到期提醒 + 管理员登录告警）
+
+The first version that uses SMS for outbound notifications instead
+of just reset-codes. Two opt-in flows, both gated on a configured
+SMS provider.
+
+### 套餐到期提醒 (auto + manual)
+
+Active MACs with a phone-owning user get a "您的套餐 N 天后到期"
+SMS in the 3 days before their `expires_at`. The window + on/off
+state are configurable:
+
+```yaml
+sms:
+  expiry_reminder_days: 7      # default 3; range 1..30
+  expiry_reminder_disable: false   # set true to keep ONLY manual sends
+```
+
+How it works:
+- `expiryReminderLoop` runs every hour from `App.Run` (silently
+  no-ops when SMS is missing OR when `expiry_reminder_disable: true`).
+- `ListExpiringMACsWithoutRecentReminder` SQL query: active MAC,
+  user_id IS NOT NULL, `expires_at` between now and
+  `+N days`, no `expiry_reminder` audit entry in the last 22h.
+- For each hit: send SMS, audit row. Suspended users + ownerless
+  MACs are skipped.
+- The 22h audit-row dedup means a daily cron-like cadence can't
+  double-text the same user.
+
+Admin manual trigger: 立即扫描发送 button on `/admin/sms-log`
+(under a new 套餐到期提醒 section). Same DB query + same audit
+shape as the loop, so manual sends don't double-text MACs the
+loop just handled.
+
+11 tests covering the loop, dedup, suspended-user skip, ownerless
+MAC, custom window, the disable flag, and the manual-trigger
+endpoint.
+
+### 管理员登录告警 SMS
+
+```yaml
+sms:
+  admin_login_alert_phone: "13800138000"
+```
+
+Every successful `issueAdminSession` fires a fire-and-forget SMS
+to the configured phone: "管理员 <user> 于 MM-DD HH:MM 从 <IP>
+登录。若非本人请立即修改密码。"
+
+Detached goroutine with 8s budget so an upstream provider hiccup
+doesn't slow the admin's own login response. No-ops cleanly when
+phone is empty, SMS provider is missing, or phone fails
+`models.ValidPhone` (config typo guard).
+
+Audited as `admin_login_alert_sent` / `admin_login_alert_failed`.
+
+While here: every successful admin login now also writes a generic
+`admin / login` audit entry (pre-v0.17 only failed-login was
+audited — confusing gap).
+
+5 tests including the panic-free no-SMS-provider path and the
+audit-entry-always-fires regression guard.
+
+### Stats
+- 17 packages tested
+- 308 test functions (was 292 in v0.16)
+
 ## v0.16 — 仪表盘 · 测试短信 (UI + API) · 可配置 HSTS · 可逆封禁 · 会话 TTL
 
 Polish round, mostly admin-side. The dashboard is the big one — a
