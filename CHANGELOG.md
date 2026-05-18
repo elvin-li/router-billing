@@ -1,5 +1,56 @@
 # Changelog
 
+## v0.20 — Webhook 测试按钮 + 应急下线
+
+Two operational additions on top of v0.19.
+
+### Webhook 测试按钮 (/admin/maintenance)
+
+Mirrors the v0.16 /admin/sms-log/test pattern. The /admin/maintenance
+page gains a Webhook section showing the configured URL + whether
+HMAC-SHA256 signing is enabled. A 发送测试事件 button enqueues
+a `{"type":"test","actor":"admin",...}` event through the existing
+v0.14 exp-backoff Notifier so the admin can verify their receiving
+service is wired before relying on it.
+
+  POST /admin/maintenance/test-webhook
+  - 503-ish redirect (err=webhook_not_configured) when URL is empty.
+  - Otherwise fire-and-forget via a.Notifier.Send.
+  - Audited as `admin / webhook_test` with the URL + IP.
+
+When no URL is configured the section shows a config snippet so
+the admin knows what to add.
+
+4 tests: end-to-end with a capture server, no-URL error,
+section-renders-when-configured, section-shows-example-when-not.
+
+### 应急下线 (/admin/sessions)
+
+Emergency response button for confirmed breach: signs out EVERY
+user session AND every admin session except the calling one.
+
+  POST /admin/sessions/panic
+  - DeleteAllAdminSessionsExcept(my_token)
+  - DeleteAllUserSessions()   (new DB helper)
+  - Audited as `panic_logout` with admin_killed=N user_killed=N + IP.
+
+UI sits below the existing "lost-my-laptop" yellow card as a
+red-bordered "🆘 应急" card. The confirm() dialog spells out the
+exact consequences (kept session, kicked admin sessions, kicked
+user sessions).
+
+A user getting kicked from /user/me doesn't affect their device's
+firewall whitelist — the nftables set is MAC-keyed, not session-
+keyed. Panic logout is purely a web-auth event.
+
+3 tests: end-to-end (2 users + 1 other admin all killed, caller
+survives, audit detail has the counts), page renders the
+section, DeleteAllUserSessions helper preserves admin-kind rows.
+
+### Stats
+- 17 packages tested
+- 345 test functions (was 338 in v0.19)
+
 ## v0.19 — 数据自助 + API 限流 + 审计保留
 
 Five commits, mostly user-side privacy + admin-side ops:
