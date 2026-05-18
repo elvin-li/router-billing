@@ -61,6 +61,28 @@
       <p>保留：最近 <strong>{{.BackupRetain}}</strong> 天</p>
       {{end}}
     </section>
+
+    <section class="admin-card">
+      <h2>Webhook</h2>
+      {{if .WebhookURL}}
+        <p>URL：<code>{{.WebhookURL}}</code></p>
+        <p>签名：<strong>{{if .WebhookSigned}}启用（HMAC-SHA256）{{else}}未启用（建议设置 webhook.secret）{{end}}</strong></p>
+        {{if eq .OK "webhook_test"}}<div class="flash ok">测试事件已入队，请查看对端服务接收情况</div>{{end}}
+        {{if eq .Err "webhook_not_configured"}}<div class="flash err">webhook URL 未配置</div>{{end}}
+        <form method="post" action="/admin/maintenance/test-webhook" style="margin-top:10px;">
+          {{template "csrf" .}}
+          <button class="btn outline" type="submit" style="width:auto;">发送测试事件</button>
+        </form>
+        <p class="hint" style="font-size:12px; color:var(--text-soft); margin-top:10px;">
+          点击后发送一个 <code>type=test</code> 事件，请到对端服务确认收到。每次发送也写入审计日志。
+        </p>
+      {{else}}
+        <p>未配置。在 <code>config.yaml</code> 加 <code>webhook.url</code> 启用：</p>
+        <pre style="background:#0f172a;color:#f1f5f9;padding:10px;border-radius:6px;font-size:12px;overflow:auto;">webhook:
+  url: "https://example.com/router-billing-events"
+  secret: "shared-with-the-other-side"</pre>
+      {{end}}
+    </section>
   </main>
 </div>
 </body>
