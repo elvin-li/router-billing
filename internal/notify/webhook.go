@@ -69,12 +69,15 @@ func New(url, secret string) *Notifier {
 	if url == "" {
 		return &Notifier{} // no-op
 	}
+	// Leave BackoffSchedule nil so schedule() can pick the right fallback
+	// at delivery time. If we eagerly populated it here, callers that set
+	// the legacy RetryDelay field (or future BackoffSchedule) after New()
+	// would silently lose their override.
 	return &Notifier{
-		URL:             url,
-		Secret:          secret,
-		BackoffSchedule: DefaultBackoffSchedule,
-		HTTPClient:      &http.Client{Timeout: 8 * time.Second},
-		queue:           make(chan Event, 64),
+		URL:        url,
+		Secret:     secret,
+		HTTPClient: &http.Client{Timeout: 8 * time.Second},
+		queue:      make(chan Event, 64),
 	}
 }
 
