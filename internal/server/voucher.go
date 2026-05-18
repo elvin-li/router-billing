@@ -46,10 +46,16 @@ func (a *App) handleAdminVouchers(w http.ResponseWriter, r *http.Request) {
 			expired++
 		}
 	}
+	// Batch summary — independent of the per-row list above. Shows every
+	// batch's inventory at a glance for "how many of batch X are still
+	// usable" reconciliation.
+	batchStats, _ := a.DB.VoucherBatchStats(r.Context())
+
 	a.render(w, "admin_vouchers.html", a.adminCtx(r, "vouchers", map[string]any{
-		"Vouchers": list,
-		"Batch":    batch,
-		"Counts":   map[string]int{"total": total, "redeemed": redeemed, "revoked": revoked, "expired": expired, "unused": total - redeemed - revoked - expired},
+		"Vouchers":   list,
+		"Batch":      batch,
+		"Counts":     map[string]int{"total": total, "redeemed": redeemed, "revoked": revoked, "expired": expired, "unused": total - redeemed - revoked - expired},
+		"BatchStats": batchStats,
 	}))
 }
 

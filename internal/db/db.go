@@ -1438,6 +1438,69 @@ func (d *DB) ListVouchers(ctx context.Context, batch string, limit int) ([]model
 	return out, rows.Err()
 }
 
+// VoucherBatchStat is one row in the /admin/vouchers batch-summary table.
+// Each batch label tracks how many vouchers it holds, how many are still
+// usable, how many got redeemed (with total revenue if a price were set —
+// vouchers don't track price today, only days).
+type VoucherBatchStat struct {
+	Batch    string
+	Total    int
+	Unused   int
+	Redeemed int
+	Revoked  int
+	Expired  int       // expiresAt in the past AND not redeemed/revoked
+	Created  time.Time // earliest CreatedAt in the batch
+}
+
+// VoucherBatchStats aggregates vouchers by batch name. A NULL/empty batch
+// label still appears as a row labeled "(no batch)" so admins can spot
+// vouchers that escaped a labeled generation.
+func (d *DB) VoucherBatchStats(ctx context.Context) ([]VoucherBatchStat, error) {
+	rows, err := d.conn.QueryContext(ctx, `
+		SELECT
+		  COALESCE(NULLIF(batch, ''), '(no batch)') AS b,
+		  COUNT(*),
+		  SUM(CASE WHEN redeemed_at IS NULL AND revoked = 0 AND (expires_at IS NULL OR expires_at > CURRENT_TIMESTAMP) THEN 1 ELSE 0 END),
+		  SUM(CASE WHEN redeemed_at IS NOT NULL THEN 1 ELSE 0 END),
+		  SUM(CASE WHEN revoked = 1 THEN 1 ELSE 0 END),
+		  SUM(CASE WHEN redeemed_at IS NULL AND revoked = 0 AND expires_at IS NOT NULL AND expires_at <= CURRENT_TIMESTAMP THEN 1 ELSE 0 END),
+		  MIN(created_at)
+		FROM vouchers
+		GROUP BY b
+		ORDER BY MIN(created_at) DESC`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []VoucherBatchStat
+	for rows.Next() {
+		var s VoucherBatchStat
+		// MIN(created_at) comes back as a TEXT in modernc.org/sqlite even
+		// though the column is DATETIME (aggregate-function quirk). Scan as
+		// string then parse the canonical sqlite layout.
+		var createdStr string
+		if err := rows.Scan(&s.Batch, &s.Total, &s.Unused, &s.Redeemed, &s.Revoked, &s.Expired, &createdStr); err != nil {
+			return nil, err
+		}
+		// modernc.org/sqlite writes time.Time as RFC3339 with a +00:00
+		// offset. Try the canonical layouts in order.
+		for _, layout := range []string{
+			time.RFC3339Nano,
+			time.RFC3339,
+			"2006-01-02 15:04:05.999999999-07:00",
+			"2006-01-02 15:04:05-07:00",
+			"2006-01-02 15:04:05",
+		} {
+			if t, err := time.Parse(layout, createdStr); err == nil {
+				s.Created = t
+				break
+			}
+		}
+		out = append(out, s)
+	}
+	return out, rows.Err()
+}
+
 func (d *DB) RevokeVoucher(ctx context.Context, code string) error {
 	_, err := d.conn.ExecContext(ctx, `UPDATE vouchers SET revoked = 1 WHERE code = ? AND redeemed_at IS NULL`, code)
 	return err
