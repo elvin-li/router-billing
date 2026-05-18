@@ -75,14 +75,17 @@
         <div class="label">今日营收</div>
         <div class="value">¥{{formatYuan .Snapshot.TodayRevenueCents}}</div>
         <div class="sub">{{.Snapshot.TodayPaidOrders}} 笔已支付订单</div>
+        <svg class="spark" data-metric="revenue_cents" width="160" height="28" style="margin-top:6px;"></svg>
       </div>
       <div class="dash-tile">
         <div class="label">今日新增用户</div>
         <div class="value">{{.Snapshot.TodayNewUsers}}</div>
+        <svg class="spark" data-metric="users_total" width="160" height="28" style="margin-top:6px;"></svg>
       </div>
       <div class="dash-tile">
         <div class="label">今日新增 MAC</div>
         <div class="value">{{.Snapshot.TodayNewMACs}}</div>
+        <svg class="spark" data-metric="mac_total" width="160" height="28" style="margin-top:6px;"></svg>
       </div>
       <div class="dash-tile">
         <div class="label">活动会话</div>
@@ -90,6 +93,8 @@
         <div class="sub">含管理员 + 用户 + 待 2FA</div>
       </div>
     </div>
+
+    <script src="/static/sparkline.js" defer></script>
 
     <h2 style="margin:18px 0 4px; font-size:15px;">最近 7 天</h2>
     <div class="dash-grid">
