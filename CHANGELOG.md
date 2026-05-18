@@ -1,5 +1,90 @@
 # Changelog
 
+## v0.14 — API surface complete + reliability polish
+
+Five small improvements that round out what v0.13 started: complete
+the JSON API so monitoring scripts can read everything they need
+without scraping HTML, harden the webhook so a flaky consumer
+doesn't lose payment notifications, and tidy up the janitor so the
+new v0.13 tables don't accumulate stale rows.
+
+### `/api/admin/users` (read-only) + `/admin/export/users.csv`
+
+Same data shape on both endpoints (id, phone, suspended,
+totp_enabled, macs, created_at). Designed for the readonly-token
+use case shipped in v0.13:
+
+  GET /api/admin/users?q=<phone-substring>&limit=<1..500>
+  -> { "users": [...] }
+
+`apiUserSummary` is deliberately a SUBSET of `models.User` — no
+`password_hash` / `totp_secret` / `totp_pending` fields, so a leaked
+read-only token can't exfiltrate auth material. A test confirms the
+response bytes never contain those strings even when the row has
+them set.
+
+`/admin/export/users.csv` has the same columns. UI: 导出 CSV button
+on /admin/users next to the search box.
+
+8 new tests, including the "leaked-token-can't-exfil-secrets"
+regression guard.
+
+### `/api/admin/orders` (read-only)
+
+  GET /api/admin/orders?limit=<1..500>&status=<paid|pending|...>
+  -> { "orders": [ models.Order, ... ] }
+
+`status=` does in-memory filtering — fine for the 100-500-row
+datasets the monitoring use-case actually queries; no new DB helper
+needed. 5 new tests.
+
+### `/api/admin/audit` (read-only)
+
+Full audit log queryable via the same filters as `/admin/audit`:
+actor / action / target / since / until / limit.
+
+  GET /api/admin/audit?actor=&action=&target=&since=&until=&limit=
+  -> { "entries": [ {id, at, actor, action, target, detail}, ... ] }
+
+`apiAuditEntry` uses explicit JSON tags so the API contract stays
+stable even if `db.AuditEntry` changes. Useful for SIEM / Splunk
+consumers that periodic-poll with since/until pagination. 4 new
+tests.
+
+### Webhook: exponential-backoff retries (was: 1 retry then drop)
+
+`notify.Notifier` gains a `BackoffSchedule []time.Duration` field.
+Default schedule is **3 retries at 2s / 30s / 5m**, so a transient
+500 or a 30-second consumer outage no longer loses the event.
+
+Semantics:
+- `nil` (default) → `DefaultBackoffSchedule`
+- `[]` (explicit empty) → no retries, 1 attempt only
+- `[...]` → use as-is
+
+Legacy `RetryDelay` still works when `BackoffSchedule == nil` — the
+schedule() helper folds it into a 1-element slice. Existing
+`TestRetriesOnceOn5xx` still passes unchanged.
+
+Each retry logs "attempt N failed; retrying in <delay>" so ops can
+trace flakiness in real time. Final drop logs the total attempt
+count. 4 new tests including a legacy-RetryDelay regression guard.
+
+### Janitor: wire v0.13 purge helpers into the 2-hour sweep
+
+`PurgeExpiredPasswordResets` / `PurgeExpiredTrustedDevices` shipped
+in v0.13 but no scheduler ever called them — stale rows accumulated
+until the user manually re-triggered the flow. `purgeLoop` in
+`server.go` now runs both alongside the existing
+`PurgeExpiredSessions` / `PurgeAuditLog` every 2 hours.
+
+2 new DB tests confirming both helpers drop stale rows while
+keeping active ones intact.
+
+### Stats
+- 17 packages tested
+- 226 test functions (was 203 in v0.13)
+
 ## v0.13 — 账号安全大改造（SMS · TOTP · 备用码 · 信任设备 · 只读 API token · 活动审计）
 
 Nine flows that all share the same trust model: prove control of a
