@@ -181,6 +181,84 @@ func TestPlansOverlay(t *testing.T) {
 	}
 }
 
+func TestPurgeExpiredPasswordResetsKeepsActiveDropsStale(t *testing.T) {
+	d := openTestDB(t)
+	ctx := context.Background()
+
+	u, err := d.CreateUser(ctx, "13800138001", "hash")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Active row (1h TTL).
+	if _, err := d.CreatePasswordReset(ctx, u.ID, "hash-active", time.Hour); err != nil {
+		t.Fatal(err)
+	}
+	// Stale row — patch expires_at directly to simulate old data.
+	r, err := d.CreatePasswordReset(ctx, u.ID, "hash-stale", time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// CreatePasswordReset wipes prior rows for the same user, so the
+	// "active" row from above is gone. Create a SECOND user for the stale
+	// row to avoid the wipe-on-create behavior.
+	u2, _ := d.CreateUser(ctx, "13800138002", "hash")
+	r2, _ := d.CreatePasswordReset(ctx, u2.ID, "hash-stale-u2", time.Hour)
+	if _, err := d.Exec(ctx, `UPDATE password_resets SET expires_at = ? WHERE id = ?`,
+		time.Now().UTC().Add(-time.Hour), r2.ID); err != nil {
+		t.Fatal(err)
+	}
+	// Restore u1's row (CreatePasswordReset just wiped it via u2's create...
+	// actually it doesn't, since CreatePasswordReset only deletes for the
+	// userID parameter — u1's row is untouched).
+	_ = r // silence
+
+	if err := d.PurgeExpiredPasswordResets(ctx); err != nil {
+		t.Fatal(err)
+	}
+
+	// u1's active row survived.
+	if row, _ := d.GetActivePasswordReset(ctx, u.ID); row == nil {
+		t.Error("active row was purged")
+	}
+	// u2's stale row is gone.
+	if row, _ := d.GetActivePasswordReset(ctx, u2.ID); row != nil {
+		t.Error("stale row survived purge")
+	}
+}
+
+func TestPurgeExpiredTrustedDevicesKeepsActiveDropsStale(t *testing.T) {
+	d := openTestDB(t)
+	ctx := context.Background()
+
+	u, err := d.CreateUser(ctx, "13800138003", "hash")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := d.CreateTrustedDevice(ctx, u.ID, "tok-active", "Chrome", time.Hour); err != nil {
+		t.Fatal(err)
+	}
+	r, err := d.CreateTrustedDevice(ctx, u.ID, "tok-stale", "Safari", time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := d.Exec(ctx, `UPDATE user_trusted_devices SET expires_at = ? WHERE id = ?`,
+		time.Now().UTC().Add(-time.Hour), r.ID); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := d.PurgeExpiredTrustedDevices(ctx); err != nil {
+		t.Fatal(err)
+	}
+
+	devs, _ := d.ListTrustedDevices(ctx, u.ID)
+	if len(devs) != 1 {
+		t.Fatalf("expected 1 device after purge; got %d", len(devs))
+	}
+	if devs[0].Token != "tok-active" {
+		t.Errorf("wrong device survived; got %q", devs[0].Token)
+	}
+}
+
 func TestStatsSnapshotIdempotent(t *testing.T) {
 	d := openTestDB(t)
 	ctx := context.Background()

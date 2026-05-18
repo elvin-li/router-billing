@@ -296,6 +296,12 @@ func (a *App) purgeLoop(ctx context.Context) {
 		case <-short.C:
 			_ = a.DB.PurgeExpiredSessions(ctx)
 			_ = a.DB.PurgeAuditLog(ctx, 10000)
+			// These three were added in v0.13 (password reset codes,
+			// trusted devices) but never plumbed into the janitor — so
+			// stale rows accumulated until the user manually
+			// re-triggered the flow. Tidy up here too.
+			_ = a.DB.PurgeExpiredPasswordResets(ctx)
+			_ = a.DB.PurgeExpiredTrustedDevices(ctx)
 		case <-weekly.C:
 			if _, err := a.DB.Exec(ctx, "PRAGMA optimize"); err != nil {
 				log.Printf("sqlite optimize: %v", err)
