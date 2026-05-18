@@ -47,6 +47,12 @@ type App struct {
 	pwResetVerifyIPLimit   *rateLimiter // /user/forgot-password/verify, keyed by IP
 	pwResetVerifyPhoneLim  *rateLimiter // /user/forgot-password/verify, keyed by phone
 
+	// apiTokenLimiter is keyed by token label. Built lazily on first use
+	// of each token (so a config with 50 tokens doesn't allocate 50
+	// limiters that may never see traffic). nil → no limit configured.
+	apiTokenLimiterMu sync.Mutex
+	apiTokenLimiter   map[string]*rateLimiter
+
 	waitMu  sync.Mutex
 	waiters map[string][]chan struct{} // order_no → pending wait channels
 }
@@ -71,6 +77,8 @@ func NewApp(cfg *config.Config, dbx *db.DB, svc *service.MACService) (*App, erro
 		pwResetIssuePhoneLimit: newRateLimiter(3, 1*time.Hour),
 		pwResetVerifyIPLimit:   newRateLimiter(30, 1*time.Hour),
 		pwResetVerifyPhoneLim:  newRateLimiter(10, 1*time.Hour),
+
+		apiTokenLimiter: map[string]*rateLimiter{},
 
 		waiters: map[string][]chan struct{}{},
 	}

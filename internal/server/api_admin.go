@@ -60,8 +60,9 @@ func (a *App) requireAPITokenRead(h func(w http.ResponseWriter, r *http.Request,
 }
 
 // matchBearerOrUnauthorized parses the Authorization header, looks up the
-// token, and writes a 401 response on miss. Returns nil iff the response is
-// already written.
+// token, applies the per-token rate limit (if configured), and writes a
+// 401 / 429 response on failure. Returns nil iff the response is already
+// written.
 func (a *App) matchBearerOrUnauthorized(w http.ResponseWriter, r *http.Request) *config.APIToken {
 	hdr := r.Header.Get("Authorization")
 	if !strings.HasPrefix(hdr, "Bearer ") {
@@ -73,7 +74,32 @@ func (a *App) matchBearerOrUnauthorized(w http.ResponseWriter, r *http.Request) 
 		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "invalid token"})
 		return nil
 	}
+	if tok.RateLimitPerMin > 0 {
+		if !a.apiTokenAllow(tokenLabel(tok), tok.RateLimitPerMin) {
+			writeJSON(w, http.StatusTooManyRequests, map[string]string{"error": "rate limit exceeded"})
+			return nil
+		}
+	}
 	return tok
+}
+
+// apiTokenAllow consults (or lazily creates) the per-token rate limiter
+// and returns whether this request is within budget. Each token gets its
+// own counter keyed by label, with a 60-second rolling window.
+func (a *App) apiTokenAllow(label string, perMin int) bool {
+	a.apiTokenLimiterMu.Lock()
+	defer a.apiTokenLimiterMu.Unlock()
+	if a.apiTokenLimiter == nil {
+		a.apiTokenLimiter = map[string]*rateLimiter{}
+	}
+	rl, ok := a.apiTokenLimiter[label]
+	if !ok || rl.max != perMin {
+		// First request OR config change since boot — install a fresh
+		// limiter with the configured budget.
+		rl = newRateLimiter(perMin, time.Minute)
+		a.apiTokenLimiter[label] = rl
+	}
+	return rl.allow(label)
 }
 
 func tokenLabel(t *config.APIToken) string {

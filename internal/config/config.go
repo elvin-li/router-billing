@@ -110,6 +110,11 @@ type APIToken struct {
 	// Useful for monitoring scripts / dashboards that should never be
 	// able to grant or revoke MAC subscriptions.
 	ReadOnly bool `yaml:"readonly,omitempty"`
+	// RateLimitPerMin caps how many requests this token can make per
+	// minute (rolling 60s window). 0/missing = no limit. Helpful when a
+	// bug in a monitoring script could otherwise hammer /api/admin/macs
+	// every second.
+	RateLimitPerMin int `yaml:"rate_limit_per_min,omitempty"`
 }
 
 // SSIDInfo names + PSK keys for the printable SSID-cards page.
