@@ -195,6 +195,16 @@ func errLabel(code string) string {
 		return "内部错误，请重试"
 	case "arp":
 		return "无法读取在线设备列表（检查 paid_iface 是否正确）"
+	case "refund_confirm":
+		return "退款失败：请在确认框中输入完整订单号"
+	case "refund_no_order":
+		return "退款失败：找不到该订单"
+	case "refund_not_paid":
+		return "退款失败：只能退款已支付的订单"
+	case "refund_failed":
+		return "退款失败：请查看服务日志"
+	case "revoked":
+		return ""
 	default:
 		return code
 	}
@@ -746,6 +756,36 @@ func (a *App) handleAdminMACExtend(w http.ResponseWriter, r *http.Request) {
 	a.DB.Audit(r.Context(), "admin", "extend", mac,
 		"days="+strconv.Itoa(days)+" ip="+clientIP(r))
 	http.Redirect(w, r, redirectBack(r, "ok=1"), http.StatusSeeOther)
+}
+
+// POST /admin/macs/revoke  {mac}
+//
+// Marks a MAC as `blocked` and removes it from the firewall set without
+// deleting the row. Useful for "this MAC is connected with abuse — drop
+// it from paid access but keep the audit trail and any associated
+// orders". Reversible: a fresh payment / extend will flip it back to
+// active and re-add it to the firewall.
+func (a *App) handleAdminMACRevoke(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Redirect(w, r, "/admin/macs", http.StatusSeeOther)
+		return
+	}
+	if err := r.ParseForm(); err != nil {
+		http.Error(w, "form", http.StatusBadRequest)
+		return
+	}
+	mac, ok := models.NormalizeMAC(r.PostForm.Get("mac"))
+	if !ok {
+		http.Redirect(w, r, redirectBack(r, "err=invalid_mac"), http.StatusSeeOther)
+		return
+	}
+	if err := a.MACSvc.Revoke(r.Context(), mac); err != nil {
+		log.Printf("admin revoke %s: %v", mac, err)
+		http.Redirect(w, r, redirectBack(r, "err=internal"), http.StatusSeeOther)
+		return
+	}
+	a.DB.Audit(r.Context(), "admin", "revoke", mac, "ip="+clientIP(r))
+	http.Redirect(w, r, redirectBack(r, "ok=revoked"), http.StatusSeeOther)
 }
 
 func (a *App) handleAdminOrders(w http.ResponseWriter, r *http.Request) {

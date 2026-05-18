@@ -167,6 +167,14 @@
                   <button class="btn outline tiny" type="submit">续费</button>
                 </form>
                 <a href="/admin/macs/schedule?mac={{.Mac}}" class="btn ghost tiny" style="width:auto;" title="设置时段限制">时段</a>
+                {{if ne (printf "%s" .Status) "blocked"}}
+                <form method="post" action="/admin/macs/revoke"
+                      onsubmit="return confirm('封禁 {{.Mac}}？\n下线该 MAC（防火墙立即移除）但保留 DB 记录，下次付费可恢复。')">
+                  {{template "csrf" $}}
+                  <input type="hidden" name="mac" value="{{.Mac}}">
+                  <button class="btn outline tiny" type="submit" title="封禁但保留记录">封禁</button>
+                </form>
+                {{end}}
                 <form method="post" action="/admin/macs/delete" onsubmit="return confirm('删除 {{.Mac}}?')">
                   {{template "csrf" $}}
                   <input type="hidden" name="mac" value="{{.Mac}}">
