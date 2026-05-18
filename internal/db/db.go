@@ -406,24 +406,50 @@ func (d *DB) ListOrders(ctx context.Context, limit int) ([]models.Order, error) 
 	return d.queryOrders(ctx, `SELECT `+orderCols+` FROM orders ORDER BY created_at DESC LIMIT ?`, limit)
 }
 
-// SearchOrders returns orders matching the optional substring q (against
-// order_no, mac, or trade_no) and optional exact status. limit defaults to
-// 200, capped at 1000.
+// OrderFilter is the optional filter set passed to SearchOrdersFiltered.
+// Empty/zero fields are ignored.
+type OrderFilter struct {
+	Q      string // matches order_no / mac / trade_no via LIKE
+	Status string // exact match on status column
+	Since  string // YYYY-MM-DD UTC; only orders created on/after this date
+	Until  string // YYYY-MM-DD UTC; only orders created on/before this date
+	Limit  int    // default 200, cap 1000
+}
+
+// SearchOrders is the legacy 3-arg shim — kept so existing callers don't
+// break. New code should use SearchOrdersFiltered for date-range support.
 func (d *DB) SearchOrders(ctx context.Context, q, status string, limit int) ([]models.Order, error) {
+	return d.SearchOrdersFiltered(ctx, OrderFilter{Q: q, Status: status, Limit: limit})
+}
+
+// SearchOrdersFiltered returns orders matching any combination of substring,
+// status, and a created_at date range. Date strings use YYYY-MM-DD shape
+// (matches the HTML date-input format) interpreted in UTC.
+func (d *DB) SearchOrdersFiltered(ctx context.Context, f OrderFilter) ([]models.Order, error) {
+	limit := f.Limit
 	if limit <= 0 || limit > 1000 {
 		limit = 200
 	}
 	var sb strings.Builder
 	sb.WriteString(`SELECT ` + orderCols + ` FROM orders WHERE 1=1`)
 	args := []any{}
-	if q != "" {
+	if f.Q != "" {
 		sb.WriteString(` AND (order_no LIKE ? OR mac LIKE ? OR trade_no LIKE ?)`)
-		pat := "%" + q + "%"
+		pat := "%" + f.Q + "%"
 		args = append(args, pat, pat, pat)
 	}
-	if status != "" {
+	if f.Status != "" {
 		sb.WriteString(` AND status = ?`)
-		args = append(args, status)
+		args = append(args, f.Status)
+	}
+	if f.Since != "" {
+		sb.WriteString(` AND created_at >= datetime(?,'start of day')`)
+		args = append(args, f.Since)
+	}
+	if f.Until != "" {
+		// < start of NEXT day so the until date is inclusive.
+		sb.WriteString(` AND created_at < datetime(?,'start of day','+1 day')`)
+		args = append(args, f.Until)
 	}
 	sb.WriteString(` ORDER BY created_at DESC LIMIT ?`)
 	args = append(args, limit)

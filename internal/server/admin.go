@@ -834,12 +834,20 @@ func (a *App) handleAdminMACRevoke(w http.ResponseWriter, r *http.Request) {
 func (a *App) handleAdminOrders(w http.ResponseWriter, r *http.Request) {
 	q := strings.TrimSpace(r.URL.Query().Get("q"))
 	status := strings.TrimSpace(r.URL.Query().Get("status"))
+	since := strings.TrimSpace(r.URL.Query().Get("since"))
+	until := strings.TrimSpace(r.URL.Query().Get("until"))
 	var orders []models.Order
 	var err error
-	if q == "" && status == "" {
+	if q == "" && status == "" && since == "" && until == "" {
 		orders, err = a.DB.ListOrders(r.Context(), 200)
 	} else {
-		orders, err = a.DB.SearchOrders(r.Context(), q, status, 500)
+		orders, err = a.DB.SearchOrdersFiltered(r.Context(), db.OrderFilter{
+			Q:      q,
+			Status: status,
+			Since:  since,
+			Until:  until,
+			Limit:  1000,
+		})
 	}
 	if err != nil {
 		http.Error(w, "db", http.StatusInternalServerError)
@@ -849,6 +857,8 @@ func (a *App) handleAdminOrders(w http.ResponseWriter, r *http.Request) {
 		"Orders": orders,
 		"Query":  q,
 		"Status": status,
+		"Since":  since,
+		"Until":  until,
 	}))
 }
 
