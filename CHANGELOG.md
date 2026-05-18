@@ -1,11 +1,12 @@
 # Changelog
 
-## v0.16 — 仪表盘 · 测试短信 · 可配置 HSTS · 可逆封禁
+## v0.16 — 仪表盘 · 测试短信 (UI + API) · 可配置 HSTS · 可逆封禁
 
 Small but visible polish round. The dashboard is the big one — a
 proper landing page replacing the redirect-to-macs that v0.0 has
-shipped with. Plus three smaller items including a reversible MAC
-ban that fills the gap between "extend" and "delete".
+shipped with. Plus four smaller items including a reversible MAC
+ban (fills the gap between "extend" and "delete") and an API
+endpoint that lets monitoring scripts text the operator.
 
 ### `/admin/dashboard` landing page
 
@@ -74,6 +75,26 @@ the firewall via the existing `MACSvc.Extend` path.
 4 tests covering the status flip, audit-entry shape, invalid-MAC
 error, and the template-level visibility guard.
 
+### `POST /api/admin/sms/send` — programmatic ops alerts
+
+Pairs with the readonly-token model in v0.14. Monitoring scripts
+that detect anomalies (DB-corruption probe failed, repeated admin
+login_failed entries, etc.) can now text the operator via the same
+provider that powers /user/forgot-password and admin reset-password.
+
+Requires a NON-readonly Bearer token.
+
+  POST /api/admin/sms/send  Bearer <write-token>
+  { "phone": "13800138000", "message": "..." }
+  -> 200 { "status": "sent", "provider": "aliyun" }
+
+Errors: 400 (bad phone / empty msg), 403 (readonly token), 503 (no
+provider), 502 (upstream failed). All paths audit. Successful
+sends record `via=api` in the audit detail so reviewers can tell
+API-originated SMS from admin-UI SMS.
+
+6 tests including the read-only-token regression guard.
+
 ### Configurable HSTS
 
 The existing security middleware emitted a hardcoded
@@ -99,7 +120,7 @@ set).
 
 ### Stats
 - 17 packages tested
-- 280 test functions (was 258 in v0.15)
+- 286 test functions (was 258 in v0.15)
 
 ## v0.15 — 退款 · 用户详情页 · 搜索过滤 · 审计盲区清零 · 充值码 API
 
