@@ -17,7 +17,32 @@
       </div>
     </div>
 
-    {{template "flash" .}}
+    {{if eq .OK "sent"}}<div class="flash ok">短信已发送 ✓</div>{{end}}
+    {{if eq .Err "sms_disabled"}}<div class="flash err">SMS 未启用</div>{{end}}
+    {{if eq .Err "sms_failed"}}<div class="flash err">短信发送失败（详情见审计日志）</div>{{end}}
+    {{if eq .Err "bad_phone"}}<div class="flash err">手机号格式不对</div>{{end}}
+
+    {{if .Available}}
+    <section class="admin-card">
+      <h2 style="margin-top:0;">发送测试短信</h2>
+      <p class="desc">用来验证签名 / 模板 / 网络可达。每次发送会写入审计日志（成功 + 失败都记）。</p>
+      <form method="post" action="/admin/sms-log/test" class="form-grid">
+        {{template "csrf" .}}
+        <div class="field">
+          <label>手机号</label>
+          <input name="phone" type="tel" inputmode="numeric" maxlength="11" required
+                 pattern="1[3-9][0-9]{9}" placeholder="11 位中国大陆手机号">
+        </div>
+        <div class="field" style="grid-column: 1 / -1;">
+          <label>消息（留空则发默认"测试"文案）</label>
+          <input name="message" maxlength="500" placeholder="（可选）测试 SMS 通道">
+        </div>
+        <div class="field-actions">
+          <button class="btn primary" type="submit">发送</button>
+        </div>
+      </form>
+    </section>
+    {{end}}
 
     {{if eq .Provider "none"}}
     <section class="admin-card">

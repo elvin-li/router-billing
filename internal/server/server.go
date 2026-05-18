@@ -192,6 +192,7 @@ func (a *App) Routes() http.Handler {
 	mux.HandleFunc("/admin/backup/restore", a.requireAdmin(a.handleAdminBackupRestore))
 	mux.HandleFunc("/admin/maintenance", a.requireAdmin(a.handleAdminMaintenance))
 	mux.HandleFunc("/admin/sms-log", a.requireAdmin(a.handleAdminSMSLog))
+	mux.HandleFunc("/admin/sms-log/test", a.requireAdmin(a.handleAdminSMSTest))
 	mux.HandleFunc("/admin/ssid-cards", a.requireAdmin(a.handleAdminSSIDCards))
 	mux.HandleFunc("/admin/ssid-cards/qr", a.requireAdmin(a.handleAdminSSIDCardQR))
 	mux.HandleFunc("/admin/devices/stream", a.requireAdmin(a.handleAdminDevicesStream))
