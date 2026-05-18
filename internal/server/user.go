@@ -11,6 +11,7 @@ import (
 
 	"golang.org/x/crypto/bcrypt"
 
+	"router-billing/internal/db"
 	"router-billing/internal/models"
 )
 
@@ -315,6 +316,15 @@ func (a *App) handleUserMe(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// Last 10 audit entries for this account — login successes/failures,
+	// 2FA events, password resets, etc. Filter by actor pattern that matches
+	// both "user:<phone>" (real events) and "user-attempt:<phone>" (failed
+	// logins that never got a session).
+	activity, _ := a.DB.SearchAudit(r.Context(), db.AuditFilter{
+		Actor: ":" + user.Phone,
+		Limit: 10,
+	})
+
 	a.render(w, "user_me.html", a.userCtx(r, "me", map[string]any{
 		"User":        user,
 		"MACs":        macs,
@@ -324,7 +334,103 @@ func (a *App) handleUserMe(w http.ResponseWriter, r *http.Request) {
 		"Plans":       a.planViews(r.Context()),
 		"WeChatOn":    a.WeChat != nil,
 		"AlipayOn":    a.Alipay != nil,
+		"Activity":    formatActivity(activity),
 	}))
+}
+
+// activityView is what the template renders per row — a human-readable
+// label + extracted timestamp + best-effort IP pulled from the detail
+// string (which we write as "... ip=10.0.0.5").
+type activityView struct {
+	When   string
+	Label  string
+	IP     string
+	Detail string
+}
+
+func formatActivity(entries []db.AuditEntry) []activityView {
+	out := make([]activityView, 0, len(entries))
+	for _, e := range entries {
+		out = append(out, activityView{
+			When:   e.At.Format("01-02 15:04"),
+			Label:  activityLabel(e.Action),
+			IP:     extractIPFromDetail(e.Detail),
+			Detail: e.Detail,
+		})
+	}
+	return out
+}
+
+// activityLabel translates the bare action string into a user-facing label.
+// Unknown actions fall through as themselves so we never silently lose data.
+func activityLabel(a string) string {
+	switch a {
+	case "login":
+		return "登录"
+	case "login_failed":
+		return "登录失败（密码错误）"
+	case "login_suspended":
+		return "登录失败（账号已停用）"
+	case "register":
+		return "注册"
+	case "password_change":
+		return "修改密码"
+	case "password_reset":
+		return "密码已通过短信重置"
+	case "password_reset_request":
+		return "申请密码重置短信"
+	case "password_reset_failed":
+		return "密码重置验证码错误"
+	case "2fa_failed":
+		return "二步验证失败"
+	case "2fa_locked":
+		return "二步验证锁定（过多失败）"
+	case "2fa_enroll_begin":
+		return "开始绑定二步验证"
+	case "2fa_enroll_failed":
+		return "绑定二步验证失败"
+	case "2fa_enrolled":
+		return "已绑定二步验证"
+	case "2fa_disabled":
+		return "已关闭二步验证"
+	case "2fa_disable_failed":
+		return "关闭二步验证失败"
+	case "2fa_backup_codes_issued":
+		return "生成 10 个备用码"
+	case "2fa_backup_codes_regenerated":
+		return "重新生成备用码"
+	case "2fa_trusted_device_issued":
+		return "添加受信任设备"
+	case "2fa_trusted_device_revoked":
+		return "移除受信任设备"
+	case "2fa_trusted_devices_revoked_all":
+		return "移除所有受信任设备"
+	case "replace":
+		return "替换 MAC"
+	case "claim":
+		return "认领 MAC"
+	case "label":
+		return "修改 MAC 标签"
+	default:
+		return a
+	}
+}
+
+// extractIPFromDetail pulls "ip=10.0.0.5" out of the detail string. Returns
+// "" if no such substring; the template hides the column on empty.
+func extractIPFromDetail(detail string) string {
+	const key = "ip="
+	idx := strings.Index(detail, key)
+	if idx < 0 {
+		return ""
+	}
+	rest := detail[idx+len(key):]
+	for i, r := range rest {
+		if r == ' ' || r == '\t' || r == ',' {
+			return rest[:i]
+		}
+	}
+	return rest
 }
 
 // POST /user/macs/replace  {old_mac, new_mac?}

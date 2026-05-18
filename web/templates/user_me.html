@@ -150,6 +150,27 @@
     <a href="/user/2fa" class="btn outline" style="width:auto; display:inline-block;">管理二步验证</a>
   </main>
 
+  {{if .Activity}}
+  <main class="card" style="max-width:680px;">
+    <span class="section-label">最近活动</span>
+    <p style="color:var(--text-soft); margin:6px 0 8px; font-size:12px;">
+      最近 10 条登录 / 安全相关的记录。看到陌生 IP？立即修改密码并开启二步验证。
+    </p>
+    <table class="data">
+      <thead><tr><th>时间</th><th>事件</th><th>IP</th></tr></thead>
+      <tbody>
+        {{range .Activity}}
+        <tr>
+          <td style="color:var(--text-soft); white-space:nowrap;">{{.When}}</td>
+          <td>{{.Label}}</td>
+          <td class="mono" style="color:var(--text-soft);">{{if .IP}}{{.IP}}{{else}}—{{end}}</td>
+        </tr>
+        {{end}}
+      </tbody>
+    </table>
+  </main>
+  {{end}}
+
   <p class="portal-footer">router-billing v{{.Version}}</p>
 </body>
 </html>

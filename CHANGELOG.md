@@ -9,6 +9,35 @@ never becomes a permanent lock-out, the "trust this device" bypass
 so daily logins aren't painful, and least-privilege API tokens so
 monitoring scripts can't accidentally revoke a paying user.
 
+### 最近活动 on `/user/me` (login + security audit visible to user)
+
+A new "最近活动" table at the bottom of `/user/me` shows the last 10
+audit_log entries belonging to the user (actor = `user:<phone>` OR
+`user-attempt:<phone>`). For each: timestamp, human-readable
+Chinese label, IP if present in the detail string. Designed so a
+non-technical user can spot "我没在那个时间登录" and react fast.
+
+Implementation:
+- `SearchAudit` filtered by Actor (LIKE-matched on `:<phone>` so both
+  successful and failed events surface).
+- `activityLabel(action)` translates ~24 action codes to user-facing
+  Chinese labels; unknown actions pass through as-is so we never
+  silently lose data.
+- `extractIPFromDetail(detail)` pulls "ip=10.0.0.5" out of the
+  audit-log detail string (the convention used by every handler
+  that writes it).
+- Section only renders when there are entries — silent for fresh
+  accounts.
+
+5 new tests in `user_activity_test.go`:
+- /user/me shows 最近活动 with register + failed-login rows.
+- `activityLabel` covers every security action with a Chinese label
+  (regression guard: adding a new audit action without a label is
+  caught immediately).
+- Unknown actions pass through.
+- `extractIPFromDetail` table test (5 cases incl. IPv6).
+- `formatActivity` shape test.
+
 ### 信任此设备 (`rb_user_trusted` cookie, 30-day bypass)
 
 Adds a "信任此设备 30 天" checkbox to `/user/login/2fa`. When ticked:
@@ -309,7 +338,7 @@ up on next startup without manual migration.
 
 ### Stats
 - 17 packages tested
-- 195 test functions (was 143)
+- 200 test functions (was 143)
 
 ## v0.12 — iptables 后端 + Aliyun SMS
 
