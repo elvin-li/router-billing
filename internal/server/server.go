@@ -16,6 +16,7 @@ import (
 	"router-billing/internal/notify"
 	"router-billing/internal/pay"
 	"router-billing/internal/service"
+	"router-billing/internal/sms"
 )
 
 type App struct {
@@ -25,6 +26,7 @@ type App struct {
 	WeChat   *pay.WeChat // nil if disabled
 	Alipay   *pay.Alipay // nil if disabled
 	Notifier *notify.Notifier
+	SMS      *sms.Sender // wraps a possibly-nil Provider; check .Available()
 	Version  string
 	StartAt  time.Time
 	tpl      *template.Template
@@ -48,6 +50,7 @@ func NewApp(cfg *config.Config, dbx *db.DB, svc *service.MACService) (*App, erro
 		DB:                dbx,
 		MACSvc:            svc,
 		Notifier:          notify.New(cfg.Webhook.URL, cfg.Webhook.Secret),
+		SMS:               buildSMSSender(cfg.SMS),
 		StartAt:           time.Now(),
 		loginLimiter:      newRateLimiter(8, 5*time.Minute),
 		loginByPhoneLimit: newRateLimiter(5, 5*time.Minute),
@@ -159,6 +162,7 @@ func (a *App) Routes() http.Handler {
 	mux.HandleFunc("/admin/backup", a.requireAdmin(a.handleAdminBackup))
 	mux.HandleFunc("/admin/backup/restore", a.requireAdmin(a.handleAdminBackupRestore))
 	mux.HandleFunc("/admin/maintenance", a.requireAdmin(a.handleAdminMaintenance))
+	mux.HandleFunc("/admin/sms-log", a.requireAdmin(a.handleAdminSMSLog))
 	mux.HandleFunc("/admin/ssid-cards", a.requireAdmin(a.handleAdminSSIDCards))
 	mux.HandleFunc("/admin/ssid-cards/qr", a.requireAdmin(a.handleAdminSSIDCardQR))
 	mux.HandleFunc("/admin/devices/stream", a.requireAdmin(a.handleAdminDevicesStream))

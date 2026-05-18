@@ -28,6 +28,7 @@ type Config struct {
 	Firewall     Firewall        `yaml:"firewall"`
 	Scheduler    Scheduler       `yaml:"scheduler"`
 	Backup       Backup          `yaml:"backup"`
+	SMS          SMSConfig       `yaml:"sms"` // optional SMS provider
 	Webhook      Webhook         `yaml:"webhook"`
 	WalledGarden WalledGarden    `yaml:"walled_garden"`
 }
@@ -116,6 +117,32 @@ type Backup struct {
 	Dir        string        `yaml:"dir"`
 	RetainDays int           `yaml:"retain_days"`
 	Interval   time.Duration `yaml:"interval"`
+}
+
+// SMSConfig selects which SMS provider (if any) backs the password-reset
+// and notification flows.
+//
+//	sms:
+//	  provider: aliyun      # "" / console / aliyun
+//	  aliyun:
+//	    access_key_id: ...
+//	    access_key_secret: ...
+//	    sign_name: MyApp
+//	    template_code: SMS_1234
+//
+// When provider == "" SMS features are disabled gracefully — handlers
+// either degrade to the existing "show temp password once" path or hide
+// the SMS button entirely.
+type SMSConfig struct {
+	Provider string       `yaml:"provider"`
+	Aliyun   AliyunSMSCfg `yaml:"aliyun"`
+}
+
+type AliyunSMSCfg struct {
+	AccessKeyID     string `yaml:"access_key_id"`
+	AccessKeySecret string `yaml:"access_key_secret"`
+	SignName        string `yaml:"sign_name"`
+	TemplateCode    string `yaml:"template_code"`
 }
 
 // Webhook config — outbound notifications to a user-supplied URL.

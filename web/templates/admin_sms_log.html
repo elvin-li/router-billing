@@ -1,0 +1,60 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>SMS 调试 · router-billing</title>
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body class="admin">
+<div class="admin-shell">
+  {{template "admin-sidebar" .}}
+  <main class="admin-main">
+    <div class="admin-header">
+      <div>
+        <h1>SMS 调试</h1>
+        <div class="crumbs">当前 provider: <code>{{.Provider}}</code></div>
+      </div>
+    </div>
+
+    {{template "flash" .}}
+
+    {{if eq .Provider "none"}}
+    <section class="admin-card">
+      <p>未启用 SMS。在 <code>config.yaml</code> 加：</p>
+      <pre style="background:#0f172a;color:#f1f5f9;padding:12px;border-radius:6px;overflow:auto;">sms:
+  provider: console       # 或 aliyun</pre>
+      <p>重启服务后回到本页。</p>
+    </section>
+    {{else if eq .Provider "console"}}
+    <section class="admin-card">
+      <h2>最近 SMS（Console ring buffer · 最多 50 条）</h2>
+      <p class="desc">Console provider 仅写日志、不真正发短信；用于本地开发。</p>
+      <div class="table-wrap">
+        <table class="data">
+          <thead><tr><th>时间</th><th>手机号</th><th>消息</th></tr></thead>
+          <tbody>
+            {{range .Records}}
+            <tr>
+              <td style="color:var(--text-soft);">{{formatTime .At}}</td>
+              <td class="mono">{{.Phone}}</td>
+              <td class="mono small">{{.Message}}</td>
+            </tr>
+            {{else}}
+            <tr><td colspan="3" class="empty-state">还没发过短信</td></tr>
+            {{end}}
+          </tbody>
+        </table>
+      </div>
+    </section>
+    {{else}}
+    <section class="admin-card">
+      <h2>{{.Provider}} provider</h2>
+      <p>{{.Provider}} 的发送状态在服务商控制台查看，本地不留 ring buffer。</p>
+      <p class="hint">每条发送的成败 + 错误码会进 <a href="/admin/audit?action=sms">审计日志</a>。</p>
+    </section>
+    {{end}}
+  </main>
+</div>
+</body>
+</html>

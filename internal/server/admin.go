@@ -166,9 +166,12 @@ func (a *App) requireAdmin(h http.HandlerFunc) http.HandlerFunc {
 // Version, Page (for sidebar highlight), and flash messages from ?ok=/?err=.
 func (a *App) adminCtx(r *http.Request, page string, extra map[string]any) map[string]any {
 	out := map[string]any{
-		"Version":   a.Version,
-		"Page":      page,
-		"OK":        r.URL.Query().Get("ok") != "",
+		"Version": a.Version,
+		"Page":    page,
+		// OK carries the raw ok=... query value so templates can branch on it
+		// with `{{if eq .OK "reset_sms"}}`. Empty string is falsy in Go
+		// templates, so `{{if .OK}}` still works for generic-success blocks.
+		"OK":        r.URL.Query().Get("ok"),
 		"Err":       errLabel(r.URL.Query().Get("err")),
 		"CSRFToken": csrfFromContext(r.Context()),
 	}
@@ -336,10 +339,17 @@ func (a *App) handleAdminUsers(w http.ResponseWriter, r *http.Request) {
 		rawQuery[k] = r.URL.Query().Get(k)
 	}
 	a.render(w, "admin_users.html", a.adminCtx(r, "users", map[string]any{
-		"Users":    users,
-		"MacCount": macCount,
-		"Query":    q,
-		"Query0":   rawQuery,
+		"Users":        users,
+		"MacCount":     macCount,
+		"Query":        q,
+		"Query0":       rawQuery,
+		"SMSAvailable": a.SMS != nil && a.SMS.Available(),
+		"SMSProvider": func() string {
+			if a.SMS == nil {
+				return "none"
+			}
+			return a.SMS.Name()
+		}(),
 	}))
 }
 
@@ -412,7 +422,28 @@ func (a *App) handleAdminUserResetPassword(w http.ResponseWriter, r *http.Reques
 	}
 	// Invalidate any existing sessions so the old password is gone.
 	_, _ = a.DB.Exec(r.Context(), `DELETE FROM sessions WHERE kind='user' AND user_id = ?`, id)
-	a.DB.Audit(r.Context(), "admin", "user_reset_password", strconv.FormatInt(id, 10), "")
+
+	// If SMS is configured AND the admin checked "send via SMS", deliver
+	// the temp password to the user's phone instead of returning it in
+	// the redirect query. Falls back to the existing inline-display path
+	// when SMS isn't wired or delivery fails.
+	smsRequested := r.PostForm.Get("via_sms") == "1"
+	smsSent := false
+	if smsRequested && a.SMS != nil && a.SMS.Available() {
+		if user, err := a.DB.GetUser(r.Context(), id); err == nil && user != nil {
+			if err := a.SMS.Send(r.Context(), user.Phone, tmpPwd); err == nil {
+				smsSent = true
+				a.DB.Audit(r.Context(), "admin", "user_reset_password", strconv.FormatInt(id, 10),
+					"via=sms provider="+a.SMS.Name()+" ip="+clientIP(r))
+				http.Redirect(w, r, "/admin/users?ok=reset_sms&reset_uid="+strconv.FormatInt(id, 10), http.StatusSeeOther)
+				return
+			} else {
+				log.Printf("reset-password sms %s: %v — falling back to inline display", user.Phone, err)
+			}
+		}
+	}
+	_ = smsSent
+	a.DB.Audit(r.Context(), "admin", "user_reset_password", strconv.FormatInt(id, 10), "via=inline ip="+clientIP(r))
 	http.Redirect(w, r, "/admin/users?reset_pwd="+url.QueryEscape(tmpPwd)+"&reset_uid="+strconv.FormatInt(id, 10), http.StatusSeeOther)
 }
 

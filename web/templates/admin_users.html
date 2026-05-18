@@ -34,6 +34,13 @@
     </div>
     {{end}}
 
+    {{if eq .OK "reset_sms"}}
+    <div class="flash ok">
+      用户 <strong>#{{index .Query0 "reset_uid"}}</strong> 的临时密码已通过 SMS（{{.SMSProvider}}）发送 ✓
+      旧 session 已全部失效。
+    </div>
+    {{end}}
+
     <section class="admin-card">
       <div class="table-wrap">
         <table class="data">
@@ -61,6 +68,15 @@
                   <input type="hidden" name="id" value="{{.ID}}">
                   <button class="btn outline tiny" type="submit">重置密码</button>
                 </form>
+                {{if $.SMSAvailable}}
+                <form method="post" action="/admin/users/reset-password"
+                      onsubmit="return confirm('重置 {{.Phone}} 的密码并通过 SMS（{{$.SMSProvider}}）发给用户？')">
+                  {{template "csrf" $}}
+                  <input type="hidden" name="id" value="{{.ID}}">
+                  <input type="hidden" name="via_sms" value="1">
+                  <button class="btn outline tiny" type="submit">重置 + SMS</button>
+                </form>
+                {{end}}
                 <form method="post" action="/admin/users/delete" onsubmit="return confirm('删除用户 {{.Phone}}？该用户的 MAC 仍保留但 owner 被清空。')">
                   {{template "csrf" $}}
                   <input type="hidden" name="id" value="{{.ID}}">
