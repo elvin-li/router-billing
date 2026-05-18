@@ -1,13 +1,26 @@
 # Changelog
 
-## v0.13 — 账号安全大改造（SMS · TOTP · 备用码 · 信任设备 · 只读 API token）
+## v0.13 — 账号安全大改造（SMS · TOTP · 备用码 · 信任设备 · 只读 API token · 活动审计）
 
-Six flows that all share the same trust model: prove control of a
-second factor before something sensitive happens. Plus the recovery
-paths (SMS reset, backup codes, admin reset) so the second factor
-never becomes a permanent lock-out, the "trust this device" bypass
-so daily logins aren't painful, and least-privilege API tokens so
+Nine flows that all share the same trust model: prove control of a
+second factor before something sensitive happens. Plus recovery
+paths so the second factor never becomes a permanent lock-out, the
+"trust this device" bypass so daily logins aren't painful, the
+"sign out other devices" + 最近活动 panel so users can spot + react
+to compromise themselves, and least-privilege API tokens so
 monitoring scripts can't accidentally revoke a paying user.
+
+### Quick tour (in CHANGELOG order)
+
+1. **Admin reset-password SMS** — `via_sms=1` on `/admin/users/reset-password` texts the temp password instead of bouncing it through the query string.
+2. **`/user/forgot-password`** — self-service two-stage SMS reset (phone → code → new password). Bcrypt-hashed codes, 5-attempt cap, anti-enumeration.
+3. **User TOTP enrollment** — `/user/2fa` lets users opt in to RFC 6238 TOTP via QR. Login-time gate mirrors the admin flow.
+4. **Admin reset-2fa** — `/admin/users/reset-2fa` unblocks a user who lost both phone + backup codes.
+5. **10 backup codes** — generated at enrollment, displayed once, bcrypt-stored, usable in place of TOTP at login. "重新生成备用码" regenerates.
+6. **Trusted devices** — opt-in "信任此设备 30 天" checkbox bypasses 2FA on the same browser after successful enrollment.
+7. **Readonly API tokens** — `readonly: true` in `api_tokens` limits a token to GET endpoints.
+8. **最近活动 panel** — last 10 login + security audit entries visible on `/user/me`, with IP extracted from detail strings.
+9. **Sign out other devices** — `/user/sessions/sign-out-others` kills every session except the calling one.
 
 ### Sign out other devices (`/user/sessions/sign-out-others`)
 
