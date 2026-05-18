@@ -12,13 +12,29 @@
   <main class="admin-main">
     <div class="admin-header">
       <div>
-        <h1>订单</h1>
-        <div class="crumbs">最近 200 条 · 包含支付中、已付、失败</div>
+        <h1>订单{{if or .Query .Status}} <span style="font-size:13px; color:var(--text-soft); font-weight:normal;">(已过滤 · {{len .Orders}} 条)</span>{{end}}</h1>
+        <div class="crumbs">最近 200 条 · 包含支付中、已付、失败、已退款</div>
       </div>
-      <a href="/admin/export/orders.csv" class="btn outline small" style="width:auto;">
-        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="width:14px;height:14px;"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
-        导出 CSV
-      </a>
+      <div style="display:flex; gap:8px; align-items:center;">
+        <form method="get" action="/admin/orders" style="margin:0; display:flex; gap:6px; align-items:center;">
+          <input name="q" value="{{.Query}}" placeholder="搜索订单号 / MAC / 流水号"
+                 style="padding:6px 10px; border:1px solid var(--border); border-radius:6px; font-size:13px; width:220px;">
+          <select name="status" style="padding:6px 8px; border:1px solid var(--border); border-radius:6px; font-size:13px;">
+            <option value="">全部</option>
+            <option value="pending" {{if eq .Status "pending"}}selected{{end}}>pending</option>
+            <option value="paid" {{if eq .Status "paid"}}selected{{end}}>paid</option>
+            <option value="failed" {{if eq .Status "failed"}}selected{{end}}>failed</option>
+            <option value="expired" {{if eq .Status "expired"}}selected{{end}}>expired</option>
+            <option value="refunded" {{if eq .Status "refunded"}}selected{{end}}>refunded</option>
+          </select>
+          <button class="btn outline small" type="submit" style="width:auto;">筛选</button>
+          {{if or .Query .Status}}<a href="/admin/orders" class="btn ghost small" style="width:auto;">清除</a>{{end}}
+        </form>
+        <a href="/admin/export/orders.csv" class="btn outline small" style="width:auto;">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="width:14px;height:14px;"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+          导出 CSV
+        </a>
+      </div>
     </div>
 
     {{if eq .OK "refunded"}}

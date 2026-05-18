@@ -365,6 +365,30 @@ func (d *DB) ListOrders(ctx context.Context, limit int) ([]models.Order, error) 
 	return d.queryOrders(ctx, `SELECT `+orderCols+` FROM orders ORDER BY created_at DESC LIMIT ?`, limit)
 }
 
+// SearchOrders returns orders matching the optional substring q (against
+// order_no, mac, or trade_no) and optional exact status. limit defaults to
+// 200, capped at 1000.
+func (d *DB) SearchOrders(ctx context.Context, q, status string, limit int) ([]models.Order, error) {
+	if limit <= 0 || limit > 1000 {
+		limit = 200
+	}
+	var sb strings.Builder
+	sb.WriteString(`SELECT ` + orderCols + ` FROM orders WHERE 1=1`)
+	args := []any{}
+	if q != "" {
+		sb.WriteString(` AND (order_no LIKE ? OR mac LIKE ? OR trade_no LIKE ?)`)
+		pat := "%" + q + "%"
+		args = append(args, pat, pat, pat)
+	}
+	if status != "" {
+		sb.WriteString(` AND status = ?`)
+		args = append(args, status)
+	}
+	sb.WriteString(` ORDER BY created_at DESC LIMIT ?`)
+	args = append(args, limit)
+	return d.queryOrders(ctx, sb.String(), args...)
+}
+
 func (d *DB) ListOrdersForUser(ctx context.Context, userID int64, limit int) ([]models.Order, error) {
 	if limit <= 0 || limit > 500 {
 		limit = 50

@@ -729,13 +729,23 @@ func (a *App) handleAdminMACExtend(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *App) handleAdminOrders(w http.ResponseWriter, r *http.Request) {
-	orders, err := a.DB.ListOrders(r.Context(), 200)
+	q := strings.TrimSpace(r.URL.Query().Get("q"))
+	status := strings.TrimSpace(r.URL.Query().Get("status"))
+	var orders []models.Order
+	var err error
+	if q == "" && status == "" {
+		orders, err = a.DB.ListOrders(r.Context(), 200)
+	} else {
+		orders, err = a.DB.SearchOrders(r.Context(), q, status, 500)
+	}
 	if err != nil {
 		http.Error(w, "db", http.StatusInternalServerError)
 		return
 	}
 	a.render(w, "admin_orders.html", a.adminCtx(r, "orders", map[string]any{
 		"Orders": orders,
+		"Query":  q,
+		"Status": status,
 	}))
 }
 
