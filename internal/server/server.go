@@ -196,6 +196,7 @@ func (a *App) Routes() http.Handler {
 	mux.HandleFunc("/admin/macs/import", a.requireAdmin(a.handleAdminMACImport))
 	mux.HandleFunc("/admin/export/macs.csv", a.requireAdmin(a.handleAdminExportMACs))
 	mux.HandleFunc("/admin/export/orders.csv", a.requireAdmin(a.handleAdminExportOrders))
+	mux.HandleFunc("/admin/export/users.csv", a.requireAdmin(a.handleAdminExportUsers))
 
 	// Public-but-tokened metrics endpoint
 	mux.HandleFunc("/metrics", a.handleMetrics)
@@ -205,6 +206,7 @@ func (a *App) Routes() http.Handler {
 	// tokens with `readonly: true` from mutating endpoints.
 	mux.HandleFunc("/api/admin/health", a.requireAPITokenRead(a.handleAPIHealth))
 	mux.HandleFunc("/api/admin/macs", a.requireAPITokenRead(a.handleAPIMACList))
+	mux.HandleFunc("/api/admin/users", a.requireAPITokenRead(a.handleAPIUserList))
 	mux.HandleFunc("/api/admin/macs/grant", a.requireAPITokenWrite(a.handleAPIMACGrant))
 	mux.HandleFunc("/api/admin/macs/revoke", a.requireAPITokenWrite(a.handleAPIMACRevoke))
 

@@ -15,11 +15,14 @@
         <h1>用户</h1>
         <div class="crumbs">手机号注册的账号 · 每用户的 MAC 数 · 停用/删除</div>
       </div>
-      <form method="get" action="/admin/users" style="margin:0; display:flex; gap:6px;">
-        <input name="q" value="{{.Query}}" placeholder="按手机号搜索（包含匹配）"
-               style="padding:7px 10px; border:1px solid var(--border); border-radius:6px; font-size:13px; width:200px;">
-        <button class="btn outline small" type="submit" style="width:auto;">搜索</button>
-      </form>
+      <div style="display:flex; gap:8px; align-items:center;">
+        <form method="get" action="/admin/users" style="margin:0; display:flex; gap:6px;">
+          <input name="q" value="{{.Query}}" placeholder="按手机号搜索（包含匹配）"
+                 style="padding:7px 10px; border:1px solid var(--border); border-radius:6px; font-size:13px; width:200px;">
+          <button class="btn outline small" type="submit" style="width:auto;">搜索</button>
+        </form>
+        <a href="/admin/export/users.csv" class="btn outline small" style="width:auto;">导出 CSV</a>
+      </div>
     </div>
 
     {{template "flash" .}}

@@ -151,6 +151,51 @@ func (a *App) handleAdminExportMACs(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+// GET /admin/export/users.csv
+//
+// One row per registered user. Phone + suspended + 2FA-enabled + count of
+// MACs + created_at. Excludes password_hash + totp_secret + totp_pending —
+// those should never leave the DB.
+func (a *App) handleAdminExportUsers(w http.ResponseWriter, r *http.Request) {
+	users, err := a.DB.ListUsers(r.Context(), 5000)
+	if err != nil {
+		http.Error(w, "db", http.StatusInternalServerError)
+		return
+	}
+	// Pre-aggregate mac counts so we don't N+1.
+	macCount := map[int64]int{}
+	if macs, _ := a.DB.ListMACs(r.Context()); macs != nil {
+		for _, m := range macs {
+			if m.UserID != nil {
+				macCount[*m.UserID]++
+			}
+		}
+	}
+	w.Header().Set("Content-Type", "text/csv; charset=utf-8")
+	w.Header().Set("Content-Disposition", `attachment; filename="users.csv"`)
+	cw := csv.NewWriter(w)
+	defer cw.Flush()
+	_ = cw.Write([]string{"id", "phone", "suspended", "totp_enabled", "macs", "created_at"})
+	for _, u := range users {
+		susp := "0"
+		if u.Suspended {
+			susp = "1"
+		}
+		t2fa := "0"
+		if u.TOTPSecret != "" {
+			t2fa = "1"
+		}
+		_ = cw.Write([]string{
+			strconv.FormatInt(u.ID, 10),
+			u.Phone,
+			susp,
+			t2fa,
+			strconv.Itoa(macCount[u.ID]),
+			u.CreatedAt.UTC().Format(time.RFC3339),
+		})
+	}
+}
+
 // GET /admin/export/orders.csv
 func (a *App) handleAdminExportOrders(w http.ResponseWriter, r *http.Request) {
 	orders, err := a.DB.ListOrders(r.Context(), 5000)

@@ -19,7 +19,9 @@ import (
 	"encoding/json"
 	"log"
 	"net/http"
+	"strconv"
 	"strings"
+	"time"
 
 	"router-billing/internal/config"
 	"router-billing/internal/models"
@@ -93,6 +95,57 @@ func (a *App) handleAPIMACList(w http.ResponseWriter, r *http.Request, _ string)
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"macs": macs})
+}
+
+// apiUserSummary is the shape returned by /api/admin/users — deliberately a
+// subset of models.User without password_hash / totp_secret / totp_pending
+// so a leaked monitoring token can't exfiltrate auth material.
+type apiUserSummary struct {
+	ID          int64     `json:"id"`
+	Phone       string    `json:"phone"`
+	Suspended   bool      `json:"suspended"`
+	TOTPEnabled bool      `json:"totp_enabled"`
+	MACs        int       `json:"macs"`
+	CreatedAt   time.Time `json:"created_at"`
+}
+
+// GET /api/admin/users?q=&limit=
+//
+// Returns up to `limit` users (default 200, max 500). Phone substring filter
+// via `q`. Same shape as the CSV export, just JSON.
+func (a *App) handleAPIUserList(w http.ResponseWriter, r *http.Request, _ string) {
+	q := strings.TrimSpace(r.URL.Query().Get("q"))
+	limit := 200
+	if s := r.URL.Query().Get("limit"); s != "" {
+		if n, err := strconv.Atoi(s); err == nil && n > 0 && n <= 500 {
+			limit = n
+		}
+	}
+	users, err := a.DB.SearchUsers(r.Context(), q, limit)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+	macCount := map[int64]int{}
+	if macs, _ := a.DB.ListMACs(r.Context()); macs != nil {
+		for _, m := range macs {
+			if m.UserID != nil {
+				macCount[*m.UserID]++
+			}
+		}
+	}
+	out := make([]apiUserSummary, 0, len(users))
+	for _, u := range users {
+		out = append(out, apiUserSummary{
+			ID:          u.ID,
+			Phone:       u.Phone,
+			Suspended:   u.Suspended,
+			TOTPEnabled: u.TOTPSecret != "",
+			MACs:        macCount[u.ID],
+			CreatedAt:   u.CreatedAt,
+		})
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"users": out})
 }
 
 type apiGrantReq struct {
