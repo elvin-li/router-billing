@@ -2,6 +2,7 @@ package server
 
 import (
 	"context"
+	"net/url"
 	"strings"
 	"testing"
 	"time"
@@ -148,6 +149,90 @@ func TestExpiryReminderNoSMSProviderShortCircuits(t *testing.T) {
 		// good
 	case <-time.After(500 * time.Millisecond):
 		t.Fatal("expiryReminderLoop didn't return when SMS disabled")
+	}
+}
+
+func TestExpiryReminderWindowDaysHonored(t *testing.T) {
+	app := setupTestApp(t)
+	console := sms.NewConsole(50)
+	app.SMS = &sms.Sender{P: console}
+	// Bump the window to 14 days so a 10-day MAC becomes eligible.
+	app.Cfg.SMS.ExpiryReminderDays = 14
+
+	seedUserAndMACExpiring(t, app, "13800143010", "AA:BB:CC:DD:E1:10", 10)
+	sent, _, _ := app.sendExpiryReminders(context.Background())
+	if sent != 1 {
+		t.Errorf("with 14-day window, 10-day MAC should be eligible; sent=%d", sent)
+	}
+}
+
+func TestExpiryReminderDisableShortCircuitsLoop(t *testing.T) {
+	app := setupTestApp(t)
+	app.SMS = &sms.Sender{P: sms.NewConsole(50)}
+	app.Cfg.SMS.ExpiryReminderDisable = true
+
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+	done := make(chan struct{})
+	go func() {
+		app.expiryReminderLoop(ctx)
+		close(done)
+	}()
+	select {
+	case <-done:
+		// good — loop returned immediately
+	case <-time.After(500 * time.Millisecond):
+		t.Fatal("loop didn't honor expiry_reminder_disable")
+	}
+}
+
+func TestAdminExpiryReminderTriggerSendsAndAudits(t *testing.T) {
+	app := setupTestApp(t)
+	console := sms.NewConsole(50)
+	app.SMS = &sms.Sender{P: console}
+	seedUserAndMACExpiring(t, app, "13800143011", "AA:BB:CC:DD:E1:11", 2)
+
+	h := app.Routes()
+	jar := loginAdmin(t, h)
+	csrf := jar[csrfCookieName]
+
+	res, _ := do(t, h, "POST", "/admin/sms-log/expiry-reminders",
+		url.Values{"_csrf": {csrf}}, jar)
+	if res.StatusCode != 303 {
+		t.Fatalf("status: %d", res.StatusCode)
+	}
+	loc := res.Header.Get("Location")
+	if !strings.Contains(loc, "ok=reminders") {
+		t.Errorf("redirect: %s", loc)
+	}
+	if !strings.Contains(loc, "sent=1") {
+		t.Errorf("redirect should include sent=1; got %s", loc)
+	}
+
+	if n := len(console.Recent()); n != 1 {
+		t.Errorf("expected 1 SMS; got %d", n)
+	}
+	entries, _ := app.DB.ListAudit(context.Background(), 50)
+	found := false
+	for _, e := range entries {
+		if e.Action == "expiry_reminder_pass" {
+			found = true
+		}
+	}
+	if !found {
+		t.Error("expected expiry_reminder_pass audit entry")
+	}
+}
+
+func TestAdminExpiryReminderTriggerNoSMSReturnsErr(t *testing.T) {
+	app := setupTestApp(t) // app.SMS = no-op
+	h := app.Routes()
+	jar := loginAdmin(t, h)
+	csrf := jar[csrfCookieName]
+	res, _ := do(t, h, "POST", "/admin/sms-log/expiry-reminders",
+		url.Values{"_csrf": {csrf}}, jar)
+	if !strings.Contains(res.Header.Get("Location"), "sms_disabled") {
+		t.Errorf("expected sms_disabled; got %s", res.Header.Get("Location"))
 	}
 }
 

@@ -18,11 +18,26 @@
     </div>
 
     {{if eq .OK "sent"}}<div class="flash ok">短信已发送 ✓</div>{{end}}
+    {{if eq .OK "reminders"}}<div class="flash ok">到期提醒完成 ✓ 已发送 {{index .Query0 "sent"}} · 跳过 {{index .Query0 "skipped"}} · 错误 {{index .Query0 "errored"}}</div>{{end}}
     {{if eq .Err "sms_disabled"}}<div class="flash err">SMS 未启用</div>{{end}}
     {{if eq .Err "sms_failed"}}<div class="flash err">短信发送失败（详情见审计日志）</div>{{end}}
     {{if eq .Err "bad_phone"}}<div class="flash err">手机号格式不对</div>{{end}}
 
     {{if .Available}}
+    <section class="admin-card">
+      <h2 style="margin-top:0;">套餐到期提醒</h2>
+      <p class="desc">
+        后台每小时会自动给 {{.WindowDays}} 天内到期的 MAC 用户发送一条提醒短信
+        （每个 MAC 22 小时内只发一次）。
+        {{if .ReminderDisabled}}<strong style="color:#dc2626;">当前已通过 config.sms.expiry_reminder_disable 关闭。</strong>{{end}}
+        点下方按钮可立即触发一次扫描。
+      </p>
+      <form method="post" action="/admin/sms-log/expiry-reminders">
+        {{template "csrf" .}}
+        <button class="btn outline" type="submit" style="width:auto;">立即扫描发送</button>
+      </form>
+    </section>
+
     <section class="admin-card">
       <h2 style="margin-top:0;">发送测试短信</h2>
       <p class="desc">用来验证签名 / 模板 / 网络可达。每次发送会写入审计日志（成功 + 失败都记）。</p>

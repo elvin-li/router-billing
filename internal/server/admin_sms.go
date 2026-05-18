@@ -25,10 +25,19 @@ func (a *App) handleAdminSMSLog(w http.ResponseWriter, r *http.Request) {
 	} else {
 		providerName = "none"
 	}
+	// Pass through the raw query so the "reminders" flash can read
+	// sent/skipped/errored counts.
+	rawQuery := map[string]string{}
+	for k := range r.URL.Query() {
+		rawQuery[k] = r.URL.Query().Get(k)
+	}
 	a.render(w, "admin_sms_log.html", a.adminCtx(r, "sms-log", map[string]any{
-		"Provider":  providerName,
-		"Records":   records,
-		"Available": available,
+		"Provider":         providerName,
+		"Records":          records,
+		"Available":        available,
+		"Query0":           rawQuery,
+		"WindowDays":       a.Cfg.SMS.ExpiryReminderWindowDays(),
+		"ReminderDisabled": a.Cfg.SMS.ExpiryReminderDisable,
 	}))
 }
 

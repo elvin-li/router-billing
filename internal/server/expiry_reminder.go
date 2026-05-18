@@ -3,16 +3,14 @@ package server
 import (
 	"context"
 	"log"
+	"net/http"
 	"time"
 )
 
-// Default settings — over-rideable via config.SMS or per-call args if we ever
-// want to. Tuned conservatively: notify 3 days out, run every hour, skip
-// when SMS isn't configured.
-const (
-	expiryReminderWindow   = 3 * 24 * time.Hour // notify when ≤ this far from expiry
-	expiryReminderInterval = 1 * time.Hour      // background loop frequency
-)
+// expiryReminderInterval is how often the background loop checks for
+// MACs needing a reminder. Hardcoded — adjusting the dedup window via
+// config is enough flexibility.
+const expiryReminderInterval = 1 * time.Hour
 
 // expiryReminderLoop sends one SMS per affected MAC owner per day when the
 // MAC's subscription expires soon. Runs forever; cancel by ctx.
@@ -23,6 +21,10 @@ const (
 func (a *App) expiryReminderLoop(ctx context.Context) {
 	if a.SMS == nil || !a.SMS.Available() {
 		log.Printf("expiry reminder: SMS not configured, skipping background loop")
+		return
+	}
+	if a.Cfg.SMS.ExpiryReminderDisable {
+		log.Printf("expiry reminder: disabled via config.sms.expiry_reminder_disable")
 		return
 	}
 	t := time.NewTicker(expiryReminderInterval)
@@ -43,7 +45,8 @@ func (a *App) expiryReminderLoop(ctx context.Context) {
 // owner's phone, send SMS, audit. Returns the (sent, skipped, errored)
 // counts so tests can assert behavior without poking the SMS provider.
 func (a *App) sendExpiryReminders(ctx context.Context) (sent, skipped, errored int) {
-	macs, err := a.DB.ListExpiringMACsWithoutRecentReminder(ctx, int(expiryReminderWindow/(24*time.Hour)))
+	days := a.Cfg.SMS.ExpiryReminderWindowDays()
+	macs, err := a.DB.ListExpiringMACsWithoutRecentReminder(ctx, days)
 	if err != nil {
 		log.Printf("expiry reminder list: %v", err)
 		return 0, 0, 0
@@ -76,6 +79,30 @@ func (a *App) sendExpiryReminders(ctx context.Context) (sent, skipped, errored i
 		log.Printf("expiry reminder pass: sent=%d skipped=%d errored=%d", sent, skipped, errored)
 	}
 	return sent, skipped, errored
+}
+
+// POST /admin/sms-log/expiry-reminders
+//
+// Manual trigger for the expiry-reminder pass. Same DB query + same audit
+// shape as the background loop — so manually-triggered sends are still
+// deduplicated against the background ones via the 22h audit window. The
+// admin sees a flash with sent/skipped/errored counts.
+func (a *App) handleAdminExpiryReminderTrigger(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Redirect(w, r, "/admin/sms-log", http.StatusSeeOther)
+		return
+	}
+	if a.SMS == nil || !a.SMS.Available() {
+		http.Redirect(w, r, "/admin/sms-log?err=sms_disabled", http.StatusSeeOther)
+		return
+	}
+	sent, skipped, errored := a.sendExpiryReminders(r.Context())
+	a.DB.Audit(r.Context(), "admin", "expiry_reminder_pass", "",
+		"sent="+itoaSmall(sent)+" skipped="+itoaSmall(skipped)+" errored="+itoaSmall(errored)+
+			" ip="+clientIP(r))
+	loc := "/admin/sms-log?ok=reminders&sent=" + itoaSmall(sent) +
+		"&skipped=" + itoaSmall(skipped) + "&errored=" + itoaSmall(errored)
+	http.Redirect(w, r, loc, http.StatusSeeOther)
 }
 
 // formatExpiryReminderBody builds the SMS body. Kept as a pure function so

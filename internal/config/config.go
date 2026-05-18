@@ -191,6 +191,22 @@ type Backup struct {
 type SMSConfig struct {
 	Provider string       `yaml:"provider"`
 	Aliyun   AliyunSMSCfg `yaml:"aliyun"`
+	// ExpiryReminderDays sets how many days before a MAC expires to text
+	// the owner. Default 3, range 1..30. 0/missing → 3.
+	ExpiryReminderDays int `yaml:"expiry_reminder_days,omitempty"`
+	// ExpiryReminderDisable turns off the background reminder loop entirely.
+	// Useful if a deployer wants ONLY admin-triggered sends.
+	ExpiryReminderDisable bool `yaml:"expiry_reminder_disable,omitempty"`
+}
+
+// ExpiryReminderWindowDays returns the configured window, clamped to
+// a safe range.
+func (s SMSConfig) ExpiryReminderWindowDays() int {
+	d := s.ExpiryReminderDays
+	if d <= 0 || d > 30 {
+		d = 3
+	}
+	return d
 }
 
 type AliyunSMSCfg struct {
