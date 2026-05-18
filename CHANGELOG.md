@@ -1,5 +1,87 @@
 # Changelog
 
+## v0.19 — 数据自助 + API 限流 + 审计保留
+
+Five commits, mostly user-side privacy + admin-side ops:
+
+### 自助数据导出 + 注销账号 (/user/me)
+
+GDPR-style 数据可携 (`/user/account/export`) + 删除权
+(`/user/account/delete`):
+
+- `GET /user/account/export` returns an indented JSON file
+  (`router-billing-data-<phone>.json`) with the user's account
+  profile, MACs, last 500 orders, and last 100 audit entries.
+  Secrets (password hash, TOTP secret, trust tokens) are
+  excluded — a regression test deliberately seeds a leaky-named
+  TOTP secret and asserts it never appears in the response.
+- `POST /user/account/delete` requires the current password,
+  runs `DeleteUser` (cascades to sessions via the existing
+  helper, nulls out macs.user_id / orders.user_id via FK ON
+  DELETE SET NULL), wipes cookies, redirects to /portal.
+- Audited as `account_export` / `account_self_deleted` /
+  `account_delete_failed`. Audit history survives deletion (keyed
+  by phone, not user_id) so fraud investigations still work.
+
+UI: two new cards on /user/me — neutral "我的数据" and
+red-bordered "注销账号". The delete card includes a `confirm()`
+with the phone visible.
+
+7 tests across the two endpoints + the FK cascade behavior.
+
+### 每个 API token 独立限速
+
+```yaml
+api_tokens:
+  - token: "rb_dashboard"
+    label: "grafana"
+    readonly: true
+    rate_limit_per_min: 30
+```
+
+`config.APIToken.RateLimitPerMin` (default 0 = unlimited) caps
+how many requests per minute one token can make. Hitting the cap
+returns 429. Per-token (label) buckets, lazily allocated on first
+use, sliding 60s window via the existing rateLimiter.
+
+The counter is per-token, not per-path — a script that hits
+/health + /macs both costs against the same bucket. Matches the
+"this is one consumer" intent.
+
+4 tests covering the cap, the unlimited default, independence
+between tokens, and per-token-across-paths.
+
+### /admin/api-tokens 只读查看页
+
+A sidebar entry (between SMS and 维护) showing every configured
+Bearer token's label / 4-char prefix / readonly / rate-limit.
+Intentionally read-only — the actual token value never leaves
+the DB. Regression test seeds a deliberately-leaky token name and
+confirms only the 4-char prefix renders. Config typos (empty
+token field) get a 空 token warning pill.
+
+5 tests covering render, no-full-token-leak, empty-state,
+empty-token flag, sidebar link.
+
+### audit_log 保留可配置
+
+```yaml
+security:
+  audit_log_keep: 100000   # default 10000; clamped 1000..1000000
+```
+
+Previously hardcoded to 10000 rows in the janitor. Long-running
+deploys want longer retention for compliance. Clamps instead of
+failing: 100 → 1000 (min), 9999999 → 1000000 (max). No
+"unlimited" — query latency starts to bite past ~1M rows.
+
+4 config-package tests covering default + custom + min/max
+clamp.
+
+### Stats
+- 17 packages tested
+- 338 test functions (was 318 in v0.18)
+
 ## v0.18 — 库存盘点 + 报表筛选
 
 Operational tooling continuation of v0.15. Three commits, all
