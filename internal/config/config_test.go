@@ -2,6 +2,7 @@ package config
 
 import (
 	"testing"
+	"time"
 
 	"golang.org/x/crypto/bcrypt"
 )
@@ -54,5 +55,53 @@ func TestAdminListEmpty(t *testing.T) {
 	c := &Config{}
 	if got := c.AdminList(); len(got) != 0 {
 		t.Errorf("empty config should have 0 admins, got %d", len(got))
+	}
+}
+
+func TestSecurityAdminSessionTTLDefault(t *testing.T) {
+	s := Security{}
+	if got := s.AdminSessionTTL(); got != 12*time.Hour {
+		t.Errorf("default admin TTL: got %s", got)
+	}
+}
+
+func TestSecurityAdminSessionTTLCustom(t *testing.T) {
+	s := Security{AdminSessionHours: 48}
+	if got := s.AdminSessionTTL(); got != 48*time.Hour {
+		t.Errorf("48h admin TTL: got %s", got)
+	}
+}
+
+func TestSecurityAdminSessionTTLOutOfRange(t *testing.T) {
+	cases := []int{-1, 0, 169, 1000}
+	for _, h := range cases {
+		got := Security{AdminSessionHours: h}.AdminSessionTTL()
+		if got != 12*time.Hour {
+			t.Errorf("out-of-range hours=%d should fallback to 12h; got %s", h, got)
+		}
+	}
+}
+
+func TestSecurityUserSessionTTLDefault(t *testing.T) {
+	s := Security{}
+	if got := s.UserSessionTTL(); got != 30*24*time.Hour {
+		t.Errorf("default user TTL: got %s", got)
+	}
+}
+
+func TestSecurityUserSessionTTLCustom(t *testing.T) {
+	s := Security{UserSessionDays: 7}
+	if got := s.UserSessionTTL(); got != 7*24*time.Hour {
+		t.Errorf("7-day user TTL: got %s", got)
+	}
+}
+
+func TestSecurityUserSessionTTLOutOfRange(t *testing.T) {
+	cases := []int{-1, 0, 366, 10000}
+	for _, d := range cases {
+		got := Security{UserSessionDays: d}.UserSessionTTL()
+		if got != 30*24*time.Hour {
+			t.Errorf("out-of-range days=%d should fallback to 30d; got %s", d, got)
+		}
 	}
 }

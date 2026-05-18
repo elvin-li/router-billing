@@ -51,6 +51,35 @@ type Security struct {
 	// AFTER you've verified your site survives the 2-year max-age +
 	// includeSubdomains commitment. Cannot be undone for cached browsers.
 	HSTSPreload bool `yaml:"hsts_preload,omitempty"`
+
+	// AdminSessionHours overrides the default 12 (hours). Sets how long
+	// an admin's rb_admin cookie stays valid after login. Range 1..168
+	// (1 week max). 0/missing → use default.
+	AdminSessionHours int `yaml:"admin_session_hours,omitempty"`
+	// UserSessionDays overrides the default 30 (days). Sets how long a
+	// user's rb_user cookie stays valid. Range 1..365. 0/missing → use
+	// default.
+	UserSessionDays int `yaml:"user_session_days,omitempty"`
+}
+
+// AdminSessionTTL returns the configured admin session lifetime, falling
+// back to the package default when unset / out of range.
+func (s Security) AdminSessionTTL() time.Duration {
+	h := s.AdminSessionHours
+	if h <= 0 || h > 168 {
+		h = 12
+	}
+	return time.Duration(h) * time.Hour
+}
+
+// UserSessionTTL returns the configured user session lifetime, falling
+// back to the package default when unset / out of range.
+func (s Security) UserSessionTTL() time.Duration {
+	d := s.UserSessionDays
+	if d <= 0 || d > 365 {
+		d = 30
+	}
+	return time.Duration(d) * 24 * time.Hour
 }
 
 // Admin is either {username,password} or {username,password_hash}.

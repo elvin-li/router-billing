@@ -21,7 +21,10 @@ import (
 
 const adminCookieName = "rb_admin"
 const adminPendingCookie = "rb_admin_pending"
-const adminSessionTTL = 12 * time.Hour
+
+// Admin session lifetime is config.Security.AdminSessionTTL() — defaults
+// to 12h, range 1..168 (1w). User session lifetime is .UserSessionTTL()
+// — defaults to 30d, range 1..365.
 
 // deviceView is one row in the /admin/devices table.
 type deviceView struct {
@@ -102,8 +105,9 @@ func (a *App) handleAdminLogin(w http.ResponseWriter, r *http.Request) {
 // the browser to the dashboard. Used both from the pure-password path and
 // from the 2FA-verified path.
 func (a *App) issueAdminSession(w http.ResponseWriter, r *http.Request, username string) {
+	ttl := a.Cfg.Security.AdminSessionTTL()
 	token := randomToken(32)
-	if err := a.DB.CreateSession(r.Context(), token, "admin", username, nil, adminSessionTTL); err != nil {
+	if err := a.DB.CreateSession(r.Context(), token, "admin", username, nil, ttl); err != nil {
 		log.Printf("create session: %v", err)
 		http.Error(w, "internal", http.StatusInternalServerError)
 		return
@@ -115,13 +119,13 @@ func (a *App) issueAdminSession(w http.ResponseWriter, r *http.Request, username
 		HttpOnly: true,
 		Secure:   isHTTPS(r),
 		SameSite: http.SameSiteLaxMode,
-		MaxAge:   int(adminSessionTTL.Seconds()),
+		MaxAge:   int(ttl.Seconds()),
 	})
 	// Wipe any leftover pending cookie from the same browser.
 	http.SetCookie(w, &http.Cookie{
 		Name: adminPendingCookie, Value: "", Path: "/admin", MaxAge: -1, HttpOnly: true,
 	})
-	http.Redirect(w, r, "/admin/macs", http.StatusSeeOther)
+	http.Redirect(w, r, "/admin/dashboard", http.StatusSeeOther)
 }
 
 func (a *App) handleAdminLogout(w http.ResponseWriter, r *http.Request) {

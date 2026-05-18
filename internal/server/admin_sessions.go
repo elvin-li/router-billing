@@ -27,8 +27,8 @@ func (a *App) handleAdminSessions(w http.ResponseWriter, r *http.Request) {
 	a.render(w, "admin_sessions.html", a.adminCtx(r, "sessions", map[string]any{
 		"Sessions": list,
 		"MyToken":  myTok,
-		"AdminTTL": int(adminSessionTTL.Hours()),
-		"UserTTL":  int(userSessionTTL.Hours()),
+		"AdminTTL": int(a.Cfg.Security.AdminSessionTTL().Hours()),
+		"UserTTL":  int(a.Cfg.Security.UserSessionTTL().Hours() / 24),
 	}))
 }
 

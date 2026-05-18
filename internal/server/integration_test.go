@@ -755,7 +755,7 @@ func TestAdminLogin2FAFullFlow(t *testing.T) {
 		t.Fatal(err)
 	}
 	res, _ = do(t, h, "POST", "/admin/login/2fa", url.Values{"code": {code}}, jar)
-	if res.StatusCode != 303 || !strings.Contains(res.Header.Get("Location"), "/admin/macs") {
+	if res.StatusCode != 303 || !strings.Contains(res.Header.Get("Location"), "/admin/dashboard") {
 		t.Fatalf("2fa stage: status=%d loc=%s", res.StatusCode, res.Header.Get("Location"))
 	}
 	jar2 := cookieJar(res)
@@ -829,8 +829,8 @@ func TestAdminLogin2FANoSecretMeansOldFlow(t *testing.T) {
 	h := app.Routes()
 	res, _ := do(t, h, "POST", "/admin/login",
 		url.Values{"username": {"admin"}, "password": {"admin-pw"}}, nil)
-	if res.StatusCode != 303 || !strings.Contains(res.Header.Get("Location"), "/admin/macs") {
-		t.Errorf("no-totp path should redirect to /admin/macs; got status=%d loc=%s",
+	if res.StatusCode != 303 || !strings.Contains(res.Header.Get("Location"), "/admin/dashboard") {
+		t.Errorf("no-totp path should redirect to /admin/dashboard; got status=%d loc=%s",
 			res.StatusCode, res.Header.Get("Location"))
 	}
 	if cookieJar(res)[adminCookieName] == "" {

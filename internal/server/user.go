@@ -19,9 +19,11 @@ import (
 const userCookieName = "rb_user"
 const userPendingCookie = "rb_user_pending"
 const userTrustedCookie = "rb_user_trusted"
-const userSessionTTL = 30 * 24 * time.Hour // 30 days
 const userPending2FATTL = 5 * time.Minute
 const userTrustedTTL = 30 * 24 * time.Hour // 30-day trust window
+
+// User session lifetime is config.Security.UserSessionTTL() — defaults to
+// 30d, range 1..365. See internal/config/config.go.
 
 // userCtx assembles the common data passed to every user-facing template.
 func (a *App) userCtx(r *http.Request, page string, extra map[string]any) map[string]any {
@@ -267,9 +269,10 @@ func (a *App) handleUserRegister(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *App) startUserSession(w http.ResponseWriter, r *http.Request, u *models.User) {
+	ttl := a.Cfg.Security.UserSessionTTL()
 	token := randomToken(32)
 	uid := u.ID
-	if err := a.DB.CreateSession(r.Context(), token, "user", u.Phone, &uid, userSessionTTL); err != nil {
+	if err := a.DB.CreateSession(r.Context(), token, "user", u.Phone, &uid, ttl); err != nil {
 		log.Printf("create user session: %v", err)
 		return
 	}
@@ -280,7 +283,7 @@ func (a *App) startUserSession(w http.ResponseWriter, r *http.Request, u *models
 		HttpOnly: true,
 		Secure:   isHTTPS(r),
 		SameSite: http.SameSiteLaxMode,
-		MaxAge:   int(userSessionTTL.Seconds()),
+		MaxAge:   int(ttl.Seconds()),
 	})
 }
 
