@@ -761,6 +761,19 @@ func (d *DB) DeleteAllAdminSessionsExcept(ctx context.Context, keep string) (int
 	return n, nil
 }
 
+// DeleteAllUserSessions wipes every user session unconditionally. Use sparingly
+// — this signs out EVERY user, including those who aren't compromised. Meant
+// for emergency response to a confirmed breach.
+func (d *DB) DeleteAllUserSessions(ctx context.Context) (int64, error) {
+	res, err := d.conn.ExecContext(ctx,
+		`DELETE FROM sessions WHERE kind = 'user'`)
+	if err != nil {
+		return 0, err
+	}
+	n, _ := res.RowsAffected()
+	return n, nil
+}
+
 // DeleteUserSessionsExcept is the user equivalent — logs out every session
 // belonging to userID except `keep`, used by "sign me out of all other
 // devices". Returns the number of sessions deleted.

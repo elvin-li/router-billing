@@ -198,6 +198,7 @@ func (a *App) Routes() http.Handler {
 	mux.HandleFunc("/admin/sessions", a.requireAdmin(a.handleAdminSessions))
 	mux.HandleFunc("/admin/sessions/revoke", a.requireAdmin(a.handleAdminSessionRevoke))
 	mux.HandleFunc("/admin/sessions/revoke-all-admin", a.requireAdmin(a.handleAdminSessionRevokeAllAdmin))
+	mux.HandleFunc("/admin/sessions/panic", a.requireAdmin(a.handleAdminSessionPanic))
 	mux.HandleFunc("/admin/health", a.requireAdmin(a.handleAdminHealth))
 	mux.HandleFunc("/admin/backup", a.requireAdmin(a.handleAdminBackup))
 	mux.HandleFunc("/admin/backup/restore", a.requireAdmin(a.handleAdminBackupRestore))

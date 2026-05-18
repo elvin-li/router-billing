@@ -56,6 +56,44 @@ func (a *App) handleAdminSessionRevoke(w http.ResponseWriter, r *http.Request) {
 	http.Redirect(w, r, "/admin/sessions?ok=1", http.StatusSeeOther)
 }
 
+// POST /admin/sessions/panic — emergency response: signs out every admin
+// session except the requesting one AND every user session everywhere.
+// Use after a confirmed breach. Each user has to re-authenticate (with
+// 2FA if enrolled). The calling admin keeps working uninterrupted.
+//
+// Audited as "panic_logout" with the killed-counts in the detail so the
+// reviewing team can see "we kicked 47 user sessions and 3 admin sessions
+// at 2026-05-19 14:32".
+func (a *App) handleAdminSessionPanic(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Redirect(w, r, "/admin/sessions", http.StatusSeeOther)
+		return
+	}
+	keep := ""
+	if c, err := r.Cookie(adminCookieName); err == nil {
+		keep = c.Value
+	}
+	if keep == "" {
+		http.Redirect(w, r, "/admin/sessions?err=internal", http.StatusSeeOther)
+		return
+	}
+	adminKilled, err := a.DB.DeleteAllAdminSessionsExcept(r.Context(), keep)
+	if err != nil {
+		log.Printf("panic admin: %v", err)
+		http.Redirect(w, r, "/admin/sessions?err=internal", http.StatusSeeOther)
+		return
+	}
+	userKilled, err := a.DB.DeleteAllUserSessions(r.Context())
+	if err != nil {
+		log.Printf("panic users: %v", err)
+		http.Redirect(w, r, "/admin/sessions?err=internal", http.StatusSeeOther)
+		return
+	}
+	a.DB.Audit(r.Context(), "admin", "panic_logout", "",
+		"admin_killed="+mustItoa(adminKilled)+" user_killed="+mustItoa(userKilled)+" ip="+clientIP(r))
+	http.Redirect(w, r, "/admin/sessions?ok=panic", http.StatusSeeOther)
+}
+
 // POST /admin/sessions/revoke-all-admin — kills every admin session except
 // the requesting one. The classic "I lost my laptop" panic button.
 func (a *App) handleAdminSessionRevokeAllAdmin(w http.ResponseWriter, r *http.Request) {
