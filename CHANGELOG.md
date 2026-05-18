@@ -1,10 +1,11 @@
 # Changelog
 
-## v0.16 — 仪表盘 · 测试短信 · 可配置 HSTS
+## v0.16 — 仪表盘 · 测试短信 · 可配置 HSTS · 可逆封禁
 
 Small but visible polish round. The dashboard is the big one — a
 proper landing page replacing the redirect-to-macs that v0.0 has
-shipped with. Plus two smaller items.
+shipped with. Plus three smaller items including a reversible MAC
+ban that fills the gap between "extend" and "delete".
 
 ### `/admin/dashboard` landing page
 
@@ -51,6 +52,28 @@ admin who just hits send sees something useful.
 5 tests including the disabled-provider error, bad-phone validation,
 form-visibility gating, and the audit-entry shape.
 
+### 可逆封禁 (`/admin/macs/revoke`)
+
+The missing middle ground between "extend" (still active) and
+"delete" (gone forever). `MACSvc.Revoke` already existed but no
+admin handler exposed it.
+
+POST `/admin/macs/revoke {mac}`:
+- Sets status = blocked
+- Removes from the firewall set
+- Keeps the row (and any associated orders) so the audit trail
+  stays intact
+
+UI: 封禁 button next to 续费 + 删除 on each /admin/macs row.
+Only shown when status != "blocked" so a duplicate click can't loop.
+
+Reversible — a fresh /admin/macs/extend (or a user-side voucher
+redemption / payment) flips status back to active and re-adds to
+the firewall via the existing `MACSvc.Extend` path.
+
+4 tests covering the status flip, audit-entry shape, invalid-MAC
+error, and the template-level visibility guard.
+
 ### Configurable HSTS
 
 The existing security middleware emitted a hardcoded
@@ -76,7 +99,7 @@ set).
 
 ### Stats
 - 17 packages tested
-- 274 test functions (was 258 in v0.15)
+- 280 test functions (was 258 in v0.15)
 
 ## v0.15 — 退款 · 用户详情页 · 搜索过滤 · 审计盲区清零 · 充值码 API
 
