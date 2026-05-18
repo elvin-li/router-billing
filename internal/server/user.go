@@ -563,6 +563,57 @@ func (a *App) handleUserLabelMAC(w http.ResponseWriter, r *http.Request) {
 	http.Redirect(w, r, "/user/me?ok=label", http.StatusSeeOther)
 }
 
+// POST /user/account/delete  {password}
+//
+// User-driven account deletion (GDPR-style "right to be forgotten"). Requires
+// the current password to confirm intent. Cascades:
+//   - users row hard-deleted
+//   - sessions for this user dropped (DeleteUser already does this)
+//   - macs.user_id / orders.user_id flip to NULL (FK ON DELETE SET NULL)
+//   - audit_log entries stay (they're already keyed by phone, not user_id,
+//     and the audit history is what makes "this account existed" recoverable
+//     for fraud-investigation purposes)
+//
+// Browser is signed out via the same cookie-wipe the logout handler does.
+func (a *App) handleUserAccountDelete(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Redirect(w, r, "/user/me", http.StatusSeeOther)
+		return
+	}
+	uid := a.currentUserID(r)
+	user, err := a.DB.GetUser(r.Context(), uid)
+	if err != nil || user == nil {
+		http.Redirect(w, r, "/user/login", http.StatusSeeOther)
+		return
+	}
+	if err := r.ParseForm(); err != nil {
+		http.Error(w, "form", http.StatusBadRequest)
+		return
+	}
+	pw := r.PostForm.Get("password")
+	if bcrypt.CompareHashAndPassword([]byte(user.PasswordHash), []byte(pw)) != nil {
+		a.DB.Audit(r.Context(), "user:"+user.Phone, "account_delete_failed", "",
+			"reason=bad_password ip="+clientIP(r))
+		http.Redirect(w, r, "/user/me?err=bad_credentials", http.StatusSeeOther)
+		return
+	}
+	if err := a.DB.DeleteUser(r.Context(), uid); err != nil {
+		log.Printf("user self-delete %d: %v", uid, err)
+		http.Redirect(w, r, "/user/me?err=internal", http.StatusSeeOther)
+		return
+	}
+	a.DB.Audit(r.Context(), "user:"+user.Phone, "account_self_deleted", "",
+		"ip="+clientIP(r))
+	// Wipe the cookie on the calling browser.
+	http.SetCookie(w, &http.Cookie{
+		Name: userCookieName, Value: "", Path: "/", MaxAge: -1, HttpOnly: true,
+	})
+	http.SetCookie(w, &http.Cookie{
+		Name: userTrustedCookie, Value: "", Path: "/user", MaxAge: -1, HttpOnly: true,
+	})
+	http.Redirect(w, r, "/portal?ok=account_deleted", http.StatusSeeOther)
+}
+
 // POST /user/sessions/sign-out-others — kills every session for this user
 // EXCEPT the one making the request. Useful from /user/me when the user
 // suspects their account was accessed elsewhere.

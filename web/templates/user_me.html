@@ -142,6 +142,26 @@
     </form>
   </main>
 
+  <main class="card" style="max-width:680px; border-color:rgba(220,38,38,0.2);">
+    <span class="section-label">注销账号</span>
+    <p style="color:var(--text-soft); margin:6px 0 12px; font-size:13px;">
+      永久删除账号。删除后：
+      <br>· 你的手机号会从系统移除，可以用同一手机号重新注册
+      <br>· 你的 MAC 仍可正常使用直到到期（但归属者会被清空）
+      <br>· 审计日志中此账号的历史记录仍会保留（合规需要）
+    </p>
+    <form method="post" action="/user/account/delete"
+          onsubmit="return confirm('真的要永久删除账号 {{.User.Phone}}？此操作不可撤销。')">
+      {{template "csrf" .}}
+      <div class="field">
+        <label>请输入当前密码以确认</label>
+        <input name="password" type="password" autocomplete="current-password" required
+               style="max-width:280px;">
+      </div>
+      <button class="btn danger" type="submit" style="width:auto;">注销账号</button>
+    </form>
+  </main>
+
   <main class="card" style="max-width:680px;">
     <span class="section-label">账号安全</span>
     {{if eq .OK "signed_out_others"}}<div class="flash ok">已踢出其他登录设备</div>{{end}}
