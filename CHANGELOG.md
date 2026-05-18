@@ -1,5 +1,47 @@
 # Changelog
 
+## v0.21 — 审计 CSV 导出 + README 刷新
+
+Small but useful: rounds out the v0.18 reporting story.
+
+### `/admin/export/audit.csv`
+
+Completes the CSV-export trio (users + orders + audit). Accepts
+the same filter params as `/admin/audit` (actor / action / target /
+since / until / limit) so admins can dump exactly the slice they
+just filtered to.
+
+Default limit 1000 (vs the HTML page's 300) — CSV exports feed
+compliance dumps where higher row counts matter. Capped at 10000
+so a single request can't OOM the router on a 1M-row audit table.
+
+UI: 导出 CSV button on `/admin/audit` carries the current filter
+query so "filter then export" is one click.
+
+3 tests covering shape + content, filter-respected, and the link
+on the audit page.
+
+### README feature list refreshed for v0.13–v0.20
+
+The README had been frozen since ~v0.9 and falsely advertised
+"no SMS, phone is just a username". v0.13 onwards is heavily SMS-
+integrated. Reorganized:
+
+- User system now lists 2FA + backup codes + trusted devices +
+  forgot-password SMS + data export + self-delete.
+- Admin lists the dashboard, search/filter, drill-down, refund,
+  batch stats, API-tokens viewer, panic logout.
+- Proactive SMS (expiry reminders + admin login alerts) gets its
+  own subsection.
+- API surface gets a complete read/write list including readonly +
+  per-token rate limits.
+- Firewall backends section (nftables + iptables/ipset for
+  OpenWrt 21.02).
+
+### Stats
+- 17 packages tested
+- 348 test functions (was 345 in v0.20)
+
 ## v0.20 — Webhook 测试按钮 + 应急下线
 
 Two operational additions on top of v0.19.
