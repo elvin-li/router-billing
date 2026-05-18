@@ -391,6 +391,43 @@ func (a *App) handleAdminUserSuspend(w http.ResponseWriter, r *http.Request) {
 	http.Redirect(w, r, "/admin/users?ok=1", http.StatusSeeOther)
 }
 
+// POST /admin/users/reset-2fa  {id}
+// Wipes the user's TOTP secret + any half-enrolled pending secret so a
+// locked-out user (lost phone, no backup) can recover. Kills their sessions
+// too — anyone holding an authed cookie on the old 2FA-enrolled session
+// would otherwise keep working with no second factor.
+func (a *App) handleAdminUserReset2FA(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Redirect(w, r, "/admin/users", http.StatusSeeOther)
+		return
+	}
+	if err := r.ParseForm(); err != nil {
+		http.Error(w, "form", http.StatusBadRequest)
+		return
+	}
+	id, _ := strconv.ParseInt(r.PostForm.Get("id"), 10, 64)
+	if id == 0 {
+		http.Redirect(w, r, "/admin/users?err=internal", http.StatusSeeOther)
+		return
+	}
+	user, _ := a.DB.GetUser(r.Context(), id)
+	if user == nil {
+		http.Redirect(w, r, "/admin/users?err=internal", http.StatusSeeOther)
+		return
+	}
+	if err := a.DB.ClearUserTOTP(r.Context(), id); err != nil {
+		log.Printf("admin clear user totp %d: %v", id, err)
+		http.Redirect(w, r, "/admin/users?err=internal", http.StatusSeeOther)
+		return
+	}
+	// Drop sessions defensively: cookie-stealing aside, an active
+	// post-2FA session would lose its "extra factor" property silently.
+	_, _ = a.DB.DeleteSessionsByUserID(r.Context(), id)
+	a.DB.Audit(r.Context(), "admin", "user_reset_2fa", strconv.FormatInt(id, 10),
+		"phone="+user.Phone+" ip="+clientIP(r))
+	http.Redirect(w, r, "/admin/users?ok=reset_2fa&reset_uid="+strconv.FormatInt(id, 10), http.StatusSeeOther)
+}
+
 // POST /admin/users/reset-password  {id}
 // Generates a random 10-char temporary password, updates the user's hash,
 // invalidates all their sessions, returns the plain text via flash so the

@@ -338,6 +338,74 @@ func TestUser2FALoginFlowDoesntSetUserCookieOnPasswordOK(t *testing.T) {
 	}
 }
 
+func TestAdminCanResetUserTOTPWhenLocked(t *testing.T) {
+	// Scenario: user enrolled 2FA, lost their phone. Admin clicks "重置 2FA"
+	// so the user can log in with just password and re-enroll.
+	app := setupTestApp(t)
+	h := app.Routes()
+
+	// Enroll user 2FA.
+	jar := registerAndLogin(t, h, "13800139010", "lost-phone-pw")
+	csrf := jar[csrfCookieName]
+	do(t, h, "POST", "/user/2fa/begin", url.Values{"_csrf": {csrf}}, jar)
+	code := validTOTPForUser(t, app, "13800139010")
+	do(t, h, "POST", "/user/2fa/confirm", url.Values{"_csrf": {csrf}, "code": {code}}, jar)
+
+	u, _ := app.DB.GetUserByPhone(context.Background(), "13800139010")
+	if u.TOTPSecret == "" {
+		t.Fatal("setup: 2fa should be enrolled")
+	}
+	userID := u.ID
+
+	// Admin logs in and resets the user's 2FA.
+	adminJar := loginAdmin(t, h)
+	adminCSRF := adminJar[csrfCookieName]
+	res, _ := do(t, h, "POST", "/admin/users/reset-2fa",
+		url.Values{"_csrf": {adminCSRF}, "id": {itoa(int(userID))}}, adminJar)
+	if res.StatusCode != 303 {
+		t.Fatalf("admin reset-2fa: %d", res.StatusCode)
+	}
+	if !strings.Contains(res.Header.Get("Location"), "ok=reset_2fa") {
+		t.Errorf("redirect: %s", res.Header.Get("Location"))
+	}
+
+	u2, _ := app.DB.GetUserByPhone(context.Background(), "13800139010")
+	if u2.TOTPSecret != "" || u2.TOTPPending != "" {
+		t.Errorf("totp should be cleared; got secret=%q pending=%q", u2.TOTPSecret, u2.TOTPPending)
+	}
+
+	// User can now log in with just password (no 2FA gate).
+	res2, _ := do(t, h, "POST", "/user/login",
+		url.Values{"phone": {"13800139010"}, "password": {"lost-phone-pw"}}, nil)
+	if res2.StatusCode != 303 {
+		t.Fatalf("post-reset login: %d", res2.StatusCode)
+	}
+	loc := res2.Header.Get("Location")
+	if strings.Contains(loc, "/user/login/2fa") {
+		t.Errorf("post-reset login should bypass 2fa; got %s", loc)
+	}
+	if cookieJar(res2)[userCookieName] == "" {
+		t.Error("post-reset login should set rb_user directly")
+	}
+}
+
+func TestAdminReset2FANoOpForUserWithoutTOTP(t *testing.T) {
+	app := setupTestApp(t)
+	h := app.Routes()
+	registerAndLogin(t, h, "13800139011", "never-enrolled-pw")
+	u, _ := app.DB.GetUserByPhone(context.Background(), "13800139011")
+
+	adminJar := loginAdmin(t, h)
+	adminCSRF := adminJar[csrfCookieName]
+	res, _ := do(t, h, "POST", "/admin/users/reset-2fa",
+		url.Values{"_csrf": {adminCSRF}, "id": {itoa(int(u.ID))}}, adminJar)
+	// Should still succeed — ClearUserTOTP is a no-op if nothing is set, but
+	// the redirect path is the same.
+	if res.StatusCode != 303 {
+		t.Fatalf("status: %d", res.StatusCode)
+	}
+}
+
 func TestPrettySecret(t *testing.T) {
 	cases := []struct{ in, want string }{
 		{"", ""},

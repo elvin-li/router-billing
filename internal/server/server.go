@@ -175,6 +175,7 @@ func (a *App) Routes() http.Handler {
 	mux.HandleFunc("/admin/users/suspend", a.requireAdmin(a.handleAdminUserSuspend))
 	mux.HandleFunc("/admin/users/delete", a.requireAdmin(a.handleAdminUserDelete))
 	mux.HandleFunc("/admin/users/reset-password", a.requireAdmin(a.handleAdminUserResetPassword))
+	mux.HandleFunc("/admin/users/reset-2fa", a.requireAdmin(a.handleAdminUserReset2FA))
 	mux.HandleFunc("/admin/audit", a.requireAdmin(a.handleAdminAudit))
 	mux.HandleFunc("/admin/sessions", a.requireAdmin(a.handleAdminSessions))
 	mux.HandleFunc("/admin/sessions/revoke", a.requireAdmin(a.handleAdminSessionRevoke))
