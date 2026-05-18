@@ -109,6 +109,38 @@ type apiUserSummary struct {
 	CreatedAt   time.Time `json:"created_at"`
 }
 
+// GET /api/admin/orders?limit=&status=
+//
+// Returns the most-recent orders (default 100, max 500). Optional `status`
+// filter (pending|paid|failed|expired) does in-memory filtering since
+// ListOrders doesn't support it directly — fine for the small datasets the
+// monitoring use-case actually queries.
+//
+// Same shape as the CSV export (`/admin/export/orders.csv`), just JSON.
+func (a *App) handleAPIOrderList(w http.ResponseWriter, r *http.Request, _ string) {
+	limit := 100
+	if s := r.URL.Query().Get("limit"); s != "" {
+		if n, err := strconv.Atoi(s); err == nil && n > 0 && n <= 500 {
+			limit = n
+		}
+	}
+	orders, err := a.DB.ListOrders(r.Context(), limit)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+	if status := r.URL.Query().Get("status"); status != "" {
+		filtered := orders[:0]
+		for _, o := range orders {
+			if string(o.Status) == status {
+				filtered = append(filtered, o)
+			}
+		}
+		orders = filtered
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"orders": orders})
+}
+
 // GET /api/admin/users?q=&limit=
 //
 // Returns up to `limit` users (default 200, max 500). Phone substring filter
