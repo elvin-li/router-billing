@@ -168,6 +168,7 @@ func (a *App) Routes() http.Handler {
 	mux.HandleFunc("/user/password", a.requireUser(a.handleUserPassword))
 	mux.HandleFunc("/user/sessions/sign-out-others", a.requireUser(a.handleUserSignOutOthers))
 	mux.HandleFunc("/user/account/delete", a.requireUser(a.handleUserAccountDelete))
+	mux.HandleFunc("/user/account/export", a.requireUser(a.handleUserAccountExport))
 
 	// Admin
 	mux.HandleFunc("/admin", a.requireAdmin(func(w http.ResponseWriter, r *http.Request) {

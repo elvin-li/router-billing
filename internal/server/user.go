@@ -1,6 +1,7 @@
 package server
 
 import (
+	"encoding/json"
 	"log"
 	"net"
 	"net/http"
@@ -561,6 +562,68 @@ func (a *App) handleUserLabelMAC(w http.ResponseWriter, r *http.Request) {
 	}
 	a.DB.Audit(r.Context(), "user:"+user.Phone, "label", mac, label)
 	http.Redirect(w, r, "/user/me?ok=label", http.StatusSeeOther)
+}
+
+// GET /user/account/export
+//
+// User-driven data export — JSON file with everything we hold about the
+// user (account profile, MACs, orders, last 100 audit entries). Companion
+// to the /user/account/delete handler; together they give a basic
+// portability + erasure surface for any privacy regime that asks.
+//
+// Excludes the obvious secrets: password hash, TOTP secret, trusted-
+// device tokens. Anything that would help an attacker stays out.
+func (a *App) handleUserAccountExport(w http.ResponseWriter, r *http.Request) {
+	uid := a.currentUserID(r)
+	user, err := a.DB.GetUser(r.Context(), uid)
+	if err != nil || user == nil {
+		http.Redirect(w, r, "/user/login", http.StatusSeeOther)
+		return
+	}
+	macs, _ := a.DB.ListMACsForUser(r.Context(), uid)
+	orders, _ := a.DB.ListOrdersForUser(r.Context(), uid, 500)
+	activity, _ := a.DB.SearchAudit(r.Context(), db.AuditFilter{
+		Actor: ":" + user.Phone,
+		Limit: 100,
+	})
+
+	type activityEntry struct {
+		At     time.Time `json:"at"`
+		Action string    `json:"action"`
+		Target string    `json:"target,omitempty"`
+		Detail string    `json:"detail,omitempty"`
+	}
+	actOut := make([]activityEntry, 0, len(activity))
+	for _, e := range activity {
+		actOut = append(actOut, activityEntry{
+			At: e.At, Action: e.Action, Target: e.Target, Detail: e.Detail,
+		})
+	}
+
+	export := map[string]any{
+		"export_format_version": 1,
+		"exported_at":           time.Now().UTC(),
+		"account": map[string]any{
+			"id":           user.ID,
+			"phone":        user.Phone,
+			"suspended":    user.Suspended,
+			"totp_enabled": user.TOTPSecret != "",
+			"created_at":   user.CreatedAt,
+			"updated_at":   user.UpdatedAt,
+		},
+		"macs":     macs,
+		"orders":   orders,
+		"activity": actOut,
+	}
+
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	w.Header().Set("Content-Disposition", `attachment; filename="router-billing-data-`+user.Phone+`.json"`)
+	enc := json.NewEncoder(w)
+	enc.SetIndent("", "  ")
+	if err := enc.Encode(export); err != nil {
+		log.Printf("user account export %d: %v", uid, err)
+	}
+	a.DB.Audit(r.Context(), "user:"+user.Phone, "account_export", "", "ip="+clientIP(r))
 }
 
 // POST /user/account/delete  {password}
