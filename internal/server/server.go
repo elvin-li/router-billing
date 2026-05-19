@@ -263,6 +263,7 @@ func (a *App) Routes() http.Handler {
 	mux.HandleFunc("/api/admin/orders/get", a.requireAPITokenRead(a.handleAPIOrderGet))
 	mux.HandleFunc("/api/admin/audit", a.requireAPITokenRead(a.handleAPIAuditList))
 	mux.HandleFunc("/api/admin/sms/log", a.requireAPITokenRead(a.handleAPISMSLog))
+	mux.HandleFunc("/api/admin/webhook/log", a.requireAPITokenRead(a.handleAPIWebhookLog))
 	mux.HandleFunc("/api/admin/vouchers", a.requireAPITokenRead(a.handleAPIVoucherList))
 	mux.HandleFunc("/api/admin/macs/grant", a.requireAPITokenWrite(a.handleAPIMACGrant))
 	mux.HandleFunc("/api/admin/macs/revoke", a.requireAPITokenWrite(a.handleAPIMACRevoke))

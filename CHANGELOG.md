@@ -1,5 +1,29 @@
 # Changelog
 
+## v0.50 — GET /api/admin/webhook/log
+
+Milestone release. Programmatic access to the v0.49 webhook_deliveries
+table, paired with v0.44's /api/admin/sms/log so monitoring scripts
+now have JSON endpoints for every persistent observability log
+(audit, sms, webhook).
+
+  GET /api/admin/webhook/log?limit=N&only_failed=1   Bearer <any-token>
+  -> 200 { "logs": [ {id, sent_at, event_type, mac, attempt,
+                     status_code, success, duration_ms, error_msg},
+                    ... ], "count": N }
+
+Common monitoring pattern: cron polls `?only_failed=1&limit=20`;
+alerts when any row's `sent_at` is within the last 5 minutes —
+webhook is presently broken and ops needs to investigate.
+
+Same posture as the v0.44 sms log API: read-only token acceptable
+since the payload is the operator's own delivery state, not auth
+material. limit defaults to 100, max 1000. Newest first.
+
+5 race-clean tests covering happy-path (newest-first ordering),
+only_failed isolation, limit enforcement, readonly token, and
+POST→405.
+
 ## v0.49 — 持久化 Webhook 投递日志
 
 Companion to v0.43's sms_log: persistent observability for the

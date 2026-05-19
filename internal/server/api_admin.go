@@ -976,6 +976,60 @@ func (a *App) handleAPISMSLog(w http.ResponseWriter, r *http.Request, _ string) 
 	writeJSON(w, http.StatusOK, map[string]any{"logs": out, "count": len(out)})
 }
 
+type apiWebhookDelivery struct {
+	ID         int64     `json:"id"`
+	SentAt     time.Time `json:"sent_at"`
+	EventType  string    `json:"event_type"`
+	MAC        string    `json:"mac,omitempty"`
+	Attempt    int       `json:"attempt"`
+	StatusCode int       `json:"status_code"`
+	Success    bool      `json:"success"`
+	DurationMs int64     `json:"duration_ms"`
+	ErrorMsg   string    `json:"error_msg,omitempty"`
+}
+
+// GET /api/admin/webhook/log?limit=N&only_failed=1   Bearer <any-token>
+//
+// Programmatic access to the v0.49 webhook_deliveries table. Same posture
+// as /api/admin/sms/log (v0.44/v0.45) — read-only token acceptable since
+// the payload is the operator's own delivery state, not auth material.
+//
+// Common monitoring pattern: cron polls `?only_failed=1&limit=20`; alerts
+// when any row's `sent_at` is within the last 5 minutes — webhook is
+// presently broken and pages need a human.
+//
+//	-> 200 { "logs": [...], "count": N }
+//
+// limit defaults to 100, max 1000. Newest rows first.
+func (a *App) handleAPIWebhookLog(w http.ResponseWriter, r *http.Request, _ string) {
+	if r.Method != http.MethodGet {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "GET only"})
+		return
+	}
+	q := r.URL.Query()
+	limit := 100
+	if s := q.Get("limit"); s != "" {
+		if n, err := strconv.Atoi(s); err == nil && n > 0 && n <= 1000 {
+			limit = n
+		}
+	}
+	onlyFailed := q.Get("only_failed") == "1"
+	logs, err := a.DB.RecentWebhookDeliveries(r.Context(), limit, onlyFailed)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+	out := make([]apiWebhookDelivery, 0, len(logs))
+	for _, l := range logs {
+		out = append(out, apiWebhookDelivery{
+			ID: l.ID, SentAt: l.SentAt, EventType: l.EventType, MAC: l.MAC,
+			Attempt: l.Attempt, StatusCode: l.StatusCode, Success: l.Success,
+			DurationMs: l.DurationMs, ErrorMsg: l.ErrorMsg,
+		})
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"logs": out, "count": len(out)})
+}
+
 // POST /api/admin/maintenance/optimize-now  Bearer <write-token>
 //
 // API mirror of v0.39's UI button. Runs `PRAGMA optimize` (SQLite's
