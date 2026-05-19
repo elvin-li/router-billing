@@ -1,5 +1,36 @@
 # Changelog
 
+## v0.63 — GET /api/admin/backup
+
+Programmatic DB backup download for off-router backup automation.
+Companion to the v0.13-era /admin/backup UI link.
+
+  GET /api/admin/backup   Bearer <any-token>
+  -> 200 application/x-sqlite3, Content-Disposition attachment
+
+Pattern: nightly `curl` cron from a backup VM:
+
+  curl -O -J -H "Authorization: Bearer $RB_TOKEN" \
+       https://router-billing.local/api/admin/backup
+  # → billing-20260519-031507.db
+
+WAL checkpoint runs before the byte copy so the file is
+self-consistent (no in-flight writes in the -wal sidecar).
+
+Read-only token IS accepted: the DB file contains the operator's
+own data, and any read token can already exfil user lists via
+/api/admin/users. So the backup endpoint isn't a wider surface
+than the existing /api/admin/users read scope.
+
+Refactor: the WAL-checkpoint + stream body now lives in a shared
+`streamBackup(actor, ip)` helper used by both UI (handleAdminBackup)
+and API paths. Audit row has `via=api` vs `via=ui` based on actor
+prefix.
+
+4 race-clean tests: response starts with the SQLite magic header
+("SQLite format 3\x00"), audit row marks via=api with size=,
+readonly token accepted, POST → 405.
+
 ## v0.62 — GET /api/admin/dashboard (programmatic snapshot)
 
 Programmatic equivalent of /admin/dashboard's roll-up panels.

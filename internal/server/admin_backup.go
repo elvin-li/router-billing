@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	_ "modernc.org/sqlite"
@@ -29,12 +30,35 @@ func openProbeDB(path string) (*sql.DB, error) {
 // `PRAGMA wal_checkpoint(TRUNCATE)` flushes everything back into the main file
 // so the byte copy is self-consistent.
 func (a *App) handleAdminBackup(w http.ResponseWriter, r *http.Request) {
-	// Best-effort checkpoint; ignore error (corrupt-WAL scenario is rare and
-	// streaming an uncheckpointed file is still typically usable).
+	a.streamBackup(w, r, "admin", clientIP(r))
+}
+
+// GET /api/admin/backup  Bearer <any-token>
+//
+// Programmatic equivalent of /admin/backup. Streams the SQLite file
+// after a WAL checkpoint. Useful for off-router backup automation:
+// nightly `curl -O -H "Authorization: Bearer $RB_TOKEN" .../api/admin/backup`.
+//
+// Read-only token IS acceptable here — the DB file contains the operator's
+// own data plus user records. Anyone with a read token can already exfil
+// user lists via /api/admin/users, so the backup endpoint isn't a wider
+// surface. Write-only restore still goes through /admin/backup/restore.
+//
+// Audit row: `backup` with size + via=api.
+func (a *App) handleAPIBackup(w http.ResponseWriter, r *http.Request, actor string) {
+	if r.Method != http.MethodGet {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "GET only"})
+		return
+	}
+	a.streamBackup(w, r, actor, clientIP(r))
+}
+
+// streamBackup is the shared body — checkpoint + stream + audit row.
+// `actor` distinguishes UI ("admin") from API (Bearer label) in audit.
+func (a *App) streamBackup(w http.ResponseWriter, r *http.Request, actor, ip string) {
 	if _, err := a.DB.Exec(r.Context(), "PRAGMA wal_checkpoint(TRUNCATE)"); err != nil {
 		log.Printf("backup: checkpoint failed: %v", err)
 	}
-
 	f, err := os.Open(a.Cfg.DBPath)
 	if err != nil {
 		http.Error(w, "open db: "+err.Error(), http.StatusInternalServerError)
@@ -42,7 +66,6 @@ func (a *App) handleAdminBackup(w http.ResponseWriter, r *http.Request) {
 	}
 	defer f.Close()
 	st, _ := f.Stat()
-
 	stamp := time.Now().Format("20060102-150405")
 	w.Header().Set("Content-Type", "application/x-sqlite3")
 	w.Header().Set("Content-Disposition", fmt.Sprintf(`attachment; filename="billing-%s.db"`, stamp))
@@ -52,7 +75,16 @@ func (a *App) handleAdminBackup(w http.ResponseWriter, r *http.Request) {
 	if _, err := io.Copy(w, f); err != nil {
 		log.Printf("backup: copy: %v", err)
 	}
-	a.DB.Audit(r.Context(), "admin", "backup", "", fmt.Sprintf("size=%d", st.Size()))
+	via := "ui"
+	if strings.HasPrefix(actor, "api:") {
+		via = "api"
+	}
+	size := int64(0)
+	if st != nil {
+		size = st.Size()
+	}
+	a.DB.Audit(r.Context(), actor, "backup", "",
+		fmt.Sprintf("size=%d via=%s ip=%s", size, via, ip))
 }
 
 // POST /admin/backup/restore — accept an uploaded *.db, validate, stage it as
