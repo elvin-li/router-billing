@@ -224,6 +224,65 @@ func (a *App) handleAPIVersion(w http.ResponseWriter, r *http.Request, _ string)
 	})
 }
 
+// POST /api/admin/macs/notes   Bearer <write-token>
+//
+//	{ "mac": "AA:BB:CC:DD:EE:FF", "notes": "support context" }
+//	-> 200 { "status": "ok", "mac": "..." }
+//	   400 if mac missing/malformed
+//	   404 if mac not found
+//
+// Programmatic equivalent of v0.82's UI notes form. Useful for sync from
+// an external CRM or ticketing system: "the customer's ticket says X,
+// stamp it onto the MAC record."
+//
+// Unlike the import path (v0.83) which preserves existing notes on empty
+// input, this explicit endpoint OVERWRITES — including to empty string,
+// which is how callers clear a stale note. The semantic difference is
+// intentional: the import endpoint is "bulk upsert, don't clobber
+// context"; this endpoint is "set the field to exactly this value."
+func (a *App) handleAPIMACNotes(w http.ResponseWriter, r *http.Request, actor string) {
+	if r.Method != http.MethodPost {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "POST only"})
+		return
+	}
+	var req struct {
+		MAC   string `json:"mac"`
+		Notes string `json:"notes"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "bad json: " + err.Error()})
+		return
+	}
+	normalized, ok := models.NormalizeMAC(req.MAC)
+	if !ok {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid mac"})
+		return
+	}
+	m, err := a.DB.GetMAC(r.Context(), normalized)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+	if m == nil {
+		writeJSON(w, http.StatusNotFound, map[string]string{"error": "mac not found"})
+		return
+	}
+	notes := strings.TrimSpace(req.Notes)
+	if len(notes) > 1000 {
+		notes = notes[:1000]
+	}
+	if err := a.DB.SetMACNotes(r.Context(), normalized, notes); err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+	a.DB.Audit(r.Context(), actor, "mac_notes", normalized,
+		"len="+strconv.Itoa(len(notes))+" via=api ip="+clientIP(r))
+	writeJSON(w, http.StatusOK, map[string]any{
+		"status": "ok",
+		"mac":    normalized,
+	})
+}
+
 // GET /api/admin/macs/get?mac=...   Bearer <any-token>
 //
 // Programmatic equivalent of v0.48's UI MAC detail page. Returns the

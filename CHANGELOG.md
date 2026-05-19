@@ -1,5 +1,34 @@
 # Changelog
 
+## v0.84 — POST /api/admin/macs/notes (programmatic notes write)
+
+Programmatic equivalent of v0.82's UI notes form. Useful for sync
+from external CRM / ticketing systems:
+
+  POST /api/admin/macs/notes   Bearer <write-token>
+  { "mac": "AA:BB:CC:DD:EE:FF", "notes": "from CRM ticket #1234" }
+  -> 200 { "status": "ok", "mac": "..." }
+  -> 400 missing/malformed; 404 not found
+
+Critical semantic distinction from the v0.83 import path:
+- **import** (POST /api/admin/macs/import): empty `notes` field
+  PRESERVES existing notes — anti-footgun on CSV re-upload
+- **explicit notes** (this endpoint): empty `notes` CLEARS the
+  field — that's how callers wipe a stale annotation
+
+The two endpoints serve different intents — bulk upsert vs
+explicit set — so the divergent behavior is intentional. Comment
+in the handler explains it for the next reader.
+
+Input normalized through models.NormalizeMAC (dashed / lowercase
+forms accepted). Notes auto-truncated to 1000 chars.
+
+Audit row: `mac_notes` target=mac detail="len=N via=api ip=...".
+
+6 race-clean tests: happy-path persist + audit, empty-notes
+clears existing, normalize round-trip, 404 missing mac,
+400 bad mac, readonly reject.
+
 ## v0.83 — MAC import accepts notes (UI + API)
 
 Extends v0.82's per-MAC notes to the bulk-import paths so ops
