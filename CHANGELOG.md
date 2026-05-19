@@ -1,5 +1,35 @@
 # Changelog
 
+## v0.35 — 手动触发后台维护任务
+
+Two buttons on /admin/maintenance that immediately fire what the
+background purgeLoop runs every 2 hours. Useful when ops just
+changed config and wants the new behaviour live NOW rather than
+after the next tick.
+
+  POST /admin/maintenance/expire-now
+    -> Runs ExpireDueMACs + MACSvc.Resync.
+    -> /admin/maintenance?ok=expire_now&expired=N
+
+  POST /admin/maintenance/audit-trim
+    -> Runs PurgeAuditLog(security.audit_log_keep).
+    -> /admin/audit?ok=audit_trim
+
+Both write their own audit row (`expire_now` / `audit_trim`) so
+the trail shows the manual intervention. GET requests to the trigger
+URLs redirect back rather than firing the action, so a browser
+preload can't accidentally trigger a sweep.
+
+UI: new "手动触发后台任务" section on /admin/maintenance with
+both buttons + a confirm-dialog. The expiry button shows the
+expired-row count in the flash so operators get instant feedback.
+
+4 race-clean tests:
+- expire_now flips an actually-due MAC + writes the audit row
+- audit_trim respects security.audit_log_keep + writes its own row
+- GET requests to both endpoints redirect (don't fire)
+- /admin/maintenance page render includes both forms
+
 ## v0.34 — POST /api/admin/users/grant-by-phone
 
 Convenience sibling to v0.29's `/api/admin/users/grant`: takes the

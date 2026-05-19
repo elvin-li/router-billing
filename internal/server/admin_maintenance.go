@@ -1,6 +1,7 @@
 package server
 
 import (
+	"fmt"
 	"log"
 	"net/http"
 	"os"
@@ -19,6 +20,12 @@ func (a *App) handleAdminMaintenance(w http.ResponseWriter, r *http.Request) {
 	if st, err := os.Stat(a.Cfg.DBPath); err == nil {
 		dbSize = uint64(st.Size())
 	}
+	// Pass-through query params so the manual-trigger flash blocks can
+	// read the result count ({{index .Query0 "expired"}}).
+	rawQuery := map[string]string{}
+	for k := range r.URL.Query() {
+		rawQuery[k] = r.URL.Query().Get(k)
+	}
 	a.render(w, "admin_maintenance.html", a.adminCtx(r, "maintenance", map[string]any{
 		"DBPath":        a.Cfg.DBPath,
 		"DBSize":        dbSize,
@@ -29,6 +36,8 @@ func (a *App) handleAdminMaintenance(w http.ResponseWriter, r *http.Request) {
 		"BackupRetain":  a.Cfg.Backup.RetainDays,
 		"WebhookURL":    a.Cfg.Webhook.URL,
 		"WebhookSigned": a.Cfg.Webhook.Secret != "",
+		"AuditKeep":     a.Cfg.Security.AuditLogRetention(),
+		"Query0":        rawQuery,
 	}))
 }
 
@@ -59,4 +68,60 @@ func (a *App) handleAdminTestWebhook(w http.ResponseWriter, r *http.Request) {
 	a.DB.Audit(r.Context(), "admin", "webhook_test", "",
 		"url="+a.Cfg.Webhook.URL+" ip="+clientIP(r))
 	http.Redirect(w, r, "/admin/maintenance?ok=webhook_test", http.StatusSeeOther)
+}
+
+// POST /admin/maintenance/expire-now
+//
+// Manually triggers the expiry sweep that the background purgeLoop runs
+// every 2 hours. Useful when ops just changed a plan or revoked a batch
+// and wants the firewall to reflect reality NOW rather than after the
+// next tick. Audited; idempotent — if nothing's due, it's a no-op.
+//
+// Resyncs the firewall set after the sweep so any newly-expired MACs are
+// actually evicted from the allow list, not just flipped in the DB.
+func (a *App) handleAdminExpireNow(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Redirect(w, r, "/admin/maintenance", http.StatusSeeOther)
+		return
+	}
+	expired, err := a.DB.ExpireDueMACs(r.Context())
+	if err != nil {
+		log.Printf("admin expire-now: %v", err)
+		a.DB.Audit(r.Context(), "admin", "expire_now_failed", "",
+			"err="+err.Error()+" ip="+clientIP(r))
+		http.Redirect(w, r, "/admin/maintenance?err=expire_failed", http.StatusSeeOther)
+		return
+	}
+	if rerr := a.MACSvc.Resync(r.Context()); rerr != nil {
+		log.Printf("admin expire-now resync: %v", rerr)
+	}
+	a.DB.Audit(r.Context(), "admin", "expire_now", "",
+		fmt.Sprintf("expired=%d ip=%s", len(expired), clientIP(r)))
+	http.Redirect(w, r,
+		fmt.Sprintf("/admin/maintenance?ok=expire_now&expired=%d", len(expired)),
+		http.StatusSeeOther)
+}
+
+// POST /admin/maintenance/audit-trim
+//
+// Manually triggers the audit-log purge that the background purgeLoop
+// runs every 2 hours. Useful when the cap was lowered in config and ops
+// wants the new retention to take effect immediately rather than after
+// the next tick. Audited (yes, the trim itself records an audit row).
+func (a *App) handleAdminAuditTrim(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Redirect(w, r, "/admin/audit", http.StatusSeeOther)
+		return
+	}
+	keep := a.Cfg.Security.AuditLogRetention()
+	if err := a.DB.PurgeAuditLog(r.Context(), keep); err != nil {
+		log.Printf("admin audit-trim: %v", err)
+		a.DB.Audit(r.Context(), "admin", "audit_trim_failed", "",
+			"err="+err.Error()+" ip="+clientIP(r))
+		http.Redirect(w, r, "/admin/audit?err=trim_failed", http.StatusSeeOther)
+		return
+	}
+	a.DB.Audit(r.Context(), "admin", "audit_trim", "",
+		fmt.Sprintf("keep=%d ip=%s", keep, clientIP(r)))
+	http.Redirect(w, r, "/admin/audit?ok=audit_trim", http.StatusSeeOther)
 }

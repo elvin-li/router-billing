@@ -83,6 +83,40 @@
   secret: "shared-with-the-other-side"</pre>
       {{end}}
     </section>
+
+    <section class="admin-card">
+      <h2>手动触发后台任务</h2>
+      <p class="hint" style="font-size:12px; color:var(--text-soft);">
+        通常 purgeLoop 每 2 小时自动执行；下方按钮用于刚改了配置 / 套餐
+        后想立即生效的场景。两个操作都会写入审计日志。
+      </p>
+      {{if eq .OK "expire_now"}}
+        <div class="flash ok">已执行到期扫描 ✓ 本次处理 {{index .Query0 "expired"}} 条记录，防火墙已重新同步</div>
+      {{end}}
+      {{if eq .Err "expire_failed"}}
+        <div class="flash err">到期扫描失败，详见服务器日志</div>
+      {{end}}
+      <form method="post" action="/admin/maintenance/expire-now" style="margin-top:10px;"
+            onsubmit="return confirm('立即扫描并将所有到期 MAC 标记为 expired，然后重新同步防火墙？');">
+        {{template "csrf" .}}
+        <button class="btn outline" type="submit" style="width:auto;">立即执行到期扫描</button>
+      </form>
+      <p class="hint" style="font-size:12px; color:var(--text-soft); margin-top:10px;">
+        相当于 purgeLoop 中的 ExpireDueMACs() + MACSvc.Resync()。
+      </p>
+
+      <hr style="margin:18px 0; border:none; border-top:1px solid var(--border);">
+
+      <form method="post" action="/admin/maintenance/audit-trim"
+            onsubmit="return confirm('立即裁剪审计日志，保留最新 {{.AuditKeep}} 条？');">
+        {{template "csrf" .}}
+        <button class="btn outline" type="submit" style="width:auto;">立即裁剪审计日志</button>
+      </form>
+      <p class="hint" style="font-size:12px; color:var(--text-soft); margin-top:10px;">
+        保留最新 <code>security.audit_log_keep</code>（当前 {{.AuditKeep}}）条，
+        其余按时间从旧到新删除。
+      </p>
+    </section>
   </main>
 </div>
 </body>
