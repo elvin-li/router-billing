@@ -1,5 +1,29 @@
 # Changelog
 
+## v0.34 — POST /api/admin/users/grant-by-phone
+
+Convenience sibling to v0.29's `/api/admin/users/grant`: takes the
+phone number a support agent typed off a call instead of requiring
+a pre-resolved user_id.
+
+  POST /api/admin/users/grant-by-phone   Bearer <write-token>
+  { "phone": "13800120001", "days": 7, "label": "support-extend" }
+  -> 200 { "user_id": 42, "phone": "13800120001",
+           "macs_extended": 3, "macs": [...] }
+
+Phone is validated through models.ValidPhone BEFORE the lookup so
+a typo'd input surfaces as a clean 400 instead of an ambiguous
+"user not found". Existing phone → 200 with the user's resolved
+user_id echoed for the caller's records. Real phone format / no
+account → 404.
+
+Audit shape mirrors v0.29 but appends `phone=<phone>` so a reviewer
+searching by phone (the support ticket field) can find the row.
+
+6 race-clean tests: happy path with audit assertion, invalid phone
+400, valid phone no-account 404, readonly-write reject, zero-days
+400, and the standard response-body anti-leak check.
+
 ## v0.33 — Orders 按 user_id 筛选 + 导出
 
 Support workflow: "show me every order this customer ever placed

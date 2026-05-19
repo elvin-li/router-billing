@@ -794,6 +794,88 @@ func (a *App) handleAPIUserGrant(w http.ResponseWriter, r *http.Request, actor s
 	})
 }
 
+type apiUserGrantByPhoneReq struct {
+	Phone string `json:"phone"`
+	Days  int    `json:"days"`
+	Label string `json:"label,omitempty"`
+}
+
+// POST /api/admin/users/grant-by-phone  Bearer <write-token>
+//
+//	{ "phone": "13800120001", "days": 7, "label": "support-extend" }
+//	-> 200 { "user_id": 42, "phone": "13800120001",
+//	         "macs_extended": 3, "macs": [...] }
+//
+// Convenience over v0.29's /api/admin/users/grant: takes the phone number
+// (which the support agent typed off a call) instead of requiring a
+// pre-resolved user_id. Phone is validated through models.ValidPhone
+// before lookup so a typo'd input becomes a clear 400 instead of a
+// silent 404.
+func (a *App) handleAPIUserGrantByPhone(w http.ResponseWriter, r *http.Request, actor string) {
+	if r.Method != http.MethodPost {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "POST only"})
+		return
+	}
+	var req apiUserGrantByPhoneReq
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "bad json: " + err.Error()})
+		return
+	}
+	phone := strings.TrimSpace(req.Phone)
+	if !models.ValidPhone(phone) {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid phone"})
+		return
+	}
+	if req.Days <= 0 {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "days must be > 0"})
+		return
+	}
+	user, err := a.DB.GetUserByPhone(r.Context(), phone)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+	if user == nil {
+		writeJSON(w, http.StatusNotFound, map[string]string{"error": "no user for phone"})
+		return
+	}
+
+	macs, err := a.DB.ListMACsForUser(r.Context(), user.ID)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+	label := strings.TrimSpace(req.Label)
+	if label == "" {
+		label = "user-grant-by-phone"
+	}
+
+	type extendedMAC struct {
+		MAC       string    `json:"mac"`
+		ExpiresAt time.Time `json:"expires_at"`
+	}
+	out := make([]extendedMAC, 0, len(macs))
+	for i := range macs {
+		extended, err := a.MACSvc.Extend(r.Context(), macs[i].Mac, label, req.Days, &user.ID)
+		if err != nil {
+			log.Printf("api user grant-by-phone %s mac=%s: %v", phone, macs[i].Mac, err)
+			continue
+		}
+		a.DB.Audit(r.Context(), actor, "grant", macs[i].Mac,
+			"days="+strconv.Itoa(req.Days)+" via=api phone="+phone+" ip="+clientIP(r))
+		out = append(out, extendedMAC{MAC: extended.Mac, ExpiresAt: extended.ExpiresAt})
+	}
+	a.DB.Audit(r.Context(), actor, "user_grant", strconv.FormatInt(user.ID, 10),
+		"days="+strconv.Itoa(req.Days)+" macs="+strconv.Itoa(len(out))+" via=api phone="+phone+" ip="+clientIP(r))
+
+	writeJSON(w, http.StatusOK, map[string]any{
+		"user_id":       user.ID,
+		"phone":         user.Phone,
+		"macs_extended": len(out),
+		"macs":          out,
+	})
+}
+
 type apiPlan struct {
 	Key        string `json:"key"`
 	Label      string `json:"label"`
