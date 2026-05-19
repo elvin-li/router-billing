@@ -794,6 +794,62 @@ func (a *App) handleAPIUserGrant(w http.ResponseWriter, r *http.Request, actor s
 	})
 }
 
+// POST /api/admin/maintenance/expire-now  Bearer <write-token>
+//
+// Programmatic mirror of v0.35's UI button. Runs ExpireDueMACs +
+// MACSvc.Resync. Useful for deploy scripts that just rolled a config
+// change and want to immediately reflect it in the firewall.
+//
+//	-> 200 { "expired": N }
+//
+// Audit: `expire_now` detail="expired=N via=api ip=...".
+func (a *App) handleAPIExpireNow(w http.ResponseWriter, r *http.Request, actor string) {
+	if r.Method != http.MethodPost {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "POST only"})
+		return
+	}
+	expired, err := a.DB.ExpireDueMACs(r.Context())
+	if err != nil {
+		a.DB.Audit(r.Context(), actor, "expire_now_failed", "",
+			"err="+err.Error()+" via=api ip="+clientIP(r))
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+	if rerr := a.MACSvc.Resync(r.Context()); rerr != nil {
+		log.Printf("api expire-now resync: %v", rerr)
+	}
+	a.DB.Audit(r.Context(), actor, "expire_now", "",
+		"expired="+strconv.Itoa(len(expired))+" via=api ip="+clientIP(r))
+	writeJSON(w, http.StatusOK, map[string]any{"expired": len(expired)})
+}
+
+// POST /api/admin/maintenance/audit-trim  Bearer <write-token>
+//
+// Programmatic mirror of v0.35's audit-trim UI button. Runs
+// PurgeAuditLog(security.audit_log_keep). Useful when the cap has just
+// been lowered in config and the operator wants the new retention applied
+// without waiting for the 2-hour purgeLoop tick.
+//
+//	-> 200 { "kept": N }
+//
+// Audit: `audit_trim` detail="keep=N via=api ip=...".
+func (a *App) handleAPIAuditTrim(w http.ResponseWriter, r *http.Request, actor string) {
+	if r.Method != http.MethodPost {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "POST only"})
+		return
+	}
+	keep := a.Cfg.Security.AuditLogRetention()
+	if err := a.DB.PurgeAuditLog(r.Context(), keep); err != nil {
+		a.DB.Audit(r.Context(), actor, "audit_trim_failed", "",
+			"err="+err.Error()+" via=api ip="+clientIP(r))
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+	a.DB.Audit(r.Context(), actor, "audit_trim", "",
+		"keep="+strconv.Itoa(keep)+" via=api ip="+clientIP(r))
+	writeJSON(w, http.StatusOK, map[string]any{"kept": keep})
+}
+
 type apiAuditNoteReq struct {
 	Note   string `json:"note"`
 	Action string `json:"action,omitempty"` // default "manual_note"

@@ -252,6 +252,8 @@ func (a *App) Routes() http.Handler {
 	mux.HandleFunc("/api/admin/users/grant-by-phone", a.requireAPITokenWrite(a.handleAPIUserGrantByPhone))
 	mux.HandleFunc("/api/admin/webhook/test", a.requireAPITokenWrite(a.handleAPIWebhookTest))
 	mux.HandleFunc("/api/admin/audit/note", a.requireAPITokenWrite(a.handleAPIAuditNote))
+	mux.HandleFunc("/api/admin/maintenance/expire-now", a.requireAPITokenWrite(a.handleAPIExpireNow))
+	mux.HandleFunc("/api/admin/maintenance/audit-trim", a.requireAPITokenWrite(a.handleAPIAuditTrim))
 	mux.HandleFunc("/api/admin/plans", a.requireAPITokenRead(a.handleAPIPlanList))
 	mux.HandleFunc("/api/admin/plans/save", a.requireAPITokenWrite(a.handleAPIPlanSave))
 	mux.HandleFunc("/api/admin/plans/delete", a.requireAPITokenWrite(a.handleAPIPlanDelete))

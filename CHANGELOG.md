@@ -1,5 +1,32 @@
 # Changelog
 
+## v0.38 — API mirrors of v0.35 maintenance triggers
+
+For deploy scripts that just rolled a config change and want
+the new behavior live NOW — no need to SSH and click the button.
+
+  POST /api/admin/maintenance/expire-now   Bearer <write>
+    Runs ExpireDueMACs + MACSvc.Resync.
+    -> 200 { "expired": N }
+
+  POST /api/admin/maintenance/audit-trim   Bearer <write>
+    Runs PurgeAuditLog(security.audit_log_keep).
+    -> 200 { "kept": N }
+
+Both reject GET (405) so an accidental browser preload of the URL
+can't fire the sweep. Both write audit rows with `via=api` so
+reviewers see the source attribution.
+
+Useful patterns:
+- CI deploy hook: POST /api/admin/maintenance/expire-now after
+  pushing a plan change so the firewall reflects new expiry
+  windows before the first user re-connects.
+- Config-cap-lowered automation: POST /api/admin/maintenance/audit-trim
+  immediately after editing security.audit_log_keep down.
+
+5 race-clean tests including happy paths with audit-row assertions,
+readonly-token reject (both endpoints), and 405-on-GET coverage.
+
 ## v0.37 — POST /api/admin/audit/note
 
 Programmatic counterpart to the UI's manual-note form (v0.24).
