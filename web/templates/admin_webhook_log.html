@@ -17,12 +17,19 @@
           {{if .WebhookURL}}URL：<code>{{.WebhookURL}}</code>{{else}}<span style="color:var(--text-soft);">webhook 未配置</span>{{end}}
         </div>
       </div>
-      <div style="display:flex; gap:8px;">
-        {{if .OnlyFailed}}
-          <a href="/admin/webhook-log" class="btn outline small" style="width:auto;">显示全部</a>
-        {{else}}
-          <a href="/admin/webhook-log?only_failed=1" class="btn outline small" style="width:auto;">仅显示失败</a>
-        {{end}}
+      <div style="display:flex; gap:8px; flex-wrap:wrap; align-items:center;">
+        <form method="get" action="/admin/webhook-log" style="display:flex; gap:6px; align-items:center; margin:0;">
+          <input name="event_type" value="{{.EventType}}" placeholder="event_type (如 order_paid)"
+                 style="padding:6px 8px; border:1px solid var(--border); border-radius:6px; font-size:13px; width:180px;">
+          <input name="mac" value="{{.MAC}}" placeholder="MAC"
+                 style="padding:6px 8px; border:1px solid var(--border); border-radius:6px; font-size:13px; width:160px;">
+          <label style="display:flex; align-items:center; gap:4px; font-size:13px;">
+            <input type="checkbox" name="only_failed" value="1" {{if .OnlyFailed}}checked{{end}}>
+            仅显示失败
+          </label>
+          <button class="btn outline small" type="submit" style="width:auto;">筛选</button>
+          {{if or .EventType .MAC .OnlyFailed}}<a href="/admin/webhook-log" class="btn ghost small" style="width:auto;">重置</a>{{end}}
+        </form>
         <a href="/admin/maintenance" class="btn outline small" style="width:auto;">发送测试事件</a>
       </div>
     </div>

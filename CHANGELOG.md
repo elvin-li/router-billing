@@ -1,5 +1,30 @@
 # Changelog
 
+## v0.69 — Webhook log: event_type + MAC filters
+
+Closes the filter gap on the third observability page. After
+v0.45 (SMS log filters) and v0.68 (UI phone filter), the
+webhook delivery viewer now also accepts narrowing filters for
+the common "show me everything we tried to send about this
+specific order/MAC" workflow.
+
+  GET /admin/webhook-log?event_type=order_paid&mac=AA:...&only_failed=1
+  GET /api/admin/webhook/log?event_type=order_paid&mac=AA:...&only_failed=1
+
+DB layer: new `WebhookDeliveryFilter` struct with EventType/MAC/
+OnlyFailed/Limit; `RecentWebhookDeliveries(limit, onlyFailed)` is
+now a thin shortcut over `SearchWebhookDeliveries(filter)` so v0.49
+and v0.50 callers keep working unchanged.
+
+UI: inline form on /admin/webhook-log with two text inputs +
+the existing only_failed checkbox; reset link clears all three.
+The "仅显示失败" toggle link in the page header is replaced by
+the same checkbox in the filter form.
+
+5 race-clean tests covering EventType + MAC isolation, the
+EventType+OnlyFailed compose case, page filter form rendering,
+and an end-to-end filter round-trip on the page itself.
+
 ## v0.68 — /admin/sms-log: phone + only_failed UI filters
 
 UI counterpart to v0.45's API filters. The DB-backed sms_log table

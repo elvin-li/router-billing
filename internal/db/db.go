@@ -2164,19 +2164,47 @@ func (d *DB) LogWebhookDelivery(ctx context.Context, eventType, mac string, atte
 	return err
 }
 
-// RecentWebhookDeliveries returns rows newest first. Default 100, cap 1000.
-// onlyFailed=true filters to success=0 rows.
+// WebhookDeliveryFilter restricts which rows SearchWebhookDeliveries
+// returns. Empty/zero fields are ignored.
+type WebhookDeliveryFilter struct {
+	EventType  string // exact match
+	MAC        string // exact match
+	OnlyFailed bool   // success = 0
+	Limit      int    // default 100, cap 1000
+}
+
+// RecentWebhookDeliveries is the legacy shortcut over SearchWebhookDeliveries
+// kept for v0.49-era callers.
 func (d *DB) RecentWebhookDeliveries(ctx context.Context, limit int, onlyFailed bool) ([]WebhookDeliveryEntry, error) {
+	return d.SearchWebhookDeliveries(ctx, WebhookDeliveryFilter{
+		Limit:      limit,
+		OnlyFailed: onlyFailed,
+	})
+}
+
+// SearchWebhookDeliveries returns rows newest-first matching the filter.
+func (d *DB) SearchWebhookDeliveries(ctx context.Context, f WebhookDeliveryFilter) ([]WebhookDeliveryEntry, error) {
+	limit := f.Limit
 	if limit <= 0 || limit > 1000 {
 		limit = 100
 	}
-	q := `SELECT id, sent_at, event_type, mac, attempt, status_code, success, duration_ms, error_msg
-	      FROM webhook_deliveries`
-	if onlyFailed {
-		q += ` WHERE success = 0`
+	var sb strings.Builder
+	sb.WriteString(`SELECT id, sent_at, event_type, mac, attempt, status_code, success, duration_ms, error_msg FROM webhook_deliveries WHERE 1=1`)
+	args := []any{}
+	if f.EventType != "" {
+		sb.WriteString(` AND event_type = ?`)
+		args = append(args, f.EventType)
 	}
-	q += ` ORDER BY id DESC LIMIT ?`
-	rows, err := d.conn.QueryContext(ctx, q, limit)
+	if f.MAC != "" {
+		sb.WriteString(` AND mac = ?`)
+		args = append(args, f.MAC)
+	}
+	if f.OnlyFailed {
+		sb.WriteString(` AND success = 0`)
+	}
+	sb.WriteString(` ORDER BY id DESC LIMIT ?`)
+	args = append(args, limit)
+	rows, err := d.conn.QueryContext(ctx, sb.String(), args...)
 	if err != nil {
 		return nil, err
 	}

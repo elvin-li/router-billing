@@ -1224,8 +1224,12 @@ func (a *App) handleAPIWebhookLog(w http.ResponseWriter, r *http.Request, _ stri
 			limit = n
 		}
 	}
-	onlyFailed := q.Get("only_failed") == "1"
-	logs, err := a.DB.RecentWebhookDeliveries(r.Context(), limit, onlyFailed)
+	logs, err := a.DB.SearchWebhookDeliveries(r.Context(), db.WebhookDeliveryFilter{
+		EventType:  strings.TrimSpace(q.Get("event_type")),
+		MAC:        strings.TrimSpace(q.Get("mac")),
+		OnlyFailed: q.Get("only_failed") == "1",
+		Limit:      limit,
+	})
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 		return

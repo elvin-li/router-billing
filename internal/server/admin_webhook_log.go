@@ -7,15 +7,30 @@ package server
 
 import (
 	"net/http"
+	"strings"
+
+	"router-billing/internal/db"
 )
 
-// GET /admin/webhook-log?only_failed=1
+// GET /admin/webhook-log?event_type=&mac=&only_failed=1
+//
+// v0.69 wires the new EventType + MAC filters from SearchWebhookDeliveries
+// through to the UI so admins can drill into "all `order_paid` events for
+// this customer's MAC" without scraping JSON.
 func (a *App) handleAdminWebhookLog(w http.ResponseWriter, r *http.Request) {
-	onlyFailed := r.URL.Query().Get("only_failed") == "1"
-	logs, _ := a.DB.RecentWebhookDeliveries(r.Context(), 200, onlyFailed)
+	q := r.URL.Query()
+	f := db.WebhookDeliveryFilter{
+		EventType:  strings.TrimSpace(q.Get("event_type")),
+		MAC:        strings.TrimSpace(q.Get("mac")),
+		OnlyFailed: q.Get("only_failed") == "1",
+		Limit:      200,
+	}
+	logs, _ := a.DB.SearchWebhookDeliveries(r.Context(), f)
 	a.render(w, "admin_webhook_log.html", a.adminCtx(r, "webhook-log", map[string]any{
 		"Logs":       logs,
-		"OnlyFailed": onlyFailed,
+		"OnlyFailed": f.OnlyFailed,
+		"EventType":  f.EventType,
+		"MAC":        f.MAC,
 		"WebhookURL": a.Cfg.Webhook.URL,
 	}))
 }
