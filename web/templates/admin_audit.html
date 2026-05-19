@@ -62,6 +62,26 @@
     </section>
 
     <section class="admin-card">
+      <details>
+        <summary style="cursor:pointer; font-weight:600; color:var(--text-soft);">手动添加备注</summary>
+        {{if eq .OK "note"}}<div class="flash ok">备注已写入审计日志</div>{{end}}
+        {{if eq .Err "empty_note"}}<div class="flash err">备注不能为空</div>{{end}}
+        <p class="desc" style="margin-top:10px;">用于线下 / 出于审计目的的临时记录，例如「电话与客户确认丢失手机」。最长 1000 字符。</p>
+        <form method="post" action="/admin/audit/note" class="form-grid" style="margin-top:10px;">
+          {{template "csrf" .}}
+          <div class="field" style="grid-column:1/-1;">
+            <textarea name="note" rows="3" maxlength="1000" required
+                      style="font-family:inherit; padding:9px 11px; border:1px solid var(--border); border-radius:8px; font-size:13px; width:100%;"
+                      placeholder="（输入备注内容，提交后写入审计日志）"></textarea>
+          </div>
+          <div class="field-actions">
+            <button class="btn outline" type="submit">写入</button>
+          </div>
+        </form>
+      </details>
+    </section>
+
+    <section class="admin-card">
       <div class="table-wrap">
         <table class="data">
           <thead><tr>

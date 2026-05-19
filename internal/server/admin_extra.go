@@ -44,6 +44,42 @@ func (a *App) handleAdminHealth(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// POST /admin/audit/note  {note}
+//
+// Lets an admin write a free-text manual entry into the audit log. Useful
+// for out-of-band actions: "refund issued via Aliyun console", "user
+// called and confirmed they lost their phone", etc. Actor is the admin's
+// username; action is "manual_note"; target is empty; detail is the
+// supplied text.
+func (a *App) handleAdminAuditNote(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Redirect(w, r, "/admin/audit", http.StatusSeeOther)
+		return
+	}
+	if err := r.ParseForm(); err != nil {
+		http.Error(w, "form", http.StatusBadRequest)
+		return
+	}
+	note := strings.TrimSpace(r.PostForm.Get("note"))
+	if note == "" {
+		http.Redirect(w, r, "/admin/audit?err=empty_note", http.StatusSeeOther)
+		return
+	}
+	if len(note) > 1000 {
+		note = note[:1000]
+	}
+	// Try to attribute to the actual admin username — read it from the
+	// session subject.
+	actor := "admin"
+	if c, err := r.Cookie(adminCookieName); err == nil {
+		if sess, _ := a.DB.GetSession(r.Context(), c.Value); sess != nil && sess.Subject != "" {
+			actor = "admin:" + sess.Subject
+		}
+	}
+	a.DB.Audit(r.Context(), actor, "manual_note", "", note+" ip="+clientIP(r))
+	http.Redirect(w, r, "/admin/audit?ok=note", http.StatusSeeOther)
+}
+
 // GET /admin/audit?actor=&action=&target=&since=&until=  → HTML
 func (a *App) handleAdminAudit(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query()
