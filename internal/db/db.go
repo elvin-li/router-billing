@@ -1326,6 +1326,24 @@ func (d *DB) UpsertSighting(ctx context.Context, mac, ip, hostname string) error
 	return err
 }
 
+// GetSightingForMAC returns the latest sighting row for a single MAC, or
+// nil if the network detector has never seen it. Used by the v0.48 MAC
+// detail page (v0.73) to show "last online: 2 hours ago at 192.168.5.42".
+func (d *DB) GetSightingForMAC(ctx context.Context, mac string) (*models.Sighting, error) {
+	row := d.conn.QueryRowContext(ctx,
+		`SELECT mac, last_ip, hostname, first_seen, last_seen FROM device_sightings WHERE mac = ?`,
+		mac)
+	var s models.Sighting
+	err := row.Scan(&s.MAC, &s.LastIP, &s.Hostname, &s.FirstSeen, &s.LastSeen)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	return &s, nil
+}
+
 func (d *DB) ListRecentSightings(ctx context.Context, since time.Duration) ([]models.Sighting, error) {
 	cutoff := time.Now().UTC().Add(-since)
 	rows, err := d.conn.QueryContext(ctx,

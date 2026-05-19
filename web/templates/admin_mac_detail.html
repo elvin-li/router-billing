@@ -44,6 +44,19 @@
             {{if .Owner}}<a href="/admin/users/detail?id={{.Owner.ID}}">{{.Owner.Phone}}</a>{{else}}<span style="color:var(--text-soft);">未绑定</span>{{end}}
           </td></tr>
           <tr><th style="text-align:left;">更新时间</th><td>{{formatTime .MAC.UpdatedAt}}</td></tr>
+          {{if .Sighting}}
+          <tr><th style="text-align:left;">最近在线</th><td>
+            <span class="pill active" title="ARP / dnsmasq lease 探测时间">在线</span>
+            <span style="color:var(--text-soft); margin-left:8px;">
+              {{formatTime .Sighting.LastSeen}}
+              {{if .Sighting.LastIP}}· <code>{{.Sighting.LastIP}}</code>{{end}}
+              {{if .Sighting.Hostname}}· <code>{{.Sighting.Hostname}}</code>{{end}}
+            </span>
+          </td></tr>
+          <tr><th style="text-align:left;">首次发现</th><td style="color:var(--text-soft);">{{formatTime .Sighting.FirstSeen}}</td></tr>
+          {{else}}
+          <tr><th style="text-align:left;">最近在线</th><td><span style="color:var(--text-soft);">无网络探测记录（设备未曾出现在 ARP / dnsmasq）</span></td></tr>
+          {{end}}
         </tbody>
       </table>
     </section>

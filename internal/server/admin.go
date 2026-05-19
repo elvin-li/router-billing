@@ -992,11 +992,15 @@ func (a *App) handleAdminMACDetail(w http.ResponseWriter, r *http.Request) {
 		Target: normalized,
 		Limit:  200,
 	})
+	// v0.73: last-seen from the device-sightings table so support can tell
+	// "is this device online right now?" without flipping to /admin/devices.
+	sighting, _ := a.DB.GetSightingForMAC(r.Context(), normalized)
 	a.render(w, "admin_mac_detail.html", a.adminCtx(r, "macs", map[string]any{
 		"MAC":      m,
 		"Owner":    owner,
 		"Orders":   orders,
 		"Timeline": timeline,
+		"Sighting": sighting,
 	}))
 }
 

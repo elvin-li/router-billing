@@ -1,5 +1,28 @@
 # Changelog
 
+## v0.73 — MAC detail page: last-seen sighting
+
+Adds a "最近在线" row to /admin/macs/detail (v0.48) populated from
+the device_sightings table. Support workflow: customer says
+"my phone isn't connecting" — admin can immediately see whether
+the device has been detected by ARP / dnsmasq recently, and what
+IP it grabbed.
+
+  最近在线: [在线] 2026-05-19 13:42 · 192.168.5.42 · roommate-phone
+  首次发现: 2026-05-12 09:30
+
+When no sighting exists (device never connected to the paid SSID),
+the row shows "无网络探测记录" so it's clear the detector hasn't
+seen the MAC at all (vs simply offline at this moment).
+
+New `db.GetSightingForMAC(ctx, mac)` — single-row lookup;
+returns (nil, nil) on no row to distinguish "missing" from
+"error."
+
+3 race-clean tests: full info renders with seeded sighting,
+the no-sighting hint appears when row absent, DB-level missing
+returns nil.
+
 ## v0.72 — /admin/audit actor autocomplete (datalist)
 
 The actor filter input previously required typing the exact actor
