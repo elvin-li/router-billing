@@ -19,7 +19,7 @@
         </div>
       </div>
       <div style="display:flex; gap:8px;">
-        <a href="/admin/export/audit.csv?actor={{.Filter.Actor}}&action={{.Filter.Action}}&target={{.Filter.Target}}&since={{.Filter.Since}}&until={{.Filter.Until}}" class="btn outline small" style="width:auto;">
+        <a href="/admin/export/audit.csv?actor={{.Filter.Actor}}&action={{.Filter.Action}}&target={{.Filter.Target}}&q={{.Filter.Q}}&since={{.Filter.Since}}&until={{.Filter.Until}}" class="btn outline small" style="width:auto;">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="width:14px;height:14px;"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
           导出 CSV
         </a>
@@ -45,6 +45,10 @@
         <div class="field">
           <label>目标（模糊匹配）</label>
           <input name="target" value="{{.Filter.Target}}" placeholder="MAC / 订单号 / 用户ID">
+        </div>
+        <div class="field">
+          <label>详情关键字</label>
+          <input name="q" value="{{.Filter.Q}}" placeholder="如 via=api / ip=10.0.0">
         </div>
         <div class="field">
           <label>起始日期</label>

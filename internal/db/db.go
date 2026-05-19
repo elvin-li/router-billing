@@ -1906,6 +1906,7 @@ type AuditFilter struct {
 	Actor  string // substring (LIKE %s%)
 	Action string // exact match
 	Target string // substring
+	Q      string // substring on detail (v0.54)
 	Since  string // YYYY-MM-DD (inclusive)
 	Until  string // YYYY-MM-DD (inclusive)
 	Limit  int
@@ -1929,6 +1930,10 @@ func (d *DB) SearchAudit(ctx context.Context, f AuditFilter) ([]AuditEntry, erro
 	if f.Target != "" {
 		sb.WriteString(` AND target LIKE ?`)
 		args = append(args, "%"+f.Target+"%")
+	}
+	if f.Q != "" {
+		sb.WriteString(` AND detail LIKE ?`)
+		args = append(args, "%"+f.Q+"%")
 	}
 	if f.Since != "" {
 		sb.WriteString(` AND date(at) >= date(?)`)

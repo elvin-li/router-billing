@@ -307,6 +307,7 @@ func (a *App) handleAPIAuditList(w http.ResponseWriter, r *http.Request, _ strin
 		Actor:  q.Get("actor"),
 		Action: q.Get("action"),
 		Target: q.Get("target"),
+		Q:      q.Get("q"),
 		Since:  q.Get("since"),
 		Until:  q.Get("until"),
 		Limit:  limit,

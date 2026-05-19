@@ -1,5 +1,31 @@
 # Changelog
 
+## v0.54 — Audit 详情关键字搜索 (q=…)
+
+The existing `actor` / `action` / `target` filters covered the
+columns but not the `detail` column where most context lives
+("ip=...", "via=api", "phone=...", "err=..."). Adding a `q`
+substring filter on detail makes the audit page actually
+searchable for free-text incident review.
+
+  GET /admin/audit?q=via=api          ← only API-origin actions
+  GET /admin/audit?q=ip=10.0.0        ← only entries from this IP
+  GET /admin/audit?q=upstream timeout ← only SMS retry failures
+  GET /api/admin/audit?q=...&action=grant
+
+Composes with the other filters (action=grant AND q=upstream
+timeout returns the grants whose detail mentions that text).
+
+Wired end-to-end:
+- New `Q string` field on `db.AuditFilter` (LIKE %s%)
+- /admin/audit page input "详情关键字"
+- /api/admin/audit accepts `?q=`
+- CSV export link in the audit page passes the q through
+
+4 race-clean tests: DB-level Q on a 3-row fixture, Q+action
+compose case, /api/admin/audit?q= round-trip, /admin/audit page
+renders the input.
+
 ## v0.53 — UI 取消按钮（v0.52 的 UI 对应）
 
 Inline "取消" button on each pending row in /admin/orders. Same
