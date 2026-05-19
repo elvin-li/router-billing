@@ -1,5 +1,20 @@
 # Changelog
 
+## v0.88 — /admin/macs shows notes inline
+
+Makes v0.82's per-MAC notes visible at-a-glance from the list view.
+Previously you had to click into /admin/macs/detail to see notes.
+
+  phone
+  📝 IPTV box, expected high traffic   (full text via title=)
+
+`text-overflow: ellipsis` at 240px max-width keeps rows compact;
+title="..." preserves the full text on hover. No 📝 marker when
+notes are empty — silence is the default.
+
+2 race-clean tests: seeded notes appear inline with marker,
+no-notes row stays clean (no spurious marker in row chunk).
+
 ## v0.87 — POST /api/admin/macs/label (programmatic rename)
 
 Pairs with v0.84's /api/admin/macs/notes — admins can now rename
