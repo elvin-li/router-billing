@@ -1,0 +1,113 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>订单 {{.Order.OrderNo}} · router-billing</title>
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body class="admin">
+<div class="admin-shell">
+  {{template "admin-sidebar" .}}
+  <main class="admin-main">
+    <div class="admin-header">
+      <div>
+        <h1>
+          <a href="/admin/orders" style="color:var(--text-soft); text-decoration:none;">← 订单</a>
+          / <code>{{.Order.OrderNo}}</code>
+        </h1>
+        <div class="crumbs">
+          {{if eq (printf "%s" .Order.Status) "paid"}}<span class="pill paid">已支付</span>
+          {{else if eq (printf "%s" .Order.Status) "pending"}}<span class="pill pending">待支付</span>
+          {{else if eq (printf "%s" .Order.Status) "failed"}}<span class="pill failed">失败</span>
+          {{else if eq (printf "%s" .Order.Status) "refunded"}}<span class="pill blocked">已退款</span>
+          {{else}}<span class="pill expired">{{.Order.Status}}</span>{{end}}
+          · 创建于 {{formatTime .Order.CreatedAt}}
+        </div>
+      </div>
+    </div>
+
+    {{template "flash" .}}
+
+    <section class="admin-card">
+      <h2 style="margin-top:0;">订单信息</h2>
+      <table class="data">
+        <tbody>
+          <tr><th style="text-align:left;width:140px;">订单号</th><td class="mono">{{.Order.OrderNo}}</td></tr>
+          <tr><th style="text-align:left;">套餐</th><td>{{.Order.Plan}} · {{.Order.Days}} 天</td></tr>
+          <tr><th style="text-align:left;">金额</th><td>¥{{formatYuan .Order.AmountCents}}</td></tr>
+          <tr><th style="text-align:left;">支付方式</th><td>{{.Order.PaymentMethod}}</td></tr>
+          {{if .Order.TradeNo}}<tr><th style="text-align:left;">流水号</th><td class="mono">{{.Order.TradeNo}}</td></tr>{{end}}
+          <tr><th style="text-align:left;">用户</th><td>
+            {{if .Order.UserID}}<a href="/admin/users/detail?id={{.Order.UserID}}">user #{{.Order.UserID}}</a>{{else}}<span style="color:var(--text-soft);">未登录</span>{{end}}
+          </td></tr>
+          <tr><th style="text-align:left;">MAC</th><td class="mono">{{.Order.Mac}}</td></tr>
+          {{if .Order.PaidAt}}<tr><th style="text-align:left;">支付时间</th><td>{{formatTimePtr .Order.PaidAt}}</td></tr>{{end}}
+        </tbody>
+      </table>
+    </section>
+
+    {{if .MAC}}
+    <section class="admin-card">
+      <h2 style="margin-top:0;">关联 MAC 当前状态</h2>
+      <table class="data">
+        <tbody>
+          <tr><th style="text-align:left;width:140px;">MAC</th><td class="mono">{{.MAC.Mac}}</td></tr>
+          <tr><th style="text-align:left;">备注</th><td>{{.MAC.Label}}</td></tr>
+          <tr><th style="text-align:left;">状态</th><td>
+            {{if eq (printf "%s" .MAC.Status) "active"}}<span class="pill active">活跃</span>
+            {{else if eq (printf "%s" .MAC.Status) "blocked"}}<span class="pill blocked">已封禁</span>
+            {{else}}<span class="pill expired">已过期</span>{{end}}
+          </td></tr>
+          <tr><th style="text-align:left;">到期时间</th><td>{{formatTime .MAC.ExpiresAt}}</td></tr>
+        </tbody>
+      </table>
+    </section>
+    {{else}}
+    <section class="admin-card" style="border-left:4px solid var(--warning); background:#fffbeb;">
+      <p>关联的 MAC <code>{{.Order.Mac}}</code> 已不存在（可能被删除或退款后回收）。审计时间线仍可查看。</p>
+    </section>
+    {{end}}
+
+    <section class="admin-card">
+      <h2 style="margin-top:0;">时间线 · 审计日志 ({{len .Timeline}})</h2>
+      {{if .Timeline}}
+      <div class="table-wrap">
+        <table class="data">
+          <thead><tr><th>时间</th><th>操作者</th><th>动作</th><th>详情</th></tr></thead>
+          <tbody>
+            {{range .Timeline}}
+            <tr>
+              <td style="white-space:nowrap;">{{formatTime .At}}</td>
+              <td class="mono">{{.Actor}}</td>
+              <td><code>{{.Action}}</code></td>
+              <td style="font-size:12px; color:var(--text-soft);">{{.Detail}}</td>
+            </tr>
+            {{end}}
+          </tbody>
+        </table>
+      </div>
+      {{else}}
+      <p class="hint" style="color:var(--text-soft); font-size:13px;">无审计记录。订单可能仅刚创建，尚未发生退款/手动备注等动作。</p>
+      {{end}}
+    </section>
+
+    {{if eq (printf "%s" .Order.Status) "paid"}}
+    <section class="admin-card" style="border-left:4px solid var(--danger);">
+      <h2 style="margin-top:0;">退款</h2>
+      <form method="post" action="/admin/orders/refund"
+            onsubmit="return confirm('确认对 {{.Order.OrderNo}} 退款？此操作会回滚 MAC 到期时间。');">
+        {{template "csrf" .}}
+        <input type="hidden" name="order_no" value="{{.Order.OrderNo}}">
+        <input type="hidden" name="confirm_order_no" value="{{.Order.OrderNo}}">
+        <label style="display:block; margin-bottom:8px;">原因（可选）
+          <input name="reason" type="text" placeholder="如：客户重复支付" style="width:100%; padding:6px 8px; border:1px solid var(--border); border-radius:6px;">
+        </label>
+        <button class="btn danger" type="submit">提交退款</button>
+      </form>
+    </section>
+    {{end}}
+  </main>
+</div>
+</body>
+</html>

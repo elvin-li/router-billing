@@ -62,7 +62,7 @@
           <tbody>
             {{range .Orders}}
             <tr>
-              <td class="mono" style="font-size:12px;color:#64748b;">{{.OrderNo}}</td>
+              <td class="mono" style="font-size:12px;"><a href="/admin/orders/detail?order_no={{.OrderNo}}" style="color:#64748b; text-decoration:none;" title="查看完整时间线">{{.OrderNo}}</a></td>
               <td class="mono">{{.Mac}}</td>
               <td>{{.Plan}} <span style="color:#94a3b8;">({{.Days}}天)</span></td>
               <td><strong>¥{{formatYuan .AmountCents}}</strong></td>

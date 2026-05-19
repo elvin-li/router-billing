@@ -188,6 +188,7 @@ func (a *App) Routes() http.Handler {
 	mux.HandleFunc("/admin/macs/schedule", a.requireAdmin(a.handleAdminMACSchedule))
 	mux.HandleFunc("/admin/devices", a.requireAdmin(a.handleAdminDevices))
 	mux.HandleFunc("/admin/orders", a.requireAdmin(a.handleAdminOrders))
+	mux.HandleFunc("/admin/orders/detail", a.requireAdmin(a.handleAdminOrderDetail))
 	mux.HandleFunc("/admin/orders/refund", a.requireAdmin(a.handleAdminOrderRefund))
 	mux.HandleFunc("/admin/users", a.requireAdmin(a.handleAdminUsers))
 	mux.HandleFunc("/admin/users/detail", a.requireAdmin(a.handleAdminUserDetail))

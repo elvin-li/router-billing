@@ -1,5 +1,34 @@
 # Changelog
 
+## v0.42 — /admin/orders/detail?order_no=… (timeline view)
+
+Support workflow: customer emails about a specific order, support
+agent pastes the order_no into the URL, sees the full timeline in
+one page — instead of grep-ing the audit table separately.
+
+  GET /admin/orders/detail?order_no=ORD-...
+
+The page renders:
+- The order row (number, plan, amount, payment method, trade_no,
+  user link, MAC, paid_at)
+- Current MAC state (or a warning banner if the MAC was deleted
+  post-order — audit still rendered so the history is intact)
+- Audit timeline targeting this order_no (covers `order_paid`,
+  `order_refunded`, `manual_note`, etc.), up to 200 rows
+- Inline refund button (only for `paid` orders) with the same
+  confirmation flow as the orders list
+
+The `/admin/orders` list now turns the order_no cell into a link
+to the detail page so the workflow is `click → see history`.
+
+5 race-clean tests:
+- Full-render check with 2 seeded audit rows
+- Missing order_no param → redirect to /admin/orders
+- Bad order_no → /admin/orders?err=not_found
+- Order whose MAC has been deleted → warning banner + page still
+  renders the order info + timeline
+- Orders list links to detail via the order_no cell
+
 ## v0.41 — Voucher CSV export filter by status
 
   GET /admin/vouchers/export.csv?batch=...&status=unused|redeemed|revoked|expired

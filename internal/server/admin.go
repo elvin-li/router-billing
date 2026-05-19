@@ -929,6 +929,45 @@ func (a *App) handleAdminOrders(w http.ResponseWriter, r *http.Request) {
 	}))
 }
 
+// GET /admin/orders/detail?order_no=...
+//
+// Single-order drilldown: the order row + linked MAC current state + the
+// audit timeline of everything that ever touched this order_no. Support
+// gets this URL from a customer's order email and sees the full history
+// without having to grep the audit table separately.
+//
+// The audit search is target=order_no (covers grant/refund rows) UNION
+// rows where detail mentions the order_no (covers manual notes that
+// reference it). Limited to 200 rows — orders this dense are vanishingly
+// rare.
+func (a *App) handleAdminOrderDetail(w http.ResponseWriter, r *http.Request) {
+	orderNo := strings.TrimSpace(r.URL.Query().Get("order_no"))
+	if orderNo == "" {
+		http.Redirect(w, r, "/admin/orders", http.StatusSeeOther)
+		return
+	}
+	order, err := a.DB.GetOrder(r.Context(), orderNo)
+	if err != nil || order == nil {
+		http.Redirect(w, r, "/admin/orders?err=not_found", http.StatusSeeOther)
+		return
+	}
+	// Current MAC state (may be nil if the MAC was deleted post-order — show
+	// the order row anyway so the audit trail still makes sense).
+	mac, _ := a.DB.GetMAC(r.Context(), order.Mac)
+
+	// Audit rows targeting this order_no specifically.
+	timeline, _ := a.DB.SearchAudit(r.Context(), db.AuditFilter{
+		Target: orderNo,
+		Limit:  200,
+	})
+
+	a.render(w, "admin_order_detail.html", a.adminCtx(r, "orders", map[string]any{
+		"Order":    order,
+		"MAC":      mac,
+		"Timeline": timeline,
+	}))
+}
+
 // POST /admin/orders/refund  {order_no, confirm_order_no, reason?}
 //
 // Marks a paid order as refunded AND rolls back the MAC's expires_at by
