@@ -1,5 +1,25 @@
 # Changelog
 
+## v0.77 — GET /api/admin/sessions
+
+Programmatic mirror of /admin/sessions. Useful for monitoring:
+"alert if admin sessions > expected" or trend user concurrent-
+session counts.
+
+  GET /api/admin/sessions?kind=admin|user   Bearer <any-token>
+  -> 200 { "sessions": [ {kind, subject, user_id, expires_at}, ...
+         ], "count": N }
+
+Critical: response NEVER includes the session token. Leaking it
+would effectively hand the holder full auth. Anti-leak test pins
+this red line so a refactor can't accidentally widen the response.
+
+kind filter is exact ("admin" / "user" / empty). Anything else
+→ 400.
+
+5 race-clean tests including the token anti-leak red-line, kind
+filter, bad-kind 400, readonly accepted.
+
 ## v0.76 — /admin/devices links known MACs to detail page
 
 Small navigation polish. The /admin/devices online-devices table

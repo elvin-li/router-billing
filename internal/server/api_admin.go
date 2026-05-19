@@ -201,6 +201,59 @@ func (a *App) handleAPIMACList(w http.ResponseWriter, r *http.Request, _ string)
 	writeJSON(w, http.StatusOK, map[string]any{"macs": macs, "count": len(macs)})
 }
 
+// GET /api/admin/sessions?kind=admin|user   Bearer <any-token>
+//
+// Programmatic mirror of /admin/sessions. Returns active session rows
+// for monitoring (e.g. alert if admin session count > expected, or
+// chart user concurrent-session trends).
+//
+//	-> 200 { "sessions": [ {kind, subject, user_id, expires_at}, ... ],
+//	         "count": N }
+//
+// Token fields are NEVER returned — leaking a session token would
+// effectively give the holder all the auth those sessions have.
+// kind filter: "admin" or "user" or empty (both).
+//
+// Read-only token acceptable.
+func (a *App) handleAPISessions(w http.ResponseWriter, r *http.Request, _ string) {
+	if r.Method != http.MethodGet {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "GET only"})
+		return
+	}
+	kindFilter := strings.TrimSpace(r.URL.Query().Get("kind"))
+	if kindFilter != "" && kindFilter != "admin" && kindFilter != "user" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "kind must be admin or user"})
+		return
+	}
+	all, err := a.DB.ListActiveSessions(r.Context(), 500)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+	// Deliberately no Token / IsCurrent fields — leaking a session token
+	// would effectively hand the holder authentication.
+	type apiSession struct {
+		Kind      string    `json:"kind"`
+		Subject   string    `json:"subject,omitempty"`
+		UserID    *int64    `json:"user_id,omitempty"`
+		ExpiresAt time.Time `json:"expires_at"`
+	}
+	out := make([]apiSession, 0, len(all))
+	for _, s := range all {
+		if kindFilter != "" && s.Kind != kindFilter {
+			continue
+		}
+		out = append(out, apiSession{
+			Kind: s.Kind, Subject: s.Subject, UserID: s.UserID,
+			ExpiresAt: s.ExpiresAt,
+		})
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"sessions": out,
+		"count":    len(out),
+	})
+}
+
 // GET /api/admin/audit/distinct?field=actor|action   Bearer <any-token>
 //
 // Returns the distinct set of audit_log.<field> values, sorted, for
