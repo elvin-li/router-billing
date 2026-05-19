@@ -2046,6 +2046,45 @@ func (d *DB) DistinctAuditActions(ctx context.Context) ([]string, error) {
 	return out, rows.Err()
 }
 
+// AuditActionTotal is one row of "this action happened N times in the
+// window." Returned by CountAuditActionsByDate.
+type AuditActionTotal struct {
+	Action string
+	Count  int
+}
+
+// CountAuditActionsByDate returns the action-counts in the given window.
+// Empty Since/Until strings mean "no bound." Useful for ops dashboards
+// answering "how many grants vs revokes vs logins this week?"
+func (d *DB) CountAuditActionsByDate(ctx context.Context, since, until string) ([]AuditActionTotal, error) {
+	var sb strings.Builder
+	sb.WriteString(`SELECT action, COUNT(*) FROM audit_log WHERE 1=1`)
+	args := []any{}
+	if since != "" {
+		sb.WriteString(` AND date(at) >= date(?)`)
+		args = append(args, since)
+	}
+	if until != "" {
+		sb.WriteString(` AND date(at) <= date(?)`)
+		args = append(args, until)
+	}
+	sb.WriteString(` GROUP BY action ORDER BY COUNT(*) DESC, action`)
+	rows, err := d.conn.QueryContext(ctx, sb.String(), args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []AuditActionTotal
+	for rows.Next() {
+		var t AuditActionTotal
+		if err := rows.Scan(&t.Action, &t.Count); err != nil {
+			return nil, err
+		}
+		out = append(out, t)
+	}
+	return out, rows.Err()
+}
+
 // DistinctAuditActors returns the unique actors present in the log,
 // sorted. Used by the /admin/audit page's actor input as a datalist
 // autocomplete source so operators don't have to remember the exact

@@ -1,5 +1,28 @@
 # Changelog
 
+## v0.85 — GET /api/admin/audit/totals
+
+Action-frequency report over a date range. Useful for ops
+dashboards charting "grants this week vs last" or compliance
+summaries like "Q2: 1234 logins, 567 grants, 89 revokes."
+
+  GET /api/admin/audit/totals?since=YYYY-MM-DD&until=YYYY-MM-DD
+       Bearer <any-token>
+  -> 200 { "totals": [ {"action": "grant", "count": 42}, ... ],
+           "total":  N }
+
+`total` is the pre-summed cross-action count so dashboards don't
+have to add. Results sorted DESC by count (then by action name)
+so the most-frequent action lands first.
+
+Empty since/until = no bound. Read-only token acceptable.
+
+New DB helper `CountAuditActionsByDate(ctx, since, until)`.
+
+5 race-clean tests: 4-row fixture confirms per-action counts +
+sum, future-since yields 0, sort puts popular before rare,
+readonly accepted, POST → 405.
+
 ## v0.84 — POST /api/admin/macs/notes (programmatic notes write)
 
 Programmatic equivalent of v0.82's UI notes form. Useful for sync

@@ -410,6 +410,46 @@ func (a *App) handleAPISessions(w http.ResponseWriter, r *http.Request, _ string
 	})
 }
 
+// GET /api/admin/audit/totals?since=YYYY-MM-DD&until=YYYY-MM-DD   Bearer <any-token>
+//
+// Returns action-frequency counts over the date range. Useful for ops
+// dashboards charting "grants this week vs last week" or for compliance
+// reports needing "X logins, Y grants, Z revokes during this quarter."
+//
+//	-> 200 { "totals": [ {"action": "grant", "count": 42}, ... ],
+//	         "total":  N }
+//
+// `total` is the sum across all actions (so the caller doesn't have to
+// add them up again). Read-only token acceptable.
+func (a *App) handleAPIAuditTotals(w http.ResponseWriter, r *http.Request, _ string) {
+	if r.Method != http.MethodGet {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "GET only"})
+		return
+	}
+	q := r.URL.Query()
+	totals, err := a.DB.CountAuditActionsByDate(r.Context(),
+		strings.TrimSpace(q.Get("since")),
+		strings.TrimSpace(q.Get("until")))
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+	type apiTotal struct {
+		Action string `json:"action"`
+		Count  int    `json:"count"`
+	}
+	out := make([]apiTotal, 0, len(totals))
+	sum := 0
+	for _, t := range totals {
+		out = append(out, apiTotal{Action: t.Action, Count: t.Count})
+		sum += t.Count
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"totals": out,
+		"total":  sum,
+	})
+}
+
 // GET /api/admin/audit/distinct?field=actor|action   Bearer <any-token>
 //
 // Returns the distinct set of audit_log.<field> values, sorted, for
