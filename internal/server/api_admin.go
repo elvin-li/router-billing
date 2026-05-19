@@ -16,6 +16,7 @@
 package server
 
 import (
+	"context"
 	"encoding/json"
 	"log"
 	"net/http"
@@ -366,6 +367,69 @@ type apiRevokeReq struct {
 type apiSMSReq struct {
 	Phone   string `json:"phone"`
 	Message string `json:"message"`
+}
+
+type apiRefundReq struct {
+	OrderNo string `json:"order_no"`
+	Reason  string `json:"reason,omitempty"`
+}
+
+// POST /api/admin/orders/refund  Bearer <write-token>
+//   { "order_no": "...", "reason": "..." }
+//
+// Programmatic refund — same atomic DB transition as the UI button
+// (MarkOrderRefunded rolls back the MAC's expires_at + sets status to
+// "refunded"). Useful for chargeback automation tied to webhook
+// handlers on the gateway side. Write-scope only.
+//
+// Returns the post-state MAC summary so the caller can confirm the
+// expiry rollback landed.
+func (a *App) handleAPIOrderRefund(w http.ResponseWriter, r *http.Request, actor string) {
+	if r.Method != http.MethodPost {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "POST only"})
+		return
+	}
+	var req apiRefundReq
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "bad json: " + err.Error()})
+		return
+	}
+	orderNo := strings.TrimSpace(req.OrderNo)
+	if orderNo == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "order_no required"})
+		return
+	}
+	reason := strings.TrimSpace(req.Reason)
+	if len(reason) > 200 {
+		reason = reason[:200]
+	}
+	mac, err := a.DB.MarkOrderRefunded(r.Context(), orderNo, reason)
+	if err != nil {
+		log.Printf("api refund %s: %v", orderNo, err)
+		status := http.StatusInternalServerError
+		switch {
+		case strings.Contains(err.Error(), "not found"):
+			status = http.StatusNotFound
+		case strings.Contains(err.Error(), "only paid"):
+			status = http.StatusConflict
+		}
+		writeJSON(w, status, map[string]string{"error": err.Error()})
+		return
+	}
+	a.DB.Audit(r.Context(), actor, "order_refunded", orderNo,
+		"reason="+reason+" via=api ip="+clientIP(r))
+	if mac != nil && mac.Status == models.MACExpired {
+		go func() {
+			ctx := context.Background()
+			if err := a.MACSvc.Resync(ctx); err != nil {
+				log.Printf("api refund post-resync: %v", err)
+			}
+		}()
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"status": "refunded",
+		"mac":    mac,
+	})
 }
 
 // POST /api/admin/sms/send  {phone, message}
