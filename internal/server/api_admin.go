@@ -117,13 +117,86 @@ func (a *App) handleAPIHealth(w http.ResponseWriter, r *http.Request, _ string) 
 }
 
 // GET /api/admin/macs
+// GET /api/admin/macs?q=&status=&user_id=&limit=
+//
+// Pre-v0.40 returned every MAC unfiltered (which could be 10k+ on a
+// long-running install — way too much over a slow link). Now accepts:
+//
+//	q       — substring match on MAC/label (via existing SearchMACs)
+//	status  — active|expired|blocked (exact match)
+//	user_id — int; returns only MACs owned by that user
+//	limit   — int, default 200, cap 1000
+//
+// When user_id is set it routes through the indexed ListMACsForUser path;
+// q/status post-filter the result in Go since the row count is bounded
+// by what one user owns (a few dozen at most). Without user_id, the
+// substring/status filter goes through SearchMACs.
+//
+// Empty filters → 200 most recent MACs (preserves the original semantic
+// for callers that don't pass any params, just with a sane row cap).
 func (a *App) handleAPIMACList(w http.ResponseWriter, r *http.Request, _ string) {
-	macs, err := a.DB.ListMACs(r.Context())
-	if err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
-		return
+	q := r.URL.Query()
+	limit := 200
+	if s := q.Get("limit"); s != "" {
+		if n, err := strconv.Atoi(s); err == nil && n > 0 && n <= 1000 {
+			limit = n
+		}
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"macs": macs})
+	statusFilter := strings.TrimSpace(q.Get("status"))
+	qSearch := strings.TrimSpace(q.Get("q"))
+	userIDStr := strings.TrimSpace(q.Get("user_id"))
+
+	var macs []models.MAC
+	var err error
+	if userIDStr != "" {
+		n, perr := strconv.ParseInt(userIDStr, 10, 64)
+		if perr != nil || n <= 0 {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "bad user_id"})
+			return
+		}
+		macs, err = a.DB.ListMACsForUser(r.Context(), n)
+		if err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+			return
+		}
+		// Post-filter on q + status in memory — row count is bounded by
+		// one user's devices, typically << 100.
+		if qSearch != "" || statusFilter != "" {
+			filtered := macs[:0]
+			for _, m := range macs {
+				if statusFilter != "" && string(m.Status) != statusFilter {
+					continue
+				}
+				if qSearch != "" && !strings.Contains(m.Mac, qSearch) && !strings.Contains(m.Label, qSearch) {
+					continue
+				}
+				filtered = append(filtered, m)
+			}
+			macs = filtered
+		}
+		if len(macs) > limit {
+			macs = macs[:limit]
+		}
+	} else if qSearch != "" || statusFilter != "" {
+		macs, err = a.DB.SearchMACs(r.Context(), qSearch, statusFilter, limit)
+		if err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+			return
+		}
+	} else {
+		// No filters — limit the unfiltered list too, since the legacy
+		// no-cap behavior could ship 10k+ rows on busy installs.
+		all, lerr := a.DB.ListMACs(r.Context())
+		if lerr != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": lerr.Error()})
+			return
+		}
+		if len(all) > limit {
+			all = all[:limit]
+		}
+		macs = all
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"macs": macs, "count": len(macs)})
 }
 
 // apiUserSummary is the shape returned by /api/admin/users — deliberately a

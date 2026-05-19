@@ -1,5 +1,35 @@
 # Changelog
 
+## v0.40 — /api/admin/macs filter + limit params
+
+Pre-v0.40, `GET /api/admin/macs` returned every MAC row unfiltered.
+On a long-running install that's 10k+ rows shipped over the wire on
+every poll — way too much for monitoring loops on slow links. Now
+the endpoint accepts:
+
+  GET /api/admin/macs?q=AA:BB&status=active&user_id=42&limit=100
+
+- `q`       — substring on mac/label (via existing SearchMACs)
+- `status`  — active|expired|blocked (exact match)
+- `user_id` — int; only MACs owned by that user
+- `limit`   — int, default 200, cap 1000
+
+The unfiltered path is also capped now (200 default) so a forgetful
+caller doesn't get the 10k-row response by accident.
+
+When `user_id` is set the query routes through the indexed
+ListMACsForUser path; q/status are post-filtered in Go since the
+row count is bounded by one user's devices (typically << 100).
+Without user_id, q/status go through the existing indexed
+SearchMACs.
+
+Response now also includes `count` alongside `macs` so clients can
+detect "did we hit the limit?" without iterating.
+
+5 race-clean tests covering each filter in isolation, the
+user_id+status compose case, the limit enforcement, and the bad-
+user_id 400.
+
 ## v0.39 — /admin/maintenance/optimize-now (PRAGMA optimize)
 
 Third button in the "手动触发后台任务" card (after v0.35's
