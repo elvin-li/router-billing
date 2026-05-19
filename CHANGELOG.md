@@ -1,5 +1,26 @@
 # Changelog
 
+## v0.51 — 立即裁剪 sms_log / webhook_deliveries 按钮
+
+Round out the v0.35 + v0.39 trim-now button family with the two
+v0.43/v0.49 observability tables. Operators who just lowered
+security.audit_log_keep can now reflect it across all three
+logs without waiting up to 2 hours for the next purgeLoop tick.
+
+  POST /admin/maintenance/sms-log-trim
+  POST /admin/maintenance/webhook-log-trim
+
+Buttons appear inline on /admin/sms-log and /admin/webhook-log
+respectively (with confirm dialogs). Each writes its own audit
+row (`sms_log_trim` / `webhook_log_trim`) so the trim history
+is visible alongside the data it trimmed.
+
+GET on both endpoints redirects (not fires) to match the v0.35
+pattern of guarding against browser-preload accidents.
+
+5 race-clean tests: 12-row fixture trimmed to cap, audit rows
+land for each, GET → redirect, both pages render the form.
+
 ## v0.50 — GET /api/admin/webhook/log
 
 Milestone release. Programmatic access to the v0.49 webhook_deliveries

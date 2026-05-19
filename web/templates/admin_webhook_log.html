@@ -28,9 +28,16 @@
     </div>
 
     {{template "flash" .}}
+    {{if eq .OK "webhook_log_trim"}}<div class="flash ok">webhook_deliveries 已立即裁剪 ✓</div>{{end}}
+    {{if eq .Err "trim_failed"}}<div class="flash err">裁剪失败，详见日志</div>{{end}}
 
     <section class="admin-card">
       <h2 style="margin-top:0;">最近 200 条投递记录</h2>
+      <form method="post" action="/admin/maintenance/webhook-log-trim" style="margin-bottom:10px;"
+            onsubmit="return confirm('立即裁剪 webhook_deliveries，保留最新的 N 条？');">
+        {{template "csrf" .}}
+        <button class="btn outline tiny" type="submit" style="width:auto;">立即裁剪</button>
+      </form>
       <p class="desc">每次投递尝试（首次 + 每次重试）写入一行。<code>attempt=0</code> 表示首次投递。
         成功 = HTTP 2xx 响应；其余皆为失败（DNS / 连接 / 4xx / 5xx）。purgeLoop 按
         <code>security.audit_log_keep</code> 配额自动裁剪。</p>

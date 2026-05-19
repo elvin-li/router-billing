@@ -165,3 +165,46 @@ func (a *App) handleAdminAuditTrim(w http.ResponseWriter, r *http.Request) {
 		fmt.Sprintf("keep=%d ip=%s", keep, clientIP(r)))
 	http.Redirect(w, r, "/admin/audit?ok=audit_trim", http.StatusSeeOther)
 }
+
+// POST /admin/maintenance/sms-log-trim
+//
+// Mirrors handleAdminAuditTrim for the v0.43 sms_log table. Uses the same
+// security.audit_log_keep cap.
+func (a *App) handleAdminSMSLogTrim(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Redirect(w, r, "/admin/sms-log", http.StatusSeeOther)
+		return
+	}
+	keep := a.Cfg.Security.AuditLogRetention()
+	if err := a.DB.PurgeSMSLog(r.Context(), keep); err != nil {
+		log.Printf("admin sms-log-trim: %v", err)
+		a.DB.Audit(r.Context(), "admin", "sms_log_trim_failed", "",
+			"err="+err.Error()+" ip="+clientIP(r))
+		http.Redirect(w, r, "/admin/sms-log?err=trim_failed", http.StatusSeeOther)
+		return
+	}
+	a.DB.Audit(r.Context(), "admin", "sms_log_trim", "",
+		fmt.Sprintf("keep=%d ip=%s", keep, clientIP(r)))
+	http.Redirect(w, r, "/admin/sms-log?ok=sms_log_trim", http.StatusSeeOther)
+}
+
+// POST /admin/maintenance/webhook-log-trim
+//
+// Mirrors handleAdminAuditTrim for the v0.49 webhook_deliveries table.
+func (a *App) handleAdminWebhookLogTrim(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Redirect(w, r, "/admin/webhook-log", http.StatusSeeOther)
+		return
+	}
+	keep := a.Cfg.Security.AuditLogRetention()
+	if err := a.DB.PurgeWebhookDeliveries(r.Context(), keep); err != nil {
+		log.Printf("admin webhook-log-trim: %v", err)
+		a.DB.Audit(r.Context(), "admin", "webhook_log_trim_failed", "",
+			"err="+err.Error()+" ip="+clientIP(r))
+		http.Redirect(w, r, "/admin/webhook-log?err=trim_failed", http.StatusSeeOther)
+		return
+	}
+	a.DB.Audit(r.Context(), "admin", "webhook_log_trim", "",
+		fmt.Sprintf("keep=%d ip=%s", keep, clientIP(r)))
+	http.Redirect(w, r, "/admin/webhook-log?ok=webhook_log_trim", http.StatusSeeOther)
+}

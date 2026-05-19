@@ -114,6 +114,12 @@
       <h2>持久化发送记录（最近 100 条）</h2>
       <p class="desc">每次 SendSMS 调用都会写入 <code>sms_log</code> 表，跨重启可见。
         purgeLoop 按 <code>security.audit_log_keep</code> 配额定期裁剪。</p>
+      {{if eq .OK "sms_log_trim"}}<div class="flash ok">sms_log 已立即裁剪 ✓</div>{{end}}
+      <form method="post" action="/admin/maintenance/sms-log-trim" style="margin-bottom:10px;"
+            onsubmit="return confirm('立即裁剪 sms_log，保留最新的 N 条？');">
+        {{template "csrf" .}}
+        <button class="btn outline tiny" type="submit" style="width:auto;">立即裁剪</button>
+      </form>
       <div class="table-wrap">
         <table class="data">
           <thead><tr><th>时间</th><th>provider</th><th>手机号</th><th>消息</th><th>结果</th></tr></thead>
