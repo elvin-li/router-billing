@@ -1,5 +1,30 @@
 # Changelog
 
+## v0.80 — CSV export for sms_log + webhook_deliveries (milestone)
+
+Closes the last gap in the observability story. After v0.43 (DB
+table), v0.49 (webhook table), v0.44/v0.50 (API), v0.68/v0.69
+(UI filters), and v0.79 (date range), the observability tables
+now also have CSV export — same filter knobs as the on-screen
+view.
+
+  GET /admin/export/sms-log.csv?phone=&only_failed=&since=&until=
+  GET /admin/export/webhook-log.csv?event_type=&mac=&only_failed=&since=&until=
+
+Default limit 1000, max 10000. Filename follows the established
+v0.41/v0.66/v0.67 pattern:
+
+  no filter → `sms-log.csv` / `webhook-log.csv`
+  any filter → `sms-log-filtered.csv` / `webhook-log-filtered.csv`
+
+UI: "导出 CSV" button next to "立即裁剪" on each log page; link
+carries the current filter set through end-to-end.
+
+6 race-clean tests: each export returns valid CSV with header +
+row, webhook event_type filter excludes non-matches, filename
+flavor switches with filter presence, both pages render the
+export button.
+
 ## v0.79 — SMS/Webhook log: since/until date range filters
 
 Closes the last filter gap on the observability pages. Previously

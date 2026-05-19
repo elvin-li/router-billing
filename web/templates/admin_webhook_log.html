@@ -44,11 +44,15 @@
 
     <section class="admin-card">
       <h2 style="margin-top:0;">最近 200 条投递记录</h2>
-      <form method="post" action="/admin/maintenance/webhook-log-trim" style="margin-bottom:10px;"
-            onsubmit="return confirm('立即裁剪 webhook_deliveries，保留最新的 N 条？');">
-        {{template "csrf" .}}
-        <button class="btn outline tiny" type="submit" style="width:auto;">立即裁剪</button>
-      </form>
+      <div style="display:flex; gap:8px; margin-bottom:10px;">
+        <form method="post" action="/admin/maintenance/webhook-log-trim" style="margin:0;"
+              onsubmit="return confirm('立即裁剪 webhook_deliveries，保留最新的 N 条？');">
+          {{template "csrf" .}}
+          <button class="btn outline tiny" type="submit" style="width:auto;">立即裁剪</button>
+        </form>
+        <a href="/admin/export/webhook-log.csv?event_type={{.EventType}}&mac={{.MAC}}&only_failed={{if .OnlyFailed}}1{{end}}&since={{.Since}}&until={{.Until}}"
+           class="btn outline tiny" style="width:auto;" title="按当前筛选导出">导出 CSV</a>
+      </div>
       <p class="desc">每次投递尝试（首次 + 每次重试）写入一行。<code>attempt=0</code> 表示首次投递。
         成功 = HTTP 2xx 响应；其余皆为失败（DNS / 连接 / 4xx / 5xx）。purgeLoop 按
         <code>security.audit_log_keep</code> 配额自动裁剪。</p>

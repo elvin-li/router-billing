@@ -345,6 +345,109 @@ func (a *App) handleAdminExportUsers(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+// GET /admin/export/sms-log.csv?phone=&only_failed=&since=&until=
+//
+// CSV companion to /admin/sms-log. Same filter knobs (v0.45 + v0.79).
+// Default limit 1000, max 10000 — matches the audit export's compliance-
+// dump posture.
+func (a *App) handleAdminExportSMSLog(w http.ResponseWriter, r *http.Request) {
+	q := r.URL.Query()
+	limit := 1000
+	if s := q.Get("limit"); s != "" {
+		if n, err := strconv.Atoi(s); err == nil && n > 0 && n <= 10000 {
+			limit = n
+		}
+	}
+	logs, err := a.DB.SearchSMSLogs(r.Context(), db.SMSLogFilter{
+		Phone:      strings.TrimSpace(q.Get("phone")),
+		OnlyFailed: q.Get("only_failed") == "1",
+		Since:      strings.TrimSpace(q.Get("since")),
+		Until:      strings.TrimSpace(q.Get("until")),
+		Limit:      limit,
+	})
+	if err != nil {
+		http.Error(w, "db", http.StatusInternalServerError)
+		return
+	}
+	filename := "sms-log.csv"
+	if q.Get("phone") != "" || q.Get("only_failed") == "1" || q.Get("since") != "" || q.Get("until") != "" {
+		filename = "sms-log-filtered.csv"
+	}
+	w.Header().Set("Content-Type", "text/csv; charset=utf-8")
+	w.Header().Set("Content-Disposition", `attachment; filename="`+filename+`"`)
+	cw := csv.NewWriter(w)
+	defer cw.Flush()
+	_ = cw.Write([]string{"id", "sent_at", "provider", "phone", "message", "success", "error_msg"})
+	for _, l := range logs {
+		successStr := "0"
+		if l.Success {
+			successStr = "1"
+		}
+		_ = cw.Write([]string{
+			strconv.FormatInt(l.ID, 10),
+			l.SentAt.UTC().Format(time.RFC3339),
+			l.Provider,
+			l.Phone,
+			l.Message,
+			successStr,
+			l.ErrorMsg,
+		})
+	}
+}
+
+// GET /admin/export/webhook-log.csv?event_type=&mac=&only_failed=&since=&until=
+//
+// CSV companion to /admin/webhook-log. Same filter knobs (v0.69 + v0.79).
+func (a *App) handleAdminExportWebhookLog(w http.ResponseWriter, r *http.Request) {
+	q := r.URL.Query()
+	limit := 1000
+	if s := q.Get("limit"); s != "" {
+		if n, err := strconv.Atoi(s); err == nil && n > 0 && n <= 10000 {
+			limit = n
+		}
+	}
+	logs, err := a.DB.SearchWebhookDeliveries(r.Context(), db.WebhookDeliveryFilter{
+		EventType:  strings.TrimSpace(q.Get("event_type")),
+		MAC:        strings.TrimSpace(q.Get("mac")),
+		OnlyFailed: q.Get("only_failed") == "1",
+		Since:      strings.TrimSpace(q.Get("since")),
+		Until:      strings.TrimSpace(q.Get("until")),
+		Limit:      limit,
+	})
+	if err != nil {
+		http.Error(w, "db", http.StatusInternalServerError)
+		return
+	}
+	filename := "webhook-log.csv"
+	anyFilter := q.Get("event_type") != "" || q.Get("mac") != "" || q.Get("only_failed") == "1" ||
+		q.Get("since") != "" || q.Get("until") != ""
+	if anyFilter {
+		filename = "webhook-log-filtered.csv"
+	}
+	w.Header().Set("Content-Type", "text/csv; charset=utf-8")
+	w.Header().Set("Content-Disposition", `attachment; filename="`+filename+`"`)
+	cw := csv.NewWriter(w)
+	defer cw.Flush()
+	_ = cw.Write([]string{"id", "sent_at", "event_type", "mac", "attempt", "status_code", "success", "duration_ms", "error_msg"})
+	for _, l := range logs {
+		successStr := "0"
+		if l.Success {
+			successStr = "1"
+		}
+		_ = cw.Write([]string{
+			strconv.FormatInt(l.ID, 10),
+			l.SentAt.UTC().Format(time.RFC3339),
+			l.EventType,
+			l.MAC,
+			strconv.Itoa(l.Attempt),
+			strconv.Itoa(l.StatusCode),
+			successStr,
+			strconv.FormatInt(l.DurationMs, 10),
+			l.ErrorMsg,
+		})
+	}
+}
+
 // GET /admin/export/audit.csv?actor=&action=&target=&since=&until=&limit=
 //
 // CSV companion to /admin/audit. Same filter knobs. Default limit 1000,
