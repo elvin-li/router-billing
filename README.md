@@ -53,15 +53,25 @@ OpenWrt（aarch64）上运行的 MAC 地址计费认证系统。**只对收费 S
   - **每日运营日报**（v0.23）
 - **后台维护循环**：每 2 小时清理 sessions / audit / sms_log / webhook_deliveries / 过期 MAC / **可选 auto-cancel-stale-orders**（v0.60）；每周 PRAGMA optimize + VACUUM
 - API 完整覆盖（`/api/admin/*` Bearer token）:
-  - **读端点**: `/health` `/dashboard` `/macs` `/users` `/orders` `/orders/get` `/audit` `/vouchers` `/sms/log` `/webhook/log` `/plans` `/backup` — 全部支持 `readonly` token
-  - **写端点 (mutate)**: `/macs/grant` `/macs/revoke` `/macs/import` `/users/grant` `/users/grant-by-phone` `/vouchers/generate` `/vouchers/batch/revoke` `/orders/refund` `/orders/cancel` `/orders/cancel-stale` `/sms/send` `/audit/note` `/webhook/test` `/maintenance/expire-now` `/maintenance/audit-trim` `/maintenance/optimize-now` `/plans/save` `/plans/delete`
-  - 字段级安全：用户列表不暴露 password_hash / totp_secret；充值码列表仅前 4 位；订单详情不带 trade_no 流水
+  - **读端点**: `/health` `/version` `/dashboard` `/macs` `/macs/get` `/users` `/orders` `/orders/get` `/audit` `/audit/distinct` `/audit/totals` `/vouchers` `/sms/log` `/webhook/log` `/plans` `/sightings` `/sessions` `/backup` — 全部支持 `readonly` token
+  - **写端点 (mutate)**:
+    - MACs: `/macs/grant` `/macs/revoke` `/macs/import` `/macs/notes` `/macs/label`
+    - Users: `/users/grant` `/users/grant-by-phone` `/users/suspend` `/users/notify-expiry`
+    - Vouchers: `/vouchers/generate` `/vouchers/batch/revoke`
+    - Orders: `/orders/refund` `/orders/cancel` `/orders/cancel-stale`
+    - Plans: `/plans/save` `/plans/delete`
+    - Maintenance: `/maintenance/expire-now` `/maintenance/audit-trim` `/maintenance/optimize-now`
+    - 其他: `/sms/send` `/audit/note` `/webhook/test`
+  - 字段级安全：用户列表不暴露 password_hash / totp_secret；充值码列表仅前 4 位；session 列表不返回 token；MAC `get` 端点的 owner 字段裁剪掉认证素材
   - **`/health` 端点**：无 auth，简单 200/503（`SELECT 1` 探测，v0.30）—— 给负载均衡器和 uptime monitor 用
   - **`/metrics` 端点**：Prometheus exposition（v0.13+），支持 `metrics_token` 限制
-- **观测能力**:
-  - **持久化 SMS 投递记录** `sms_log` 表（v0.43，跨重启）
-  - **持久化 Webhook 投递记录** `webhook_deliveries` 表（v0.49，每次重试一行）
-  - 失败的投递在 `/admin/health` 响应里出现（24 小时滚动窗口，v0.61）
+- **观测能力 / 持久化日志表**:
+  - **`audit_log`** 表（since v0.0）— 每个 admin/用户/系统动作一行；前端可按 actor/action/target/详情关键字 q/日期范围检索（v0.54 + v0.79）；UI 顶部展示动作频次徽章（v0.86）
+  - **`sms_log`** 表（v0.43） — 每次 `App.SendSMS` 写一行；UI + API + CSV 三种入口都按手机号/失败/日期过滤（v0.68/v0.79/v0.80）
+  - **`webhook_deliveries`** 表（v0.49） — 每次重试一行；过滤同上（v0.69）
+  - 三张表都受 `purgeLoop` 配额裁剪（`security.audit_log_keep`），UI/API 都提供 "立即裁剪" 按钮（v0.35/v0.51/v0.38）
+  - **`/admin/dashboard`** 月环比 (MoM) 标签 + 关注事项面板 + 过去 24 小时投递失败面板（v0.28/v0.58/v0.59）；侧边栏徽章数字提示
+  - **`/admin/health`** + `/api/admin/health` 在响应里暴露 attention 计数（v0.61），方便监控脚本告警
 - 防火墙后端：nftables（默认）+ iptables/ipset（OpenWrt 21.02 兼容）
 - IoT/充电桩友好：完全不用浏览器也能加白名单
 - 体积：单个 ARM64 静态二进制 ≈ 13 MB
