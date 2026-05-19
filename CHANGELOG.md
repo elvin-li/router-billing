@@ -1,5 +1,36 @@
 # Changelog
 
+## v0.83 — MAC import accepts notes (UI + API)
+
+Extends v0.82's per-MAC notes to the bulk-import paths so ops
+can pre-populate context at upload time.
+
+UI (/admin/macs/import textarea):
+  AA:BB:CC:DD:EE:01,30,phone,customer's IPTV box
+  AA:BB:CC:DD:EE:02,30,tablet            ← no notes column = empty
+
+API (POST /api/admin/macs/import):
+  { "macs": [
+      {"mac":"AA:BB:CC:DD:EE:01","days":30,"label":"phone",
+       "notes":"customer's IPTV box"},
+      ...
+    ] }
+
+Anti-footgun semantics on the API path: omitting the notes field
+(or sending empty string) on a re-import does NOT clear existing
+notes. Operators who DO want to clear must use the v0.82
+/admin/macs/notes UI form with an empty textarea — that path is
+explicit. The import path being silent-noop on empty notes
+prevents accidental loss on CSV re-uploads.
+
+Notes field auto-truncates to 1000 chars consistent with the
+v0.82 cap. Failures to write notes log to stderr but don't
+bump the import's `failed` counter — the MAC itself succeeded.
+
+3 race-clean tests: UI 4th-column persists, API notes field
+persists + bare-row leaves empty notes, anti-footgun on
+re-import without notes preserves pre-existing content.
+
 ## v0.82 — Per-MAC notes (free-text support context)
 
 Adds a `notes` text column to the macs table. `label` was always

@@ -880,6 +880,7 @@ type apiMACImportRow struct {
 	MAC   string `json:"mac"`
 	Days  int    `json:"days,omitempty"`
 	Label string `json:"label,omitempty"`
+	Notes string `json:"notes,omitempty"` // v0.83 — capped 1000 chars
 }
 
 type apiMACImportReq struct {
@@ -936,6 +937,17 @@ func (a *App) handleAPIMACImport(w http.ResponseWriter, r *http.Request, actor s
 			log.Printf("api mac import %s: %v", mac, err)
 			failed++
 			continue
+		}
+		// v0.83: optional notes (max 1000 chars). Empty string = leave
+		// existing notes untouched (would overwrite to empty otherwise
+		// on re-import, which is a footgun).
+		if notes := strings.TrimSpace(row.Notes); notes != "" {
+			if len(notes) > 1000 {
+				notes = notes[:1000]
+			}
+			if err := a.DB.SetMACNotes(r.Context(), mac, notes); err != nil {
+				log.Printf("api mac import notes %s: %v", mac, err)
+			}
 		}
 		a.DB.Audit(r.Context(), actor, "grant", mac,
 			"days="+strconv.Itoa(days)+" via=api ip="+clientIP(r))

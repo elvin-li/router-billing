@@ -176,10 +176,28 @@ func (a *App) handleAdminMACImport(w http.ResponseWriter, r *http.Request) {
 				label = v
 			}
 		}
+		// v0.83: optional 4th column = free-text notes (max 1000 chars).
+		// Empty value or no column → no notes set.
+		notes := ""
+		if len(parts) > 3 {
+			if v := strings.TrimSpace(parts[3]); v != "" {
+				notes = v
+				if len(notes) > 1000 {
+					notes = notes[:1000]
+				}
+			}
+		}
 		if _, err := a.MACSvc.Extend(r.Context(), mac, label, days, nil); err != nil {
 			log.Printf("import %s: %v", mac, err)
 			failed++
 			continue
+		}
+		if notes != "" {
+			if err := a.DB.SetMACNotes(r.Context(), mac, notes); err != nil {
+				log.Printf("import %s notes: %v", mac, err)
+				// Don't bump `failed` — the MAC itself imported fine,
+				// only the optional notes-write failed.
+			}
 		}
 		added++
 	}
