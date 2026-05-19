@@ -1,5 +1,35 @@
 # Changelog
 
+## v0.60 — Config-driven auto-cancel stale orders
+
+Saves operators from wiring cron for v0.55's bulk cancel. Set
+the new config knob and purgeLoop will run the sweep on its
+existing 2-hour cadence:
+
+  security:
+    auto_cancel_stale_order_hours: 24    # 0 (default) = disabled
+
+Same atomic semantics as the v0.52/v0.55 cancel paths
+(UPDATE WHERE status='pending'). Hours clamped [1, 720].
+
+Audit hygiene: the no-op case (zero rows flipped) does NOT
+write an audit row — otherwise an enabled background sweep would
+generate `count=0` noise every 2 hours. When the sweep IS
+productive, the row reads:
+
+  system | orders_cancel_stale | count=N hours=H via=purge_loop
+
+so reviewers can tell the periodic sweep from one-off UI clicks
+(via=ui) or API automation (via=api).
+
+Default stays 0 (disabled) — existing deploys keep their
+behavior. Operators who want hands-off pending-backlog hygiene
+opt in.
+
+3 race-clean tests: clamp function pinned over 6 edge cases,
+sweep-flips-and-audits integration check, and a guard test
+that a no-op sweep doesn't audit.
+
 ## v0.59 — Dashboard: 过去 24 小时投递失败 panel
 
 New attention panel on /admin/dashboard surfacing recent SMS +

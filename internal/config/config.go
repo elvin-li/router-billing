@@ -73,6 +73,28 @@ type Security struct {
 	//   "strict"      → models.ValidPasswordStrong (commons + letter+digit)
 	// Default "" / lax preserves the original v0.0 behavior.
 	PasswordStrength string `yaml:"password_strength,omitempty"`
+
+	// AutoCancelStaleOrderHours: when > 0, the 2-hour purgeLoop also
+	// flips every order with status='pending' AND created_at older than
+	// this many hours to status='failed'. Same atomic semantics as v0.55's
+	// /api/admin/orders/cancel-stale; this saves operators having to
+	// wire up cron. 0 (default) = disabled. Clamped to [1, 720] (1h .. 30d).
+	AutoCancelStaleOrderHours int `yaml:"auto_cancel_stale_order_hours,omitempty"`
+}
+
+// AutoCancelStaleOrders returns the clamped hours window or 0 (disabled).
+func (s Security) AutoCancelStaleOrders() int {
+	h := s.AutoCancelStaleOrderHours
+	if h <= 0 {
+		return 0
+	}
+	if h < 1 {
+		return 1
+	}
+	if h > 720 {
+		return 720
+	}
+	return h
 }
 
 // PasswordStrengthStrict returns true when the config opts into the

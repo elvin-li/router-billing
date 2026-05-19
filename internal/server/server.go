@@ -390,6 +390,18 @@ func (a *App) purgeLoop(ctx context.Context) {
 			// re-triggered the flow. Tidy up here too.
 			_ = a.DB.PurgeExpiredPasswordResets(ctx)
 			_ = a.DB.PurgeExpiredTrustedDevices(ctx)
+			// v0.60: auto-cancel stale pending orders if enabled. Skip
+			// the audit row when count=0 to avoid the periodic-noop
+			// audit-spam an enabled background sweep would otherwise
+			// generate.
+			if hours := a.Cfg.Security.AutoCancelStaleOrders(); hours > 0 {
+				if n, err := a.DB.CancelStalePendingOrders(ctx, time.Duration(hours)*time.Hour); err == nil && n > 0 {
+					a.DB.Audit(ctx, "system", "orders_cancel_stale", "",
+						fmt.Sprintf("count=%d hours=%d via=purge_loop", n, hours))
+				} else if err != nil {
+					log.Printf("auto cancel stale: %v", err)
+				}
+			}
 		case <-weekly.C:
 			if _, err := a.DB.Exec(ctx, "PRAGMA optimize"); err != nil {
 				log.Printf("sqlite optimize: %v", err)
