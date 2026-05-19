@@ -1,5 +1,29 @@
 # Changelog
 
+## v0.56 — UI "清理过期订单" button on /admin/orders
+
+UI counterpart to v0.55's bulk-cancel API. One-click "kill all
+the abandoned-checkout backlog older than 24h" affordance for
+ops who haven't set up cron.
+
+  POST /admin/orders/cancel-stale  {hours=24}
+  -> /admin/orders?ok=cancel_stale&count=N&hours=24
+
+Button lives in the orders page toolbar next to the CSV export
+link. Confirm dialog spells out the threshold. `hours` form
+field is clamped to [1, 720] server-side so a fat-finger
+"99999" gracefully becomes 720 instead of 500-erroring.
+
+Reuses `db.CancelStalePendingOrders` from v0.55. Audit row
+carries `via=ui` so reviewers can tell UI clicks from automation.
+
+The flash banner echoes count + hours so the operator gets
+instant feedback ("已批量取消 12 条超过 24h 的 pending 订单").
+
+4 race-clean tests covering: happy path (mixed-age fixture,
+only stale flips, audit via=ui), hours clamp on oversize input,
+GET redirects without firing, and the page renders the form.
+
 ## v0.55 — POST /api/admin/orders/cancel-stale (bulk cleanup)
 
 Companion to v0.52's single-order cancel. Designed for hourly

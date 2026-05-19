@@ -921,6 +921,10 @@ func (a *App) handleAdminOrders(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "db", http.StatusInternalServerError)
 		return
 	}
+	rawQuery := map[string]string{}
+	for k := range r.URL.Query() {
+		rawQuery[k] = r.URL.Query().Get(k)
+	}
 	a.render(w, "admin_orders.html", a.adminCtx(r, "orders", map[string]any{
 		"Orders": orders,
 		"Query":  q,
@@ -928,6 +932,7 @@ func (a *App) handleAdminOrders(w http.ResponseWriter, r *http.Request) {
 		"Since":  since,
 		"Until":  until,
 		"UserID": userIDStr,
+		"Query0": rawQuery,
 	}))
 }
 
@@ -1112,6 +1117,43 @@ func (a *App) handleAdminOrderCancel(w http.ResponseWriter, r *http.Request) {
 	a.DB.Audit(r.Context(), "admin", "order_canceled", orderNo,
 		"via=ui ip="+clientIP(r))
 	http.Redirect(w, r, "/admin/orders?ok=canceled", http.StatusSeeOther)
+}
+
+// POST /admin/orders/cancel-stale [optional hours form field]
+//
+// UI counterpart to v0.55's /api/admin/orders/cancel-stale. Inline button
+// on the orders page header. Defaults to 24 hours if the form omits
+// `hours`. Useful for ops who don't want to set up cron and just want a
+// one-click "kill all the abandoned-checkout backlog" affordance.
+func (a *App) handleAdminOrderCancelStale(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Redirect(w, r, "/admin/orders", http.StatusSeeOther)
+		return
+	}
+	if err := r.ParseForm(); err != nil {
+		http.Error(w, "form", http.StatusBadRequest)
+		return
+	}
+	hours, _ := strconv.Atoi(r.PostForm.Get("hours"))
+	if hours <= 0 {
+		hours = 24
+	}
+	if hours > 720 {
+		hours = 720
+	}
+	n, err := a.DB.CancelStalePendingOrders(r.Context(), time.Duration(hours)*time.Hour)
+	if err != nil {
+		log.Printf("admin cancel-stale: %v", err)
+		a.DB.Audit(r.Context(), "admin", "orders_cancel_stale_failed", "",
+			"err="+err.Error()+" ip="+clientIP(r))
+		http.Redirect(w, r, "/admin/orders?err=cancel_stale_failed", http.StatusSeeOther)
+		return
+	}
+	a.DB.Audit(r.Context(), "admin", "orders_cancel_stale", "",
+		fmt.Sprintf("count=%d hours=%d via=ui ip=%s", n, hours, clientIP(r)))
+	http.Redirect(w, r,
+		fmt.Sprintf("/admin/orders?ok=cancel_stale&count=%d&hours=%d", n, hours),
+		http.StatusSeeOther)
 }
 
 func (a *App) handleAdminResync(w http.ResponseWriter, r *http.Request) {
