@@ -1,5 +1,29 @@
 # Changelog
 
+## v0.71 — Order detail page: webhook deliveries section
+
+Pairs with v0.70's user-detail SMS history. Order detail page
+(/admin/orders/detail) now also shows the last 20 webhook
+deliveries that fired for THIS order's MAC. Support workflow:
+"the customer says they paid but their account on our downstream
+system still shows unpaid — did the webhook fire?"
+
+The section renders:
+- event_type code, attempt count, HTTP code, OK/FAIL pill,
+  duration_ms — same layout as /admin/webhook-log
+- error_msg surfaces as a hover tooltip on FAIL rows
+- "查看全部 →" link jumps to /admin/webhook-log?mac=<the MAC>
+  (v0.69 UI filter) for >20 rows
+
+Section is hidden when no webhook deliveries exist for the MAC
+(no empty card noise on early-life deploys).
+
+2 race-clean tests: 2-row fixture with one OK + one FAIL +
+unrelated row, confirming OK/FAIL rendering with tooltip, the
+filtered link (URL-escape variants accepted), AND that an
+unrelated MAC's row doesn't leak in. Plus the hide-when-empty
+case.
+
 ## v0.70 — User detail page: SMS history section
 
 Milestone release. Support workflow: customer calls about "I

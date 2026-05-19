@@ -1031,11 +1031,19 @@ func (a *App) handleAdminOrderDetail(w http.ResponseWriter, r *http.Request) {
 		Target: orderNo,
 		Limit:  200,
 	})
+	// v0.71: webhook deliveries that fired for this order's MAC. Useful for
+	// support to confirm "the downstream service was notified when this
+	// order paid." Limited to last 20 — older history is on /admin/webhook-log.
+	webhooks, _ := a.DB.SearchWebhookDeliveries(r.Context(), db.WebhookDeliveryFilter{
+		MAC:   order.Mac,
+		Limit: 20,
+	})
 
 	a.render(w, "admin_order_detail.html", a.adminCtx(r, "orders", map[string]any{
 		"Order":    order,
 		"MAC":      mac,
 		"Timeline": timeline,
+		"Webhooks": webhooks,
 	}))
 }
 

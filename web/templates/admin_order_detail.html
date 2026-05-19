@@ -92,6 +92,34 @@
       {{end}}
     </section>
 
+    {{if .Webhooks}}
+    <section class="admin-card">
+      <h2 style="margin-top:0;">Webhook 投递 ({{len .Webhooks}})</h2>
+      <p class="desc">最近 20 条 webhook_deliveries 行（按本订单的 MAC 过滤）。
+        点 <a href="/admin/webhook-log?mac={{.Order.Mac}}">查看全部</a> 查全量。</p>
+      <div class="table-wrap">
+        <table class="data">
+          <thead><tr><th>时间</th><th>事件</th><th>attempt</th><th>HTTP</th><th>结果</th><th>耗时</th></tr></thead>
+          <tbody>
+            {{range .Webhooks}}
+            <tr>
+              <td style="white-space:nowrap; color:var(--text-soft);">{{formatTime .SentAt}}</td>
+              <td><code>{{.EventType}}</code></td>
+              <td>{{.Attempt}}</td>
+              <td>{{if .StatusCode}}<code>{{.StatusCode}}</code>{{else}}<span style="color:var(--text-soft);">—</span>{{end}}</td>
+              <td>
+                {{if .Success}}<span class="pill paid">OK</span>
+                {{else}}<span class="pill failed" title="{{.ErrorMsg}}">FAIL</span>{{end}}
+              </td>
+              <td style="color:var(--text-soft);">{{.DurationMs}}ms</td>
+            </tr>
+            {{end}}
+          </tbody>
+        </table>
+      </div>
+    </section>
+    {{end}}
+
     {{if eq (printf "%s" .Order.Status) "paid"}}
     <section class="admin-card" style="border-left:4px solid var(--danger);">
       <h2 style="margin-top:0;">退款</h2>
