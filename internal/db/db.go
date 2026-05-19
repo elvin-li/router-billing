@@ -2044,3 +2044,86 @@ func (d *DB) PurgeSMSLog(ctx context.Context, keep int) error {
 		`DELETE FROM sms_log WHERE id NOT IN (SELECT id FROM sms_log ORDER BY id DESC LIMIT ?)`, keep)
 	return err
 }
+
+// WebhookDeliveryEntry is one row in webhook_deliveries — one webhook
+// attempt (initial or retry) recorded after the HTTP response settles.
+type WebhookDeliveryEntry struct {
+	ID         int64
+	SentAt     time.Time
+	EventType  string
+	MAC        string
+	Attempt    int
+	StatusCode int
+	Success    bool
+	DurationMs int64
+	ErrorMsg   string
+}
+
+// LogWebhookDelivery writes one webhook attempt to webhook_deliveries.
+// Best-effort: returns an error so callers can log it, but real production
+// callers should swallow the error since persistence failures shouldn't
+// reverse delivery state.
+func (d *DB) LogWebhookDelivery(ctx context.Context, eventType, mac string, attempt, statusCode int, success bool, durationMs int64, errMsg string) error {
+	successInt := 0
+	if success {
+		successInt = 1
+	}
+	_, err := d.conn.ExecContext(ctx,
+		`INSERT INTO webhook_deliveries (event_type, mac, attempt, status_code, success, duration_ms, error_msg)
+		 VALUES (?, ?, ?, ?, ?, ?, ?)`,
+		eventType, mac, attempt, statusCode, successInt, durationMs, errMsg)
+	return err
+}
+
+// RecentWebhookDeliveries returns rows newest first. Default 100, cap 1000.
+// onlyFailed=true filters to success=0 rows.
+func (d *DB) RecentWebhookDeliveries(ctx context.Context, limit int, onlyFailed bool) ([]WebhookDeliveryEntry, error) {
+	if limit <= 0 || limit > 1000 {
+		limit = 100
+	}
+	q := `SELECT id, sent_at, event_type, mac, attempt, status_code, success, duration_ms, error_msg
+	      FROM webhook_deliveries`
+	if onlyFailed {
+		q += ` WHERE success = 0`
+	}
+	q += ` ORDER BY id DESC LIMIT ?`
+	rows, err := d.conn.QueryContext(ctx, q, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []WebhookDeliveryEntry
+	for rows.Next() {
+		var e WebhookDeliveryEntry
+		var sentStr string
+		var success int
+		if err := rows.Scan(&e.ID, &sentStr, &e.EventType, &e.MAC, &e.Attempt,
+			&e.StatusCode, &success, &e.DurationMs, &e.ErrorMsg); err != nil {
+			return nil, err
+		}
+		e.Success = success == 1
+		for _, layout := range []string{
+			time.RFC3339Nano, time.RFC3339,
+			"2006-01-02 15:04:05.999999999-07:00",
+			"2006-01-02 15:04:05-07:00",
+			"2006-01-02 15:04:05",
+		} {
+			if t, perr := time.Parse(layout, sentStr); perr == nil {
+				e.SentAt = t
+				break
+			}
+		}
+		out = append(out, e)
+	}
+	return out, rows.Err()
+}
+
+// PurgeWebhookDeliveries trims to the most recent `keep` rows.
+func (d *DB) PurgeWebhookDeliveries(ctx context.Context, keep int) error {
+	if keep <= 0 {
+		keep = 10000
+	}
+	_, err := d.conn.ExecContext(ctx,
+		`DELETE FROM webhook_deliveries WHERE id NOT IN (SELECT id FROM webhook_deliveries ORDER BY id DESC LIMIT ?)`, keep)
+	return err
+}

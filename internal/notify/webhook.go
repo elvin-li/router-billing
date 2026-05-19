@@ -63,6 +63,17 @@ type Notifier struct {
 
 	HTTPClient *http.Client
 	queue      chan Event
+
+	// OnDelivery, if non-nil, is called once per delivery attempt (initial
+	// + each retry) AFTER the HTTP response settles. Callback must not
+	// block — it runs on the same goroutine as deliver(). Used by the
+	// server package to persist a row in `webhook_deliveries` for the
+	// /admin/webhook-log view.
+	//
+	// `statusCode` is 0 if the HTTP call never produced a response (DNS
+	// failure, connection refused, etc.). `err` is the same value that
+	// drives the retry decision.
+	OnDelivery func(ev Event, attempt int, statusCode int, durationMs int64, err error)
 }
 
 func New(url, secret string) *Notifier {
@@ -134,6 +145,9 @@ func (n *Notifier) deliver(ctx context.Context, ev Event, attempt int) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, n.URL, bytes.NewReader(body))
 	if err != nil {
 		log.Printf("notify: build request: %v", err)
+		if n.OnDelivery != nil {
+			n.OnDelivery(ev, attempt, 0, 0, err)
+		}
 		return
 	}
 	req.Header.Set("Content-Type", "application/json")
@@ -144,13 +158,22 @@ func (n *Notifier) deliver(ctx context.Context, ev Event, attempt int) {
 		req.Header.Set("X-Router-Billing-Signature", "sha256="+hex.EncodeToString(mac.Sum(nil)))
 	}
 
+	start := time.Now()
 	resp, err := n.HTTPClient.Do(req)
+	statusCode := 0
 	if err == nil {
+		statusCode = resp.StatusCode
 		resp.Body.Close()
 		if resp.StatusCode/100 == 2 {
+			if n.OnDelivery != nil {
+				n.OnDelivery(ev, attempt, statusCode, time.Since(start).Milliseconds(), nil)
+			}
 			return
 		}
 		err = fmt.Errorf("http %d", resp.StatusCode)
+	}
+	if n.OnDelivery != nil {
+		n.OnDelivery(ev, attempt, statusCode, time.Since(start).Milliseconds(), err)
 	}
 	sched := n.schedule()
 	if attempt < len(sched) {

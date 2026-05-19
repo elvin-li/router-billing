@@ -1,5 +1,45 @@
 # Changelog
 
+## v0.49 — 持久化 Webhook 投递日志
+
+Companion to v0.43's sms_log: persistent observability for the
+notify.Notifier. Pre-v0.49 a webhook failure left a single stderr
+line that vanished on log rotation — operators had to grep
+journalctl to answer "did this event ever reach the downstream?"
+
+New `webhook_deliveries` table records one row per attempt
+(initial + each retry):
+
+  id, sent_at, event_type, mac, attempt, status_code,
+  success, duration_ms, error_msg
+
+Wire-up:
+- `notify.Notifier.OnDelivery` callback (new field) fires after
+  each HTTP attempt with (ev, attempt, statusCode, durationMs, err).
+- App.NewApp wires it to a `db.LogWebhookDelivery` writer using
+  context.Background() so the row lands even if the retry
+  happens after the original request returned.
+- `deliver()` calls the callback on both success AND failure
+  paths so the row reflects reality regardless of outcome.
+
+New /admin/webhook-log page:
+- Last 200 attempts newest-first
+- "仅显示失败" toggle (`?only_failed=1`) for monitor follow-up
+- HTTP status code + duration_ms columns so ops can spot slow
+  upstream
+- New sidebar entry "Webhook"
+
+purgeLoop trims `webhook_deliveries` on the same `security.audit_log_keep`
+cap as audit_log and sms_log.
+
+6 race-clean tests:
+- Real-server delivery → 200 + success row recorded
+- 500-responding server → success=false row with error_msg
+- only_failed filter isolates FAIL rows
+- PurgeWebhookDeliveries trims to cap
+- /admin/webhook-log page renders rendered rows
+- only_failed=1 URL filter excludes OK rows
+
 ## v0.48 — /admin/macs/detail?mac=… (MAC timeline)
 
 Companion to v0.42's order-detail page. Customer says "my phone

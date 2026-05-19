@@ -83,6 +83,23 @@ func NewApp(cfg *config.Config, dbx *db.DB, svc *service.MACService) (*App, erro
 		waiters: map[string][]chan struct{}{},
 	}
 
+	// Wire the v0.49 webhook delivery logger: every Notifier attempt
+	// (initial + each retry) lands a row in webhook_deliveries so
+	// /admin/webhook-log can show the operator what's been happening.
+	// Background context — the request that triggered the notification
+	// may have completed long before the retry, and the row should land
+	// either way.
+	if app.Notifier != nil {
+		app.Notifier.OnDelivery = func(ev notify.Event, attempt, status int, durationMs int64, err error) {
+			errMsg := ""
+			if err != nil {
+				errMsg = err.Error()
+			}
+			_ = app.DB.LogWebhookDelivery(context.Background(),
+				ev.Type, ev.MAC, attempt, status, err == nil, durationMs, errMsg)
+		}
+	}
+
 	if cfg.Pay.WeChat.Enabled {
 		w, err := pay.NewWeChat(
 			cfg.Pay.WeChat.MchID,
@@ -207,6 +224,7 @@ func (a *App) Routes() http.Handler {
 	mux.HandleFunc("/admin/backup", a.requireAdmin(a.handleAdminBackup))
 	mux.HandleFunc("/admin/backup/restore", a.requireAdmin(a.handleAdminBackupRestore))
 	mux.HandleFunc("/admin/maintenance", a.requireAdmin(a.handleAdminMaintenance))
+	mux.HandleFunc("/admin/webhook-log", a.requireAdmin(a.handleAdminWebhookLog))
 	mux.HandleFunc("/admin/maintenance/test-webhook", a.requireAdmin(a.handleAdminTestWebhook))
 	mux.HandleFunc("/admin/maintenance/expire-now", a.requireAdmin(a.handleAdminExpireNow))
 	mux.HandleFunc("/admin/maintenance/audit-trim", a.requireAdmin(a.handleAdminAuditTrim))
@@ -357,6 +375,8 @@ func (a *App) purgeLoop(ctx context.Context) {
 			// SMS log gets the same retention cap as audit_log — both are
 			// observability tables that accumulate forever otherwise.
 			_ = a.DB.PurgeSMSLog(ctx, a.Cfg.Security.AuditLogRetention())
+			// Webhook delivery log (v0.49) uses the same retention cap.
+			_ = a.DB.PurgeWebhookDeliveries(ctx, a.Cfg.Security.AuditLogRetention())
 			// These three were added in v0.13 (password reset codes,
 			// trusted devices) but never plumbed into the janitor — so
 			// stale rows accumulated until the user manually

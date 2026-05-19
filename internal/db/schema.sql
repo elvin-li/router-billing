@@ -183,3 +183,22 @@ CREATE TABLE IF NOT EXISTS sms_log (
 );
 CREATE INDEX IF NOT EXISTS idx_sms_sent_at ON sms_log(sent_at);
 CREATE INDEX IF NOT EXISTS idx_sms_phone   ON sms_log(phone);
+
+-- Webhook delivery log — one row per attempt (initial + each retry) of
+-- the notify.Notifier. Lets operators see "did this event ever reach the
+-- downstream?" and the failure pattern (DNS error vs 5xx vs timeout)
+-- without scraping stderr. Trimmed by purgeLoop on the same cap as
+-- audit_log + sms_log.
+CREATE TABLE IF NOT EXISTS webhook_deliveries (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    sent_at     DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    event_type  TEXT NOT NULL,                 -- "test" / "redeem" / "order_paid" / ...
+    mac         TEXT NOT NULL DEFAULT '',      -- event.MAC if any
+    attempt     INTEGER NOT NULL DEFAULT 0,    -- 0=initial, 1+=retry index
+    status_code INTEGER NOT NULL DEFAULT 0,    -- 0 if no HTTP response (DNS/connect fail)
+    success     INTEGER NOT NULL DEFAULT 0,    -- 1 on 2xx response
+    duration_ms INTEGER NOT NULL DEFAULT 0,
+    error_msg   TEXT NOT NULL DEFAULT ''
+);
+CREATE INDEX IF NOT EXISTS idx_webhook_sent_at ON webhook_deliveries(sent_at);
+CREATE INDEX IF NOT EXISTS idx_webhook_success ON webhook_deliveries(success);
