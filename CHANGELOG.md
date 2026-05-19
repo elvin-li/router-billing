@@ -1,5 +1,29 @@
 # Changelog
 
+## v0.89 — Order detail page surfaces MAC notes
+
+Pairs with v0.88's list-view notes inline. When support drills
+into a specific order via /admin/orders/detail, they now also see
+the linked MAC's notes inline so customer context is one-screen.
+
+Layout in the "关联 MAC 当前状态" section:
+
+  MAC: AA:BB:CC:DD:EE:FF  (link → MAC detail page)
+  标签: phone
+  客服备注: 📝 VIP customer - escalate quickly   ← v0.89 row
+  状态: [active]
+  到期时间: ...
+
+Also turned the MAC string in the table into a link to its detail
+page — the order detail and MAC detail pages now cross-link freely
+(navigation parity with the user detail page).
+
+The notes row is hidden when the MAC has no notes (silence is the
+default).
+
+2 race-clean tests: order with seeded MAC notes shows them, order
+with empty-notes MAC hides the row.
+
 ## v0.88 — /admin/macs shows notes inline
 
 Makes v0.82's per-MAC notes visible at-a-glance from the list view.

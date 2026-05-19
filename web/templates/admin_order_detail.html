@@ -52,8 +52,11 @@
       <h2 style="margin-top:0;">关联 MAC 当前状态</h2>
       <table class="data">
         <tbody>
-          <tr><th style="text-align:left;width:140px;">MAC</th><td class="mono">{{.MAC.Mac}}</td></tr>
-          <tr><th style="text-align:left;">备注</th><td>{{.MAC.Label}}</td></tr>
+          <tr><th style="text-align:left;width:140px;">MAC</th><td class="mono"><a href="/admin/macs/detail?mac={{.MAC.Mac}}">{{.MAC.Mac}}</a></td></tr>
+          <tr><th style="text-align:left;">标签</th><td>{{.MAC.Label}}</td></tr>
+          {{if .MAC.Notes}}
+          <tr><th style="text-align:left; vertical-align:top;">客服备注</th><td style="white-space:pre-wrap; color:var(--text-soft);">📝 {{.MAC.Notes}}</td></tr>
+          {{end}}
           <tr><th style="text-align:left;">状态</th><td>
             {{if eq (printf "%s" .MAC.Status) "active"}}<span class="pill active">活跃</span>
             {{else if eq (printf "%s" .MAC.Status) "blocked"}}<span class="pill blocked">已封禁</span>
