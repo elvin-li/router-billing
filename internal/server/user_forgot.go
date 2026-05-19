@@ -139,7 +139,7 @@ func (a *App) handleUserForgotPassword(w http.ResponseWriter, r *http.Request) {
 		}
 		body := "【router-billing】您的密码重置验证码：" + code + "，" +
 			padMins(int(pwResetCodeTTL/time.Minute)) + "内有效。若非本人操作，请忽略。"
-		if sErr := a.SMS.Send(r.Context(), user.Phone, body); sErr != nil {
+		if sErr := a.SendSMS(r.Context(), user.Phone, body); sErr != nil {
 			log.Printf("forgot-password sms %s: %v", phone, sErr)
 			a.renderForgot(w, r, 1, phone, "sms_failed")
 			return

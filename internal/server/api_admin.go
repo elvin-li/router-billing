@@ -611,7 +611,7 @@ func (a *App) handleAPISMSSend(w http.ResponseWriter, r *http.Request, actor str
 	if len(msg) > 500 {
 		msg = msg[:500]
 	}
-	if err := a.SMS.Send(r.Context(), phone, msg); err != nil {
+	if err := a.SendSMS(r.Context(), phone, msg); err != nil {
 		log.Printf("api sms %s: %v", phone, err)
 		a.DB.Audit(r.Context(), actor, "sms_test_failed", phone,
 			"provider="+a.SMS.Name()+" err="+err.Error()+" ip="+clientIP(r))

@@ -9,22 +9,29 @@ import (
 	"router-billing/internal/sms"
 )
 
-// GET /admin/sms-log — debug view of the SMS Console provider's ring buffer.
-// Only useful when config.sms.provider == console; Aliyun has no in-process
-// log to surface (its delivery state lives on Aliyun's dashboard).
+// GET /admin/sms-log — DB-backed delivery history for every provider,
+// plus the in-memory console ring buffer when the console provider is wired.
+//
+// Pre-v0.43 only the console provider's ring buffer was visible — useless
+// for Aliyun (no logs) and lost across restarts. The DB log is universal:
+// every SendSMS call records one row regardless of provider, so admins
+// can troubleshoot delivery weeks after the fact.
 func (a *App) handleAdminSMSLog(w http.ResponseWriter, r *http.Request) {
-	var records []sms.Record
+	var consoleRecords []sms.Record
 	var providerName string
 	available := false
 	if a.SMS != nil && a.SMS.Available() {
 		providerName = a.SMS.Name()
 		available = true
 		if c, ok := a.SMS.P.(*sms.Console); ok {
-			records = c.Recent()
+			consoleRecords = c.Recent()
 		}
 	} else {
 		providerName = "none"
 	}
+	// DB-backed log, newest first. Capped at 100 for page render; the
+	// purgeLoop trims the table itself.
+	dbLogs, _ := a.DB.RecentSMSLogs(r.Context(), 100)
 	// Pass through the raw query so the "reminders" flash can read
 	// sent/skipped/errored counts.
 	rawQuery := map[string]string{}
@@ -33,7 +40,8 @@ func (a *App) handleAdminSMSLog(w http.ResponseWriter, r *http.Request) {
 	}
 	a.render(w, "admin_sms_log.html", a.adminCtx(r, "sms-log", map[string]any{
 		"Provider":         providerName,
-		"Records":          records,
+		"Records":          consoleRecords,
+		"DBLogs":           dbLogs,
 		"Available":        available,
 		"Query0":           rawQuery,
 		"WindowDays":       a.Cfg.SMS.ExpiryReminderWindowDays(),
@@ -71,7 +79,7 @@ func (a *App) handleAdminSMSTest(w http.ResponseWriter, r *http.Request) {
 	if len(msg) > 500 {
 		msg = msg[:500]
 	}
-	if err := a.SMS.Send(r.Context(), phone, msg); err != nil {
+	if err := a.SendSMS(r.Context(), phone, msg); err != nil {
 		log.Printf("admin sms test %s: %v", phone, err)
 		a.DB.Audit(r.Context(), "admin", "sms_test_failed", phone,
 			"provider="+a.SMS.Name()+" err="+err.Error()+" ip="+clientIP(r))

@@ -156,7 +156,7 @@ func (a *App) maybeAlertAdminLogin(r *http.Request, username string) {
 		body := "【router-billing】管理员 " + username + " 于 " +
 			time.Now().Local().Format("01-02 15:04") +
 			" 从 " + ip + " 登录。若非本人请立即修改密码。"
-		if err := a.SMS.Send(ctx, phone, body); err != nil {
+		if err := a.SendSMS(ctx, phone, body); err != nil {
 			log.Printf("admin-login alert sms %s: %v", phone, err)
 			a.DB.Audit(ctx, "system", "admin_login_alert_failed", username,
 				"phone="+phone+" err="+err.Error()+" ip="+ip)
@@ -665,7 +665,7 @@ func (a *App) handleAdminUserResetPassword(w http.ResponseWriter, r *http.Reques
 	// when SMS isn't wired or delivery fails.
 	if r.PostForm.Get("via_sms") == "1" && a.SMS != nil && a.SMS.Available() {
 		if user, err := a.DB.GetUser(r.Context(), id); err == nil && user != nil {
-			sErr := a.SMS.Send(r.Context(), user.Phone, tmpPwd)
+			sErr := a.SendSMS(r.Context(), user.Phone, tmpPwd)
 			if sErr == nil {
 				a.DB.Audit(r.Context(), "admin", "user_reset_password", strconv.FormatInt(id, 10),
 					"via=sms provider="+a.SMS.Name()+" ip="+clientIP(r))

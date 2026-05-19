@@ -72,7 +72,7 @@ func (a *App) sendAdminDigest(ctx context.Context) (db.AdminDigestStats, error) 
 	}
 	body := formatAdminDigestBody(stats)
 	phone := a.Cfg.SMS.AdminLoginAlertPhone
-	if err := a.SMS.Send(ctx, phone, body); err != nil {
+	if err := a.SendSMS(ctx, phone, body); err != nil {
 		log.Printf("admin digest sms %s: %v", phone, err)
 		a.DB.Audit(ctx, "system", "admin_digest_failed", "", "phone="+phone+" err="+err.Error())
 		return stats, err

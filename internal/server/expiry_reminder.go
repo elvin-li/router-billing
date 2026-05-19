@@ -62,7 +62,7 @@ func (a *App) sendExpiryReminders(ctx context.Context) (sent, skipped, errored i
 			continue
 		}
 		body := formatExpiryReminderBody(m.Mac, m.Label, m.ExpiresAt)
-		if err := a.SMS.Send(ctx, user.Phone, body); err != nil {
+		if err := a.SendSMS(ctx, user.Phone, body); err != nil {
 			log.Printf("expiry reminder %s → %s: %v", m.Mac, user.Phone, err)
 			errored++
 			a.DB.Audit(ctx, "system", "expiry_reminder_failed", m.Mac,

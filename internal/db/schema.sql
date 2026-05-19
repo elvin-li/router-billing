@@ -167,3 +167,19 @@ CREATE TABLE IF NOT EXISTS audit_log (
     detail      TEXT NOT NULL DEFAULT ''
 );
 CREATE INDEX IF NOT EXISTS idx_audit_at ON audit_log(at);
+
+-- SMS log — every send-through-App.SendSMS records one row regardless of
+-- outcome. Persistent (survives restarts) and provider-agnostic, unlike
+-- the console provider's in-memory ring buffer. Trimmed by purgeLoop on
+-- the same schedule as audit_log.
+CREATE TABLE IF NOT EXISTS sms_log (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    sent_at    DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    provider   TEXT NOT NULL,                  -- "console" / "aliyun" / ...
+    phone      TEXT NOT NULL,
+    message    TEXT NOT NULL,
+    success    INTEGER NOT NULL DEFAULT 0,     -- 1 = sent ok, 0 = failed
+    error_msg  TEXT NOT NULL DEFAULT ''
+);
+CREATE INDEX IF NOT EXISTS idx_sms_sent_at ON sms_log(sent_at);
+CREATE INDEX IF NOT EXISTS idx_sms_phone   ON sms_log(phone);

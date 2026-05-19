@@ -1938,3 +1938,85 @@ func (d *DB) PurgeAuditLog(ctx context.Context, keep int) error {
 		`DELETE FROM audit_log WHERE id NOT IN (SELECT id FROM audit_log ORDER BY id DESC LIMIT ?)`, keep)
 	return err
 }
+
+// SMSLogEntry is one row in sms_log. Returned by RecentSMSLogs.
+type SMSLogEntry struct {
+	ID       int64
+	SentAt   time.Time
+	Provider string
+	Phone    string
+	Message  string
+	Success  bool
+	ErrorMsg string
+}
+
+// LogSMS writes one row to sms_log. The caller should normally go through
+// App.SendSMS which handles both delivery + logging in one place — but
+// LogSMS itself is exposed so a future provider that batches sends can
+// log multiple rows from one call.
+//
+// Best-effort: a write error is swallowed (logged on stderr at the call
+// site) since failing to log shouldn't reverse a successful (or failed)
+// real-world send. Returns an error so callers that DO care can act.
+func (d *DB) LogSMS(ctx context.Context, provider, phone, message string, success bool, errMsg string) error {
+	successInt := 0
+	if success {
+		successInt = 1
+	}
+	_, err := d.conn.ExecContext(ctx,
+		`INSERT INTO sms_log (provider, phone, message, success, error_msg) VALUES (?, ?, ?, ?, ?)`,
+		provider, phone, message, successInt, errMsg)
+	return err
+}
+
+// RecentSMSLogs returns the most-recent rows, newest first. Default limit
+// 100, cap 1000.
+func (d *DB) RecentSMSLogs(ctx context.Context, limit int) ([]SMSLogEntry, error) {
+	if limit <= 0 || limit > 1000 {
+		limit = 100
+	}
+	rows, err := d.conn.QueryContext(ctx,
+		`SELECT id, sent_at, provider, phone, message, success, error_msg
+		 FROM sms_log ORDER BY id DESC LIMIT ?`, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []SMSLogEntry
+	for rows.Next() {
+		var e SMSLogEntry
+		var sentStr string
+		var success int
+		if err := rows.Scan(&e.ID, &sentStr, &e.Provider, &e.Phone, &e.Message, &success, &e.ErrorMsg); err != nil {
+			return nil, err
+		}
+		e.Success = success == 1
+		// modernc.org/sqlite returns DATETIME as TEXT for some operations;
+		// be permissive about the layout.
+		for _, layout := range []string{
+			time.RFC3339Nano,
+			time.RFC3339,
+			"2006-01-02 15:04:05.999999999-07:00",
+			"2006-01-02 15:04:05-07:00",
+			"2006-01-02 15:04:05",
+		} {
+			if t, perr := time.Parse(layout, sentStr); perr == nil {
+				e.SentAt = t
+				break
+			}
+		}
+		out = append(out, e)
+	}
+	return out, rows.Err()
+}
+
+// PurgeSMSLog trims sms_log to the most recent `keep` rows. Matches the
+// audit_log pattern + cap (default 10_000 if keep<=0).
+func (d *DB) PurgeSMSLog(ctx context.Context, keep int) error {
+	if keep <= 0 {
+		keep = 10000
+	}
+	_, err := d.conn.ExecContext(ctx,
+		`DELETE FROM sms_log WHERE id NOT IN (SELECT id FROM sms_log ORDER BY id DESC LIMIT ?)`, keep)
+	return err
+}

@@ -350,6 +350,9 @@ func (a *App) purgeLoop(ctx context.Context) {
 		case <-short.C:
 			_ = a.DB.PurgeExpiredSessions(ctx)
 			_ = a.DB.PurgeAuditLog(ctx, a.Cfg.Security.AuditLogRetention())
+			// SMS log gets the same retention cap as audit_log — both are
+			// observability tables that accumulate forever otherwise.
+			_ = a.DB.PurgeSMSLog(ctx, a.Cfg.Security.AuditLogRetention())
 			// These three were added in v0.13 (password reset codes,
 			// trusted devices) but never plumbed into the janitor — so
 			// stale rows accumulated until the user manually

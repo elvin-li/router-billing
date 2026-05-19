@@ -1,5 +1,43 @@
 # Changelog
 
+## v0.43 — DB-backed SMS log (sms_log table)
+
+Pre-v0.43, SMS delivery state was either:
+- in-memory ring buffer (Console provider only, lost on restart)
+- stderr log lines (Aliyun)
+
+Neither survived restarts AND neither worked for the Aliyun customer
+case "ops, why didn't this phone get the expiry reminder yesterday?"
+— operators had to dig through journalctl. With a sustained-traffic
+deploy that's hours of log spelunking.
+
+New `sms_log` table, populated by every `App.SendSMS` call
+regardless of provider:
+
+  id, sent_at, provider, phone, message, success, error_msg
+
+Schema migrates via the existing `CREATE TABLE IF NOT EXISTS`
+pattern (no addColumnIfMissing needed — it's a new table).
+
+All 7 `a.SMS.Send(...)` call sites rewritten through the new
+`a.SendSMS(...)` wrapper which calls the provider AND logs the
+outcome (success or failure with error_msg) in one place. Future
+SMS providers automatically get logged without per-callsite
+changes.
+
+`/admin/sms-log` page renders a new "持久化发送记录" section
+showing the last 100 DB rows with provider, status pill (OK/FAIL),
+and the original message — survives restarts. Console ring buffer
+stays alive too for fast iteration during local development.
+
+purgeLoop trims `sms_log` to `security.audit_log_keep` rows on the
+same 2-hour schedule as audit_log.
+
+5 race-clean tests: success path records row, failure path records
+row with error_msg captured, RecentSMSLogs orders newest-first,
+PurgeSMSLog respects the keep cap, /admin/sms-log page renders the
+new DB section.
+
 ## v0.42 — /admin/orders/detail?order_no=… (timeline view)
 
 Support workflow: customer emails about a specific order, support
