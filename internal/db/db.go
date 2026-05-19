@@ -62,12 +62,12 @@ func (d *DB) Exec(ctx context.Context, query string, args ...any) (sql.Result, e
 
 // ---------- MAC ----------
 
-const macCols = `id, mac, label, status, expires_at, user_id, schedule_json, created_at, updated_at`
+const macCols = `id, mac, label, status, expires_at, user_id, schedule_json, notes, created_at, updated_at`
 
 func scanMAC(row interface{ Scan(...any) error }) (*models.MAC, error) {
 	var m models.MAC
 	var userID sql.NullInt64
-	if err := row.Scan(&m.ID, &m.Mac, &m.Label, &m.Status, &m.ExpiresAt, &userID, &m.ScheduleJSON, &m.CreatedAt, &m.UpdatedAt); err != nil {
+	if err := row.Scan(&m.ID, &m.Mac, &m.Label, &m.Status, &m.ExpiresAt, &userID, &m.ScheduleJSON, &m.Notes, &m.CreatedAt, &m.UpdatedAt); err != nil {
 		return nil, err
 	}
 	if userID.Valid {
@@ -75,6 +75,15 @@ func scanMAC(row interface{ Scan(...any) error }) (*models.MAC, error) {
 		m.UserID = &v
 	}
 	return &m, nil
+}
+
+// SetMACNotes writes free-text support notes onto a MAC row. v0.82.
+// Caller should length-cap to a reasonable size before calling.
+func (d *DB) SetMACNotes(ctx context.Context, mac, notes string) error {
+	_, err := d.conn.ExecContext(ctx,
+		`UPDATE macs SET notes = ?, updated_at = ? WHERE mac = ?`,
+		notes, time.Now().UTC(), mac)
+	return err
 }
 
 // SetMACSchedule writes the schedule JSON onto the MAC row. Pass "" to clear.
@@ -589,11 +598,11 @@ func (d *DB) MarkOrderRefunded(ctx context.Context, orderNo, reason string) (*mo
 	// Roll back the MAC's expires_at by `days`. If the MAC is gone (deleted
 	// manually) we silently succeed — the order refund still stands.
 	macRow := tx.QueryRowContext(ctx,
-		`SELECT id, mac, label, status, expires_at, user_id, schedule_json, created_at, updated_at
+		`SELECT id, mac, label, status, expires_at, user_id, schedule_json, notes, created_at, updated_at
 		 FROM macs WHERE mac = ?`, o.Mac)
 	var m models.MAC
 	var uid sql.NullInt64
-	err = macRow.Scan(&m.ID, &m.Mac, &m.Label, &m.Status, &m.ExpiresAt, &uid, &m.ScheduleJSON, &m.CreatedAt, &m.UpdatedAt)
+	err = macRow.Scan(&m.ID, &m.Mac, &m.Label, &m.Status, &m.ExpiresAt, &uid, &m.ScheduleJSON, &m.Notes, &m.CreatedAt, &m.UpdatedAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		if err := tx.Commit(); err != nil {
 			return nil, err

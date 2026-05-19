@@ -21,6 +21,7 @@ CREATE TABLE IF NOT EXISTS macs (
     expires_at    DATETIME NOT NULL,
     user_id       INTEGER REFERENCES users(id) ON DELETE SET NULL,
     schedule_json TEXT NOT NULL DEFAULT '',      -- optional time-of-day restriction
+    notes         TEXT NOT NULL DEFAULT '',      -- v0.82 free-text support context
     created_at    DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
     updated_at    DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
 );

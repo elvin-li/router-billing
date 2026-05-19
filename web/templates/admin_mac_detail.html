@@ -28,6 +28,8 @@
 
     {{template "flash" .}}
 
+    {{if eq .OK "notes"}}<div class="flash ok">备注已保存 ✓</div>{{end}}
+
     <section class="admin-card">
       <h2 style="margin-top:0;">基本信息</h2>
       <table class="data">
@@ -59,6 +61,19 @@
           {{end}}
         </tbody>
       </table>
+    </section>
+
+    <section class="admin-card">
+      <h2 style="margin-top:0;">备注</h2>
+      <p class="desc">客服备注 / 支持上下文。不会出现在用户端任何视图。最多 1000 字。</p>
+      <form method="post" action="/admin/macs/notes">
+        {{template "csrf" .}}
+        <input type="hidden" name="mac" value="{{.MAC.Mac}}">
+        <textarea name="notes" rows="4" style="width:100%; padding:8px; border:1px solid var(--border); border-radius:6px; font-size:13px;" maxlength="1000" placeholder="如：客户反映高流量是因为 IPTV。或：共享设备，全家使用。">{{.MAC.Notes}}</textarea>
+        <div style="margin-top:8px;">
+          <button class="btn primary small" type="submit" style="width:auto;">保存备注</button>
+        </div>
+      </form>
     </section>
 
     <section class="admin-card">

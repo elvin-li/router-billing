@@ -198,6 +198,7 @@ func (a *App) Routes() http.Handler {
 	mux.HandleFunc("/admin/logout", a.handleAdminLogout)
 	mux.HandleFunc("/admin/macs", a.requireAdmin(a.handleAdminMACs))
 	mux.HandleFunc("/admin/macs/detail", a.requireAdmin(a.handleAdminMACDetail))
+	mux.HandleFunc("/admin/macs/notes", a.requireAdmin(a.handleAdminMACNotes))
 	mux.HandleFunc("/admin/macs/add", a.requireAdmin(a.handleAdminMACAdd))
 	mux.HandleFunc("/admin/macs/delete", a.requireAdmin(a.handleAdminMACDelete))
 	mux.HandleFunc("/admin/macs/extend", a.requireAdmin(a.handleAdminMACExtend))

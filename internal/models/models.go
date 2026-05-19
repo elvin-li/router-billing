@@ -24,6 +24,7 @@ type MAC struct {
 	ExpiresAt    time.Time `json:"expires_at"`
 	UserID       *int64    `json:"user_id,omitempty"`
 	ScheduleJSON string    `json:"schedule_json,omitempty"`
+	Notes        string    `json:"notes,omitempty"` // v0.82 free-text support context
 	CreatedAt    time.Time `json:"created_at"`
 	UpdatedAt    time.Time `json:"updated_at"`
 }

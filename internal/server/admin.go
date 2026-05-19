@@ -1188,6 +1188,42 @@ func (a *App) handleAdminOrderCancelStale(w http.ResponseWriter, r *http.Request
 		http.StatusSeeOther)
 }
 
+// POST /admin/macs/notes  {mac, notes}
+//
+// Writes a free-text notes field onto the MAC row. Support context that
+// the (short) label can't carry — e.g. "customer reports high traffic
+// because they stream IPTV", "shared device, used by family". v0.82.
+//
+// Notes are capped at 1000 chars to keep audit detail strings reasonable.
+func (a *App) handleAdminMACNotes(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Redirect(w, r, "/admin/macs", http.StatusSeeOther)
+		return
+	}
+	if err := r.ParseForm(); err != nil {
+		http.Error(w, "form", http.StatusBadRequest)
+		return
+	}
+	macStr := strings.TrimSpace(r.PostForm.Get("mac"))
+	normalized, ok := models.NormalizeMAC(macStr)
+	if !ok {
+		http.Redirect(w, r, "/admin/macs?err=bad_mac", http.StatusSeeOther)
+		return
+	}
+	notes := strings.TrimSpace(r.PostForm.Get("notes"))
+	if len(notes) > 1000 {
+		notes = notes[:1000]
+	}
+	if err := a.DB.SetMACNotes(r.Context(), normalized, notes); err != nil {
+		log.Printf("set mac notes %s: %v", normalized, err)
+		http.Redirect(w, r, "/admin/macs/detail?mac="+normalized+"&err=internal", http.StatusSeeOther)
+		return
+	}
+	a.DB.Audit(r.Context(), "admin", "mac_notes", normalized,
+		"len="+strconv.Itoa(len(notes))+" ip="+clientIP(r))
+	http.Redirect(w, r, "/admin/macs/detail?mac="+normalized+"&ok=notes", http.StatusSeeOther)
+}
+
 func (a *App) handleAdminResync(w http.ResponseWriter, r *http.Request) {
 	if err := a.MACSvc.Resync(r.Context()); err != nil {
 		log.Printf("admin resync: %v", err)

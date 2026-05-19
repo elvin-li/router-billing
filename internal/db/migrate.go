@@ -29,6 +29,10 @@ func runMigrations(d *sql.DB) error {
 		{"users", "totp_pending", "TEXT NOT NULL DEFAULT ''"},
 		{"users", "notify_expiry", "INTEGER NOT NULL DEFAULT 1"},
 		{"macs", "schedule_json", "TEXT NOT NULL DEFAULT ''"},
+		// v0.82: per-MAC free-text notes — distinct from label which is
+		// short. Lets support attach context like "customer's work tablet,
+		// expected high traffic" without overloading the label.
+		{"macs", "notes", "TEXT NOT NULL DEFAULT ''"},
 	}
 	for _, c := range columns {
 		if err := addColumnIfMissing(d, c.table, c.name, c.def); err != nil {

@@ -1,5 +1,34 @@
 # Changelog
 
+## v0.82 — Per-MAC notes (free-text support context)
+
+Adds a `notes` text column to the macs table. `label` was always
+"short identifier" (printed on the MAC list); for support context
+like "customer's IPTV box — expected high traffic" or "shared
+device, used by family" the operator needs a longer field.
+
+Schema: new `macs.notes TEXT NOT NULL DEFAULT ''` migrated via
+addColumnIfMissing — zero-impact for existing rows.
+
+UI:
+- /admin/macs/detail (v0.48) gains a "备注" textarea + save button
+- POST /admin/macs/notes — saves trimmed text capped at 1000 chars
+- Flash "备注已保存 ✓" on success
+
+API exposure: the existing `mac` field in API responses now
+includes `notes` (since the field is on the model). No new
+endpoint — caller can use POST /api/admin/macs/grant with label
+for short or use the UI for the longer free-text.
+
+Audit row: `mac_notes` target=mac detail="len=N ip=...". The
+content is not logged (would balloon the audit table on the
+common "paste a paragraph" workflow).
+
+4 race-clean tests: save persists + audits, 2000-char input
+is truncated to 1000 server-side, detail page renders the
+textarea pre-filled with saved content, malformed MAC →
+err=bad_mac.
+
 ## v0.81 — GET /api/admin/version (minimal status snapshot)
 
 Tiny endpoint for status-page widgets polling every few seconds.
