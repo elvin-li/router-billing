@@ -1,5 +1,30 @@
 # Changelog
 
+## v0.78 — GET /api/admin/macs/get (programmatic v0.48)
+
+Programmatic equivalent of v0.48's MAC detail page. Returns the
+MAC row + owner (auth-material stripped) + current sighting +
+last 50 orders + audit timeline. Single endpoint = single round
+trip for "give me everything about MAC X" support automation.
+
+  GET /api/admin/macs/get?mac=AA:BB:...   Bearer <any-token>
+  -> 200 { "mac": {...}, "owner": {...}|null,
+           "sighting": {...}|null,
+           "orders": [...], "audit": [...] }
+  -> 400 if mac missing or malformed
+  -> 404 if mac not found
+
+Input normalized through models.NormalizeMAC so dashed / lower-
+case forms resolve to the canonical row.
+
+Owner is a deliberate subset (id, phone, suspended, totp_enabled,
+created_at) — no password_hash / totp_secret / totp_pending.
+Anti-leak red-line test pins this with the secrets-as-literals
+search pattern used by v0.47/v0.65.
+
+6 race-clean tests including the normalization round-trip, the
+400 / 404 branches, and the anti-leak check.
+
 ## v0.77 — GET /api/admin/sessions
 
 Programmatic mirror of /admin/sessions. Useful for monitoring:

@@ -201,6 +201,80 @@ func (a *App) handleAPIMACList(w http.ResponseWriter, r *http.Request, _ string)
 	writeJSON(w, http.StatusOK, map[string]any{"macs": macs, "count": len(macs)})
 }
 
+// GET /api/admin/macs/get?mac=...   Bearer <any-token>
+//
+// Programmatic equivalent of v0.48's UI MAC detail page. Returns the
+// MAC row, current sighting (or null), the user that owns it (or null),
+// up to 50 recent orders, and the audit timeline targeting this MAC.
+//
+//	-> 200 { "mac": {...}, "owner": {...}|null, "sighting": {...}|null,
+//	         "orders": [...], "audit": [...] }
+//	   400 if mac param missing or malformed
+//	   404 if mac not found in macs table
+//
+// Read-only token acceptable — same posture as v0.47 order/get.
+// Anti-leak: owner field is stripped of password_hash / totp_secret /
+// totp_pending.
+func (a *App) handleAPIMACGet(w http.ResponseWriter, r *http.Request, _ string) {
+	if r.Method != http.MethodGet {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "GET only"})
+		return
+	}
+	macStr := strings.TrimSpace(r.URL.Query().Get("mac"))
+	if macStr == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "mac required"})
+		return
+	}
+	normalized, ok := models.NormalizeMAC(macStr)
+	if !ok {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid mac"})
+		return
+	}
+	m, err := a.DB.GetMAC(r.Context(), normalized)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+	if m == nil {
+		writeJSON(w, http.StatusNotFound, map[string]string{"error": "mac not found"})
+		return
+	}
+	// Owner — strip auth material.
+	type apiOwner struct {
+		ID          int64     `json:"id"`
+		Phone       string    `json:"phone"`
+		Suspended   bool      `json:"suspended"`
+		TOTPEnabled bool      `json:"totp_enabled"`
+		CreatedAt   time.Time `json:"created_at"`
+	}
+	var ownerOut *apiOwner
+	if m.UserID != nil {
+		u, _ := a.DB.GetUser(r.Context(), *m.UserID)
+		if u != nil {
+			ownerOut = &apiOwner{
+				ID:          u.ID,
+				Phone:       u.Phone,
+				Suspended:   u.Suspended,
+				TOTPEnabled: u.TOTPSecret != "",
+				CreatedAt:   u.CreatedAt,
+			}
+		}
+	}
+	sighting, _ := a.DB.GetSightingForMAC(r.Context(), normalized)
+	orders, _ := a.DB.SearchOrders(r.Context(), normalized, "", 50)
+	timeline, _ := a.DB.SearchAudit(r.Context(), db.AuditFilter{
+		Target: normalized,
+		Limit:  200,
+	})
+	writeJSON(w, http.StatusOK, map[string]any{
+		"mac":      m,
+		"owner":    ownerOut,
+		"sighting": sighting,
+		"orders":   orders,
+		"audit":    timeline,
+	})
+}
+
 // GET /api/admin/sessions?kind=admin|user   Bearer <any-token>
 //
 // Programmatic mirror of /admin/sessions. Returns active session rows
