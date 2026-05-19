@@ -59,15 +59,22 @@ func (a *App) handleAdminTestWebhook(w http.ResponseWriter, r *http.Request) {
 		http.Redirect(w, r, "/admin/maintenance?err=webhook_not_configured", http.StatusSeeOther)
 		return
 	}
-	a.Notifier.Send(notify.Event{
-		Type:   "test",
-		Actor:  "admin",
-		Detail: "manual test from /admin/maintenance ip=" + clientIP(r),
-	})
+	a.Notifier.Send(notifyTestEvent("admin", clientIP(r)))
 	log.Printf("admin test-webhook → %s ip=%s", a.Cfg.Webhook.URL, clientIP(r))
 	a.DB.Audit(r.Context(), "admin", "webhook_test", "",
 		"url="+a.Cfg.Webhook.URL+" ip="+clientIP(r))
 	http.Redirect(w, r, "/admin/maintenance?ok=webhook_test", http.StatusSeeOther)
+}
+
+// notifyTestEvent is the shared body of the "test" event both the UI and
+// the API webhook-test handlers enqueue. Pulled out so the audit / payload
+// shape can't drift between paths.
+func notifyTestEvent(actor, ip string) notify.Event {
+	return notify.Event{
+		Type:   "test",
+		Actor:  actor,
+		Detail: "manual webhook test ip=" + ip,
+	}
 }
 
 // POST /admin/maintenance/expire-now

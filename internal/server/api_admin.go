@@ -794,6 +794,38 @@ func (a *App) handleAPIUserGrant(w http.ResponseWriter, r *http.Request, actor s
 	})
 }
 
+// POST /api/admin/webhook/test  Bearer <write-token>
+//
+// Programmatic equivalent of the /admin/maintenance/test-webhook button.
+// Enqueues a `type=test` event through the existing Notifier. Useful for
+// CI / deploy-time integration checks ("after the new release rolls out,
+// confirm our webhook handler still receives events").
+//
+//	-> 200 { "status": "enqueued", "url": "https://..." }
+//	   503 if the webhook isn't configured.
+//
+// Delivery is async (the Notifier owns its queue); a 200 means the event
+// was queued, not that the downstream service received it. The caller
+// confirms receipt on their own side, OR watches the audit log for the
+// retry/drop pattern.
+func (a *App) handleAPIWebhookTest(w http.ResponseWriter, r *http.Request, actor string) {
+	if r.Method != http.MethodPost {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "POST only"})
+		return
+	}
+	if a.Notifier == nil || a.Cfg.Webhook.URL == "" {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "webhook not configured"})
+		return
+	}
+	a.Notifier.Send(notifyTestEvent(actor, clientIP(r)))
+	a.DB.Audit(r.Context(), actor, "webhook_test", "",
+		"url="+a.Cfg.Webhook.URL+" via=api ip="+clientIP(r))
+	writeJSON(w, http.StatusOK, map[string]any{
+		"status": "enqueued",
+		"url":    a.Cfg.Webhook.URL,
+	})
+}
+
 type apiUserGrantByPhoneReq struct {
 	Phone string `json:"phone"`
 	Days  int    `json:"days"`

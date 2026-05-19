@@ -1,5 +1,31 @@
 # Changelog
 
+## v0.36 — POST /api/admin/webhook/test
+
+Programmatic equivalent of the /admin/maintenance/test-webhook
+button (v0.20). Useful for CI / deploy-time integration checks:
+"after the new release rolls out, confirm our webhook handler still
+receives events."
+
+  POST /api/admin/webhook/test   Bearer <write-token>
+  -> 200 { "status": "enqueued", "url": "https://..." }
+  -> 503 if webhook isn't configured
+
+Delivery is async — a 200 means the event hit the Notifier queue,
+not that the downstream service received it. The caller confirms
+receipt on their side (or watches the audit log for retry/drop).
+
+Audit: `webhook_test` with `via=api ip=...` so reviewers can tell
+UI test clicks from automation integration tests.
+
+Refactor: the `type=test` event body is now produced by a shared
+`notifyTestEvent(actor, ip)` helper used by both the UI and the API
+handler — so the payload shape can't drift between the two paths.
+
+4 race-clean tests: real-server delivery confirmation (httptest
+upstream verifies the event lands), 503 when unconfigured,
+readonly-token reject, and audit-row via=api assertion.
+
 ## v0.35 — 手动触发后台维护任务
 
 Two buttons on /admin/maintenance that immediately fire what the
