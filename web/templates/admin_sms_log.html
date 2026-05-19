@@ -19,11 +19,27 @@
 
     {{if eq .OK "sent"}}<div class="flash ok">短信已发送 ✓</div>{{end}}
     {{if eq .OK "reminders"}}<div class="flash ok">到期提醒完成 ✓ 已发送 {{index .Query0 "sent"}} · 跳过 {{index .Query0 "skipped"}} · 错误 {{index .Query0 "errored"}}</div>{{end}}
+    {{if eq .OK "digest_sent"}}<div class="flash ok">日报短信已发送 ✓</div>{{end}}
+    {{if eq .Err "digest_no_phone"}}<div class="flash err">日报失败：admin_login_alert_phone 未配置</div>{{end}}
     {{if eq .Err "sms_disabled"}}<div class="flash err">SMS 未启用</div>{{end}}
     {{if eq .Err "sms_failed"}}<div class="flash err">短信发送失败（详情见审计日志）</div>{{end}}
     {{if eq .Err "bad_phone"}}<div class="flash err">手机号格式不对</div>{{end}}
 
     {{if .Available}}
+    <section class="admin-card">
+      <h2 style="margin-top:0;">每日运营日报</h2>
+      <p class="desc">
+        配 <code>sms.admin_digest_hour</code>（1..24 UTC 小时）+
+        <code>sms.admin_login_alert_phone</code> 后，每天定时发送一条
+        昨日营收 / 今日失败单 / 未来 3 天到期 MAC 的汇总短信。
+        点下方按钮立即发一份。
+      </p>
+      <form method="post" action="/admin/sms-log/digest">
+        {{template "csrf" .}}
+        <button class="btn outline" type="submit" style="width:auto;">立即发送日报</button>
+      </form>
+    </section>
+
     <section class="admin-card">
       <h2 style="margin-top:0;">套餐到期提醒</h2>
       <p class="desc">

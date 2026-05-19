@@ -209,6 +209,7 @@ func (a *App) Routes() http.Handler {
 	mux.HandleFunc("/admin/api-tokens", a.requireAdmin(a.handleAdminAPITokens))
 	mux.HandleFunc("/admin/sms-log/test", a.requireAdmin(a.handleAdminSMSTest))
 	mux.HandleFunc("/admin/sms-log/expiry-reminders", a.requireAdmin(a.handleAdminExpiryReminderTrigger))
+	mux.HandleFunc("/admin/sms-log/digest", a.requireAdmin(a.handleAdminDigestTrigger))
 	mux.HandleFunc("/admin/ssid-cards", a.requireAdmin(a.handleAdminSSIDCards))
 	mux.HandleFunc("/admin/ssid-cards/qr", a.requireAdmin(a.handleAdminSSIDCardQR))
 	mux.HandleFunc("/admin/devices/stream", a.requireAdmin(a.handleAdminDevicesStream))

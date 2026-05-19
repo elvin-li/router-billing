@@ -3,6 +3,7 @@ package server
 import (
 	"context"
 	"log"
+	"net/http"
 	"strconv"
 	"time"
 
@@ -99,6 +100,31 @@ func formatAdminDigestBody(s db.AdminDigestStats) string {
 		body += " · 今日 " + strconv.Itoa(s.FailedOrdersToday) + " 单失败"
 	}
 	return body
+}
+
+// POST /admin/sms-log/digest
+//
+// Manual trigger for the daily-digest SMS. Same code path as the scheduled
+// loop, so manual sends use the same body shape + audit entry. Useful for
+// admins to verify the digest works before relying on the daily cron.
+func (a *App) handleAdminDigestTrigger(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Redirect(w, r, "/admin/sms-log", http.StatusSeeOther)
+		return
+	}
+	if a.SMS == nil || !a.SMS.Available() {
+		http.Redirect(w, r, "/admin/sms-log?err=sms_disabled", http.StatusSeeOther)
+		return
+	}
+	if a.Cfg.SMS.AdminLoginAlertPhone == "" {
+		http.Redirect(w, r, "/admin/sms-log?err=digest_no_phone", http.StatusSeeOther)
+		return
+	}
+	if _, err := a.sendAdminDigest(r.Context()); err != nil {
+		http.Redirect(w, r, "/admin/sms-log?err=sms_failed", http.StatusSeeOther)
+		return
+	}
+	http.Redirect(w, r, "/admin/sms-log?ok=digest_sent", http.StatusSeeOther)
 }
 
 func leftPad2(n int) string {

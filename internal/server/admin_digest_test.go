@@ -132,6 +132,66 @@ func TestAdminDigestLoopShortCircuitsWhenDisabled(t *testing.T) {
 	}
 }
 
+func TestAdminDigestTriggerSendsAndAudits(t *testing.T) {
+	app := setupTestApp(t)
+	console := sms.NewConsole(50)
+	app.SMS = &sms.Sender{P: console}
+
+	h := app.Routes()
+	jar := loginAdmin(t, h)
+	csrf := jar[csrfCookieName]
+
+	// Set the digest phone AFTER login so the login-alert SMS path doesn't
+	// fire (it reads the same config field). The digest button reads the
+	// field at request-time, so this still works.
+	app.Cfg.SMS.AdminLoginAlertPhone = "13800160100"
+
+	type kv = map[string][]string
+	res, _ := do(t, h, "POST", "/admin/sms-log/digest",
+		kv{"_csrf": {csrf}}, jar)
+	if res.StatusCode != 303 {
+		t.Fatalf("status: %d", res.StatusCode)
+	}
+	if !strings.Contains(res.Header.Get("Location"), "ok=digest_sent") {
+		t.Errorf("redirect: %s", res.Header.Get("Location"))
+	}
+	recs := console.Recent()
+	if len(recs) != 1 {
+		t.Errorf("expected 1 SMS (the digest); got %d", len(recs))
+	}
+	if !strings.Contains(recs[0].Message, "日报") {
+		t.Errorf("last SMS should be the digest body; got %q", recs[0].Message)
+	}
+}
+
+func TestAdminDigestTriggerNoSMSReturnsErr(t *testing.T) {
+	app := setupTestApp(t)
+	h := app.Routes()
+	jar := loginAdmin(t, h)
+	csrf := jar[csrfCookieName]
+	type kv = map[string][]string
+	res, _ := do(t, h, "POST", "/admin/sms-log/digest",
+		kv{"_csrf": {csrf}}, jar)
+	if !strings.Contains(res.Header.Get("Location"), "sms_disabled") {
+		t.Errorf("expected sms_disabled; got %s", res.Header.Get("Location"))
+	}
+}
+
+func TestAdminDigestTriggerNoPhoneReturnsErr(t *testing.T) {
+	app := setupTestApp(t)
+	app.SMS = &sms.Sender{P: sms.NewConsole(50)}
+	// app.Cfg.SMS.AdminLoginAlertPhone left empty.
+	h := app.Routes()
+	jar := loginAdmin(t, h)
+	csrf := jar[csrfCookieName]
+	type kv = map[string][]string
+	res, _ := do(t, h, "POST", "/admin/sms-log/digest",
+		kv{"_csrf": {csrf}}, jar)
+	if !strings.Contains(res.Header.Get("Location"), "digest_no_phone") {
+		t.Errorf("expected digest_no_phone; got %s", res.Header.Get("Location"))
+	}
+}
+
 func TestAdminDigestLoopShortCircuitsWhenSMSNotConfigured(t *testing.T) {
 	app := setupTestApp(t)
 	app.Cfg.SMS.AdminDigestHour = 3
