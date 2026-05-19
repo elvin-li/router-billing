@@ -1,5 +1,26 @@
 # Changelog
 
+## v0.68 — /admin/sms-log: phone + only_failed UI filters
+
+UI counterpart to v0.45's API filters. The DB-backed sms_log table
+on /admin/sms-log was previously a "last 100 rows, no filter"
+list — useful for casual checking but painful for support
+workflows like "show me everything we tried to send this
+customer."
+
+  GET /admin/sms-log?phone=13800...&only_failed=1
+
+Inline form on the persistent-records section: text input for
+phone substring, checkbox for only_failed, 筛选 + 重置 buttons.
+
+Reuses v0.45's `db.SearchSMSLogs(SMSLogFilter)` — no new DB
+surface. The form's URL is bookmark-friendly so support agents
+can save a customer-specific filter.
+
+3 race-clean tests: phone filter isolates matching rows + excludes
+others, only_failed filter excludes OK rows, page renders both
+filter controls.
+
 ## v0.67 — /admin/export/macs.csv 支持 q/status/user_id 过滤
 
 Closes the last gap in the "CSV export matches the on-screen

@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"strings"
 
+	"router-billing/internal/db"
 	"router-billing/internal/models"
 	"router-billing/internal/sms"
 )
@@ -29,9 +30,16 @@ func (a *App) handleAdminSMSLog(w http.ResponseWriter, r *http.Request) {
 	} else {
 		providerName = "none"
 	}
-	// DB-backed log, newest first. Capped at 100 for page render; the
-	// purgeLoop trims the table itself.
-	dbLogs, _ := a.DB.RecentSMSLogs(r.Context(), 100)
+	// DB-backed log, newest first. v0.68 wires the v0.45 SearchSMSLogs
+	// filter — phone + only_failed — through from the URL so admins can
+	// drill in without scraping the JSON endpoint.
+	phoneFilter := strings.TrimSpace(r.URL.Query().Get("phone"))
+	onlyFailed := r.URL.Query().Get("only_failed") == "1"
+	dbLogs, _ := a.DB.SearchSMSLogs(r.Context(), db.SMSLogFilter{
+		Phone:      phoneFilter,
+		OnlyFailed: onlyFailed,
+		Limit:      100,
+	})
 	// Pass through the raw query so the "reminders" flash can read
 	// sent/skipped/errored counts.
 	rawQuery := map[string]string{}
@@ -46,6 +54,8 @@ func (a *App) handleAdminSMSLog(w http.ResponseWriter, r *http.Request) {
 		"Query0":           rawQuery,
 		"WindowDays":       a.Cfg.SMS.ExpiryReminderWindowDays(),
 		"ReminderDisabled": a.Cfg.SMS.ExpiryReminderDisable,
+		"PhoneFilter":      phoneFilter,
+		"OnlyFailed":       onlyFailed,
 	}))
 }
 
