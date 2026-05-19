@@ -27,6 +27,7 @@ import (
 	"router-billing/internal/config"
 	"router-billing/internal/db"
 	"router-billing/internal/models"
+	"router-billing/internal/voucher"
 )
 
 // requireAPITokenWrite extracts Authorization: Bearer <token>, verifies it
@@ -571,6 +572,134 @@ func (a *App) handleAPIMACRevoke(w http.ResponseWriter, r *http.Request, actor s
 	}
 	a.DB.Audit(r.Context(), actor, "revoke", mac, "via=api ip="+clientIP(r))
 	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+}
+
+type apiVoucherGenReq struct {
+	Count       int    `json:"count"`
+	Days        int    `json:"days"`
+	Batch       string `json:"batch,omitempty"`
+	Label       string `json:"label,omitempty"`
+	ExpiresDays int    `json:"expires_days,omitempty"`
+}
+
+// POST /api/admin/vouchers/generate  Bearer <write-token>
+//
+//	{ "count": 100, "days": 30, "batch": "promo-2026Q2",
+//	  "label": "summer-promo", "expires_days": 180 }
+//	-> 200 { "batch": "promo-2026Q2", "created": 100,
+//	         "codes": ["AB12-CD34-EF56", ...] }
+//
+// Mirrors /admin/vouchers/generate but returns the freshly-minted codes in
+// the JSON response (which is the whole point — the partner needs the
+// plaintext to print / sell them). Codes are PRETTY-formatted (4-4-4 with
+// dashes) so the response can be piped straight into a printer template
+// without re-formatting.
+//
+// Limits: count is clamped to [1,1000] and days must be positive; expires_days
+// is optional (omitted means "no expiry"). Batch defaults to a timestamp-based
+// label if absent (same as the UI). Each generated code retries up to 3 times
+// on the very unlikely 12-char collision.
+//
+// Audit: `voucher_batch` target=<batch> detail="count=N days=D via=api".
+// Same shape as the UI generator so the trail looks consistent regardless of
+// origin.
+func (a *App) handleAPIVoucherGenerate(w http.ResponseWriter, r *http.Request, actor string) {
+	if r.Method != http.MethodPost {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "POST only"})
+		return
+	}
+	var req apiVoucherGenReq
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "bad json: " + err.Error()})
+		return
+	}
+	if req.Count <= 0 || req.Count > 1000 {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "count must be 1..1000"})
+		return
+	}
+	if req.Days <= 0 {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "days must be > 0"})
+		return
+	}
+	batch := strings.TrimSpace(req.Batch)
+	if batch == "" {
+		batch = "B" + time.Now().UTC().Format("20060102-150405")
+	}
+	var expires *time.Time
+	if req.ExpiresDays > 0 {
+		t := time.Now().UTC().AddDate(0, 0, req.ExpiresDays)
+		expires = &t
+	}
+
+	codes := make([]string, 0, req.Count)
+	for i := 0; i < req.Count; i++ {
+		// Up to 3 retries on collision (12-char alphabet collision is
+		// effectively impossible at this scale, but the UI handler does
+		// the same defensive retry).
+		for try := 0; try < 3; try++ {
+			code, err := voucher.New()
+			if err != nil {
+				log.Printf("api voucher gen: %v", err)
+				break
+			}
+			if _, err := a.DB.CreateVoucher(r.Context(), code, req.Days, req.Label, batch, expires); err != nil {
+				if strings.Contains(strings.ToLower(err.Error()), "unique") {
+					continue
+				}
+				log.Printf("api voucher insert: %v", err)
+				break
+			}
+			codes = append(codes, voucher.Pretty(code))
+			break
+		}
+	}
+	a.DB.Audit(r.Context(), actor, "voucher_batch", batch,
+		"count="+strconv.Itoa(len(codes))+" days="+strconv.Itoa(req.Days)+" via=api ip="+clientIP(r))
+	writeJSON(w, http.StatusOK, map[string]any{
+		"batch":   batch,
+		"created": len(codes),
+		"codes":   codes,
+	})
+}
+
+type apiVoucherBatchRevokeReq struct {
+	Batch string `json:"batch"`
+}
+
+// POST /api/admin/vouchers/batch/revoke  Bearer <write-token>
+//
+//	{ "batch": "promo-2026Q2" }
+//	-> 200 { "revoked": 42 }
+//
+// Paired with the v0.26 UI batch-revoke button. Mass-kills every still-usable
+// voucher in `batch`; already-redeemed rows are intentionally untouched
+// (revoking them would lie about real usage). Pass "" to revoke the unbatched
+// bucket (same semantics as VoucherBatchStats's "(no batch)" row).
+//
+// Audit: `voucher_batch_revoke` with detail "count=N via=api ip=...".
+func (a *App) handleAPIVoucherBatchRevoke(w http.ResponseWriter, r *http.Request, actor string) {
+	if r.Method != http.MethodPost {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "POST only"})
+		return
+	}
+	var req apiVoucherBatchRevokeReq
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "bad json: " + err.Error()})
+		return
+	}
+	batch := strings.TrimSpace(req.Batch)
+	n, err := a.DB.RevokeVoucherBatch(r.Context(), batch)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+	displayBatch := batch
+	if displayBatch == "" {
+		displayBatch = "(no batch)"
+	}
+	a.DB.Audit(r.Context(), actor, "voucher_batch_revoke", displayBatch,
+		"count="+strconv.Itoa(n)+" via=api ip="+clientIP(r))
+	writeJSON(w, http.StatusOK, map[string]any{"revoked": n})
 }
 
 // itoaSmall: 1..3650 covers our range; no fmt dep needed.

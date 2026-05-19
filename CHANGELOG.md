@@ -1,5 +1,48 @@
 # Changelog
 
+## v0.27 — API 充值码生成 + 批量作废
+
+Completes the API write-surface for vouchers. Partners with the
+write-token can now:
+
+  POST /api/admin/vouchers/generate   Bearer <write-token>
+  { "count": 100, "days": 30, "batch": "promo-2026Q2",
+    "label": "summer-promo", "expires_days": 180 }
+  -> 200 { "batch": "promo-2026Q2", "created": 100,
+           "codes": ["AB12-CD34-EF56", ...] }
+
+  POST /api/admin/vouchers/batch/revoke   Bearer <write-token>
+  { "batch": "promo-2026Q2" }
+  -> 200 { "revoked": 42 }
+
+The generate endpoint returns plaintext codes (4-4-4 dashed
+form) because the partner *needs* the plaintext to print or
+sell them — this matches the existing UI generator. The list
+endpoint (`GET /api/admin/vouchers`) still masks codes to a
+4-char prefix; only the freshly-minted ones are returned in
+plaintext, and only to the writer who just created them.
+
+Generate limits: count clamped to [1,1000]; days must be
+positive; expires_days optional (omitted = no expiry); batch
+defaults to a `B<timestamp>` label same as the UI.
+
+Batch-revoke is the API mirror of v0.26's UI button —
+RevokeVoucherBatch underneath, already-redeemed rows untouched,
+empty-string batch revokes the unbatched bucket.
+
+Audit:
+- generate: `voucher_batch` target=<batch> detail="count=N days=D via=api"
+- batch revoke: `voucher_batch_revoke` target=<batch> detail="count=N via=api"
+
+Matches the UI handlers' audit shape so reviewers see one
+consistent trail regardless of origin.
+
+8 race-clean tests covering happy path, default batch name,
+oversize-count reject, zero-days reject, readonly-token reject
+(both endpoints), unbatched-bucket semantics, audit-row
+assertion, AND an anti-leak check that the response body
+never contains password_hash / totp_secret / session_token.
+
 ## v0.26 — 批量作废充值码
 
 When a partner deal falls through, killing 500 vouchers one-by-one
