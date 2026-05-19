@@ -1,5 +1,34 @@
 # Changelog
 
+## v0.30 — 公开 /health 端点（无 auth）
+
+For load balancers, uptime monitors (UptimeRobot, Pingdom, k8s
+readiness probes), and anyone that just wants "is the service
+alive" without needing a token.
+
+  GET /health
+  GET /healthz    (k8s convention alias)
+
+  200 OK   { "status": "ok", "version": "...", "uptime_seconds": N }
+  503      { "status": "degraded", "error": "db ping: ..." }
+
+The DB ping is a `SELECT 1` with a 2-second deadline so a wedged
+sqlite returns 503 promptly rather than hanging the monitor.
+
+Distinct from the three existing health-ish endpoints:
+- `/admin/health`     — cookie-gated, full operational stats
+- `/api/admin/health` — Bearer-gated, same payload
+- `/metrics`          — Bearer-gated, Prometheus exposition
+
+`/health` stays MINIMAL on purpose — no row counts, no revenue,
+no provider names, no firewall state. Those reveal operational
+detail that shouldn't be on the open internet.
+
+4 tests including the anti-leak red-line that the public response
+never contains `mac_total`, `revenue_cents`, `wechat_enabled`,
+`firewall`, etc. — the same screen we put on every other
+public-facing endpoint.
+
 ## v0.29 — POST /api/admin/users/grant (按 user 批量续期)
 
 For support workflows where the customer is identified by their

@@ -224,6 +224,12 @@ func (a *App) Routes() http.Handler {
 	// Public-but-tokened metrics endpoint
 	mux.HandleFunc("/metrics", a.handleMetrics)
 
+	// Public health endpoint — no auth, for load balancers / uptime
+	// monitors / k8s readiness probes. Returns 200 if the DB ping
+	// succeeds, 503 otherwise. /healthz is the k8s convention alias.
+	mux.HandleFunc("/health", a.handlePublicHealth)
+	mux.HandleFunc("/healthz", a.handlePublicHealth)
+
 	// Programmatic admin API — Bearer tokens from config.api_tokens.
 	// requireAPITokenRead accepts any token; requireAPITokenWrite blocks
 	// tokens with `readonly: true` from mutating endpoints.
