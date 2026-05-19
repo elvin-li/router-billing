@@ -105,7 +105,7 @@ func (a *App) handleAdminAudit(w http.ResponseWriter, r *http.Request) {
 		"Actions":   actions,
 		"TotalRows": totalRows,
 		"Retention": retention,
-		"UsagePct":  func() int {
+		"UsagePct": func() int {
 			if retention <= 0 {
 				return 0
 			}

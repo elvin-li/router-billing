@@ -443,7 +443,8 @@ type apiRefundReq struct {
 }
 
 // POST /api/admin/orders/refund  Bearer <write-token>
-//   { "order_no": "...", "reason": "..." }
+//
+//	{ "order_no": "...", "reason": "..." }
 //
 // Programmatic refund — same atomic DB transition as the UI button
 // (MarkOrderRefunded rolls back the MAC's expires_at + sets status to
