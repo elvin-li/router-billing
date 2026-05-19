@@ -358,23 +358,58 @@ func (a *App) handleAPIOrderList(w http.ResponseWriter, r *http.Request, _ strin
 	writeJSON(w, http.StatusOK, map[string]any{"orders": orders})
 }
 
-// GET /api/admin/users?q=&limit=
+// GET /api/admin/users?q=&limit=&suspended=1&totp=1
 //
-// Returns up to `limit` users (default 200, max 500). Phone substring filter
-// via `q`. Same shape as the CSV export, just JSON.
+// Returns up to `limit` users (default 200, max 500). Filters:
+//   - q          phone substring (LIKE %q%)
+//   - suspended  "1" / "0" → exact match on the suspended flag
+//   - totp       "1" → only users with TOTP enabled
+//     "0" → only users WITHOUT TOTP (helpful for "who should we
+//     nudge to enable 2FA?" reports)
+//
+// Filters compose — `?q=138&suspended=0&totp=0` returns "active users
+// with a 138-prefix phone who haven't enabled 2FA yet."
+//
+// Same response shape as v0.40: { users: [...], count: N }.
 func (a *App) handleAPIUserList(w http.ResponseWriter, r *http.Request, _ string) {
-	q := strings.TrimSpace(r.URL.Query().Get("q"))
+	qstr := strings.TrimSpace(r.URL.Query().Get("q"))
 	limit := 200
 	if s := r.URL.Query().Get("limit"); s != "" {
 		if n, err := strconv.Atoi(s); err == nil && n > 0 && n <= 500 {
 			limit = n
 		}
 	}
-	users, err := a.DB.SearchUsers(r.Context(), q, limit)
+	users, err := a.DB.SearchUsers(r.Context(), qstr, limit)
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 		return
 	}
+	// Post-filter on suspended / totp in-memory since the row count is
+	// bounded by `limit` (≤500). Adding two more SQL branches for one-off
+	// filters would be more bookkeeping than benefit.
+	q := r.URL.Query()
+	suspendedFilter := q.Get("suspended")
+	totpFilter := q.Get("totp")
+	if suspendedFilter != "" || totpFilter != "" {
+		filtered := users[:0]
+		for _, u := range users {
+			if suspendedFilter == "1" && !u.Suspended {
+				continue
+			}
+			if suspendedFilter == "0" && u.Suspended {
+				continue
+			}
+			if totpFilter == "1" && u.TOTPSecret == "" {
+				continue
+			}
+			if totpFilter == "0" && u.TOTPSecret != "" {
+				continue
+			}
+			filtered = append(filtered, u)
+		}
+		users = filtered
+	}
+
 	macCount := map[int64]int{}
 	if macs, _ := a.DB.ListMACs(r.Context()); macs != nil {
 		for _, m := range macs {
@@ -394,7 +429,7 @@ func (a *App) handleAPIUserList(w http.ResponseWriter, r *http.Request, _ string
 			CreatedAt:   u.CreatedAt,
 		})
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"users": out})
+	writeJSON(w, http.StatusOK, map[string]any{"users": out, "count": len(out)})
 }
 
 type apiGrantReq struct {

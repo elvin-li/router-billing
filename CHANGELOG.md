@@ -1,5 +1,32 @@
 # Changelog
 
+## v0.57 — /api/admin/users filter by suspended + totp
+
+Pre-v0.57 the user-list endpoint had only `q` (phone substring).
+Adding `suspended` + `totp` filters unlocks two common reports:
+
+  GET /api/admin/users?suspended=1
+    → who's locked out?
+  GET /api/admin/users?suspended=0&totp=0
+    → active users to nudge into enabling 2FA
+  GET /api/admin/users?q=138&suspended=0
+    → active users in a phone-prefix range (for SMS campaigns)
+
+Filters compose. `?suspended=0&totp=0` is the "non-2FA active
+user" set most ops eventually want.
+
+Post-filter in Go (the row count is bounded by `limit`, max 500,
+so the in-memory pass is fine). No new SQL surface required.
+
+Response shape gains a `count` field alongside `users` so
+clients can detect "did we hit the limit?" without iterating.
+Legacy no-param callers still get the `users` array unchanged.
+
+4 race-clean tests: suspended filter both directions, TOTP
+filter both directions, suspended+totp compose, and a
+backward-compatibility check that the no-filter path keeps
+working.
+
 ## v0.56 — UI "清理过期订单" button on /admin/orders
 
 UI counterpart to v0.55's bulk-cancel API. One-click "kill all
