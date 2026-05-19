@@ -105,6 +105,19 @@
       </div>
     </div>
 
+    <h2 style="margin:18px 0 4px; font-size:15px;">最近 30 天</h2>
+    <div class="dash-grid">
+      <div class="dash-tile">
+        <div class="label">30 天营收</div>
+        <div class="value">¥{{formatYuan .Snapshot.Month30RevenueCents}}</div>
+        <div class="sub">{{.Snapshot.Month30PaidOrders}} 笔已支付订单</div>
+      </div>
+      <div class="dash-tile">
+        <div class="label">30 天新增用户</div>
+        <div class="value">{{.Snapshot.Month30NewUsers}}</div>
+      </div>
+    </div>
+
     <h2 style="margin:18px 0 4px; font-size:15px;">累计</h2>
     <div class="dash-grid">
       <div class="dash-tile">

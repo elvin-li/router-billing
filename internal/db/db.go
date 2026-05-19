@@ -1310,13 +1310,16 @@ func (d *DB) Stats(ctx context.Context) (Stats, error) {
 // router. All counts are best-effort — errors are returned but the
 // caller decides whether to swallow them.
 type DashboardSnapshot struct {
-	TodayRevenueCents int
-	TodayPaidOrders   int
-	TodayNewUsers     int
-	TodayNewMACs      int
-	Week7RevenueCents int
-	Week7PaidOrders   int
-	ActiveSessions    int
+	TodayRevenueCents   int
+	TodayPaidOrders     int
+	TodayNewUsers       int
+	TodayNewMACs        int
+	Week7RevenueCents   int
+	Week7PaidOrders     int
+	Month30RevenueCents int // last 30 days
+	Month30PaidOrders   int
+	Month30NewUsers     int
+	ActiveSessions      int
 }
 
 func (d *DB) DashboardSnapshot(ctx context.Context) (DashboardSnapshot, error) {
@@ -1335,6 +1338,9 @@ func (d *DB) DashboardSnapshot(ctx context.Context) (DashboardSnapshot, error) {
 		{`SELECT COUNT(*) FROM macs WHERE created_at >= datetime('now','start of day')`, &s.TodayNewMACs},
 		{`SELECT COALESCE(SUM(amount_cents),0) FROM orders WHERE status='paid' AND paid_at >= datetime('now','-7 days')`, &s.Week7RevenueCents},
 		{`SELECT COUNT(*) FROM orders WHERE status='paid' AND paid_at >= datetime('now','-7 days')`, &s.Week7PaidOrders},
+		{`SELECT COALESCE(SUM(amount_cents),0) FROM orders WHERE status='paid' AND paid_at >= datetime('now','-30 days')`, &s.Month30RevenueCents},
+		{`SELECT COUNT(*) FROM orders WHERE status='paid' AND paid_at >= datetime('now','-30 days')`, &s.Month30PaidOrders},
+		{`SELECT COUNT(*) FROM users WHERE created_at >= datetime('now','-30 days')`, &s.Month30NewUsers},
 		{`SELECT COUNT(*) FROM sessions WHERE expires_at > CURRENT_TIMESTAMP`, &s.ActiveSessions},
 	}
 	for _, q := range queries {

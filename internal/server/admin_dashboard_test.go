@@ -17,10 +17,49 @@ func TestAdminDashboardRendersAllSections(t *testing.T) {
 	if res.StatusCode != 200 {
 		t.Fatalf("status: %d", res.StatusCode)
 	}
-	for _, want := range []string{"仪表盘", "今日营收", "最近 7 天", "累计", "最近活动", "快捷操作"} {
+	for _, want := range []string{"仪表盘", "今日营收", "最近 7 天", "最近 30 天", "累计", "最近活动", "快捷操作"} {
 		if !strings.Contains(body, want) {
 			t.Errorf("dashboard missing %q", want)
 		}
+	}
+}
+
+func TestDashboardSnapshot30DayWindow(t *testing.T) {
+	app := setupTestApp(t)
+	ctx := context.Background()
+
+	u, _ := app.DB.CreateUser(ctx, "13800149000", "h")
+	if _, err := app.DB.UpsertMAC(ctx, "AA:BB:CC:DD:E3:01", "", 30, &u.ID); err != nil {
+		t.Fatal(err)
+	}
+
+	// Within window (5 days ago).
+	if _, err := app.DB.Exec(ctx, `
+		INSERT INTO orders (order_no, mac, plan, days, amount_cents, status, payment_method, user_id, paid_at, created_at)
+		VALUES ('ORD-30D-1', 'AA:BB:CC:DD:E3:01', 'month', 30, 500, 'paid', 'wechat', ?, ?, ?)`,
+		u.ID, time.Now().UTC().AddDate(0, 0, -5), time.Now().UTC().AddDate(0, 0, -5)); err != nil {
+		t.Fatal(err)
+	}
+	// Outside window (45 days ago).
+	if _, err := app.DB.Exec(ctx, `
+		INSERT INTO orders (order_no, mac, plan, days, amount_cents, status, payment_method, user_id, paid_at, created_at)
+		VALUES ('ORD-30D-2', 'AA:BB:CC:DD:E3:01', 'month', 30, 1000, 'paid', 'wechat', ?, ?, ?)`,
+		u.ID, time.Now().UTC().AddDate(0, 0, -45), time.Now().UTC().AddDate(0, 0, -45)); err != nil {
+		t.Fatal(err)
+	}
+
+	snap, err := app.DB.DashboardSnapshot(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if snap.Month30RevenueCents != 500 {
+		t.Errorf("Month30 revenue = %d; want 500 (only the 5-day-old order)", snap.Month30RevenueCents)
+	}
+	if snap.Month30PaidOrders != 1 {
+		t.Errorf("Month30 paid orders = %d; want 1", snap.Month30PaidOrders)
+	}
+	if snap.Month30NewUsers != 1 {
+		t.Errorf("Month30 new users = %d; want 1", snap.Month30NewUsers)
 	}
 }
 
