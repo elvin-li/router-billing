@@ -68,9 +68,13 @@ type User struct {
 	// TOTPPending is a freshly-generated secret waiting for the user to type
 	// their first valid code. Cleared on confirm or replaced if the user
 	// re-clicks "enable" before confirming.
-	TOTPPending string    `json:"-"`
-	CreatedAt   time.Time `json:"created_at"`
-	UpdatedAt   time.Time `json:"updated_at"`
+	TOTPPending string `json:"-"`
+	// NotifyExpiry controls whether this user receives the 套餐到期提醒
+	// SMS from the background loop. Defaults to true. The user toggles it
+	// in /user/me account preferences.
+	NotifyExpiry bool      `json:"notify_expiry"`
+	CreatedAt    time.Time `json:"created_at"`
+	UpdatedAt    time.Time `json:"updated_at"`
 }
 
 // --- TrustedDevice ---

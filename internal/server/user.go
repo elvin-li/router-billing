@@ -564,6 +564,40 @@ func (a *App) handleUserLabelMAC(w http.ResponseWriter, r *http.Request) {
 	http.Redirect(w, r, "/user/me?ok=label", http.StatusSeeOther)
 }
 
+// POST /user/notifications  {notify_expiry=on|""}
+//
+// Toggle the per-user opt-out for the 套餐到期提醒 SMS loop. Posting with
+// the `notify_expiry` field present (HTML checkbox semantics — value is
+// "on" when checked, absent when unchecked) flips the flag accordingly.
+func (a *App) handleUserNotificationPrefs(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Redirect(w, r, "/user/me", http.StatusSeeOther)
+		return
+	}
+	uid := a.currentUserID(r)
+	user, err := a.DB.GetUser(r.Context(), uid)
+	if err != nil || user == nil {
+		http.Redirect(w, r, "/user/login", http.StatusSeeOther)
+		return
+	}
+	if err := r.ParseForm(); err != nil {
+		http.Error(w, "form", http.StatusBadRequest)
+		return
+	}
+	on := r.PostForm.Get("notify_expiry") == "on" || r.PostForm.Get("notify_expiry") == "1"
+	if err := a.DB.SetUserNotifyExpiry(r.Context(), uid, on); err != nil {
+		log.Printf("user notify-expiry %d: %v", uid, err)
+		http.Redirect(w, r, "/user/me?err=internal", http.StatusSeeOther)
+		return
+	}
+	action := "notify_expiry_off"
+	if on {
+		action = "notify_expiry_on"
+	}
+	a.DB.Audit(r.Context(), "user:"+user.Phone, action, "", "ip="+clientIP(r))
+	http.Redirect(w, r, "/user/me?ok=prefs", http.StatusSeeOther)
+}
+
 // GET /user/account/export
 //
 // User-driven data export — JSON file with everything we hold about the

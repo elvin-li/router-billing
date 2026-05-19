@@ -91,6 +91,7 @@ func (d *DB) ListMACs(ctx context.Context) ([]models.MAC, error) {
 
 // ListExpiringMACsWithoutRecentReminder returns active MACs that:
 //   - have a user_id (so we have a phone to text),
+//   - their user has notify_expiry = 1 (default; user can opt out),
 //   - expire within `withinDays` from now (but haven't expired yet),
 //   - haven't received an expiry_reminder audit entry in the last 22 hours
 //     (so a daily loop never double-texts the same user).
@@ -105,6 +106,7 @@ func (d *DB) ListExpiringMACsWithoutRecentReminder(ctx context.Context, withinDa
 		SELECT `+macCols+` FROM macs m
 		WHERE m.status='active'
 		  AND m.user_id IS NOT NULL
+		  AND EXISTS (SELECT 1 FROM users u WHERE u.id = m.user_id AND u.notify_expiry = 1)
 		  AND m.expires_at > CURRENT_TIMESTAMP
 		  AND m.expires_at < datetime('now','+'||?||' days')
 		  AND NOT EXISTS (
@@ -815,20 +817,30 @@ func (d *DB) CreateUser(ctx context.Context, phone, passwordHash string) (*model
 		return nil, err
 	}
 	id, _ := res.LastInsertId()
-	return &models.User{ID: id, Phone: phone, PasswordHash: passwordHash, CreatedAt: now, UpdatedAt: now}, nil
+	// Schema default sets notify_expiry = 1; mirror that in the returned
+	// struct so callers don't see a zero-value mismatch.
+	return &models.User{
+		ID:           id,
+		Phone:        phone,
+		PasswordHash: passwordHash,
+		NotifyExpiry: true,
+		CreatedAt:    now,
+		UpdatedAt:    now,
+	}, nil
 }
 
 // userColumns is the canonical SELECT list — extend here when adding columns.
-const userColumns = "id, phone, password_hash, suspended, totp_secret, totp_pending, created_at, updated_at"
+const userColumns = "id, phone, password_hash, suspended, totp_secret, totp_pending, notify_expiry, created_at, updated_at"
 
 func scanUserRow(row interface{ Scan(...any) error }) (*models.User, error) {
 	var u models.User
-	var susp int
-	err := row.Scan(&u.ID, &u.Phone, &u.PasswordHash, &susp, &u.TOTPSecret, &u.TOTPPending, &u.CreatedAt, &u.UpdatedAt)
+	var susp, notify int
+	err := row.Scan(&u.ID, &u.Phone, &u.PasswordHash, &susp, &u.TOTPSecret, &u.TOTPPending, &notify, &u.CreatedAt, &u.UpdatedAt)
 	if err != nil {
 		return nil, err
 	}
 	u.Suspended = susp != 0
+	u.NotifyExpiry = notify != 0
 	return &u, nil
 }
 
@@ -862,6 +874,19 @@ func (d *DB) UpdateUserPassword(ctx context.Context, userID int64, passwordHash 
 	_, err := d.conn.ExecContext(ctx,
 		`UPDATE users SET password_hash = ?, updated_at = ? WHERE id = ?`,
 		passwordHash, time.Now().UTC(), userID)
+	return err
+}
+
+// SetUserNotifyExpiry flips the per-user opt-out for the expiry-reminder
+// SMS loop. Default is on; user toggles via /user/notifications.
+func (d *DB) SetUserNotifyExpiry(ctx context.Context, userID int64, on bool) error {
+	v := 0
+	if on {
+		v = 1
+	}
+	_, err := d.conn.ExecContext(ctx,
+		`UPDATE users SET notify_expiry = ?, updated_at = ? WHERE id = ?`,
+		v, time.Now().UTC(), userID)
 	return err
 }
 

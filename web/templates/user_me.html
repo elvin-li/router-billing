@@ -143,6 +143,22 @@
   </main>
 
   <main class="card" style="max-width:680px;">
+    <span class="section-label">通知偏好</span>
+    {{if eq .OK "prefs"}}<div class="flash ok">偏好已保存 ✓</div>{{end}}
+    <form method="post" action="/user/notifications" style="display:flex; gap:10px; align-items:center; flex-wrap:wrap;">
+      {{template "csrf" .}}
+      <label style="display:flex; align-items:center; gap:8px; font-size:13px;">
+        <input type="checkbox" name="notify_expiry" {{if .User.NotifyExpiry}}checked{{end}} style="width:auto;">
+        套餐到期前 3 天 SMS 提醒
+      </label>
+      <button class="btn outline small" type="submit" style="width:auto;">保存</button>
+    </form>
+    <p class="hint" style="font-size:12px; color:var(--text-soft); margin-top:8px;">
+      关闭后将不再收到到期提醒短信，但服务到期时计费照常发生。
+    </p>
+  </main>
+
+  <main class="card" style="max-width:680px;">
     <span class="section-label">我的数据</span>
     <p style="color:var(--text-soft); margin:6px 0 12px; font-size:13px;">
       下载一份你账号下的全部数据（手机号、MAC 列表、订单、活动日志），JSON 格式。
