@@ -263,6 +263,7 @@ func (a *App) Routes() http.Handler {
 	// requireAPITokenRead accepts any token; requireAPITokenWrite blocks
 	// tokens with `readonly: true` from mutating endpoints.
 	mux.HandleFunc("/api/admin/health", a.requireAPITokenRead(a.handleAPIHealth))
+	mux.HandleFunc("/api/admin/version", a.requireAPITokenRead(a.handleAPIVersion))
 	mux.HandleFunc("/api/admin/dashboard", a.requireAPITokenRead(a.handleAPIDashboard))
 	mux.HandleFunc("/api/admin/sightings", a.requireAPITokenRead(a.handleAPISightings))
 	mux.HandleFunc("/api/admin/sessions", a.requireAPITokenRead(a.handleAPISessions))

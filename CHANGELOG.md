@@ -1,5 +1,23 @@
 # Changelog
 
+## v0.81 — GET /api/admin/version (minimal status snapshot)
+
+Tiny endpoint for status-page widgets polling every few seconds.
+Faster than /api/admin/health (which runs `DB.Stats()` + Attention
+queries every call) since /version is a pure in-memory read.
+
+  GET /api/admin/version   Bearer <any-token>
+  -> 200 { "version": "v0.81", "uptime_seconds": 12345,
+           "wechat_enabled": true, "alipay_enabled": true }
+
+Read-only token acceptable. Payload deliberately minimal — no
+mac_total / user_count / revenue / db_path. Anti-noise red-line
+test enforces that posture.
+
+4 race-clean tests: snapshot echoes version + uptime, readonly
+accepted, POST → 405, payload is minimal (no operational
+detail leaked).
+
 ## v0.80 — CSV export for sms_log + webhook_deliveries (milestone)
 
 Closes the last gap in the observability story. After v0.43 (DB

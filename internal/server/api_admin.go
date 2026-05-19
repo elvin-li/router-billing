@@ -201,6 +201,29 @@ func (a *App) handleAPIMACList(w http.ResponseWriter, r *http.Request, _ string)
 	writeJSON(w, http.StatusOK, map[string]any{"macs": macs, "count": len(macs)})
 }
 
+// GET /api/admin/version   Bearer <any-token>
+//
+// Minimal endpoint returning just the running version + uptime + build
+// info. Faster than /api/admin/health which runs DB queries; useful for
+// status-page widgets that poll every few seconds.
+//
+//	-> 200 { "version": "v0.81", "uptime_seconds": 12345,
+//	         "wechat_enabled": true, "alipay_enabled": true }
+//
+// Read-only token acceptable.
+func (a *App) handleAPIVersion(w http.ResponseWriter, r *http.Request, _ string) {
+	if r.Method != http.MethodGet {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "GET only"})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"version":        a.Version,
+		"uptime_seconds": int(time.Since(a.StartAt).Seconds()),
+		"wechat_enabled": a.WeChat != nil,
+		"alipay_enabled": a.Alipay != nil,
+	})
+}
+
 // GET /api/admin/macs/get?mac=...   Bearer <any-token>
 //
 // Programmatic equivalent of v0.48's UI MAC detail page. Returns the
