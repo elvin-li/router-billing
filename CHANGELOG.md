@@ -1,5 +1,22 @@
 # Changelog
 
+## v0.76 — /admin/devices links known MACs to detail page
+
+Small navigation polish. The /admin/devices online-devices table
+now turns each MAC into a link to the v0.48 detail page when the
+MAC is "Known" (exists in the macs table).
+
+Unknown MACs — devices currently online but never authorized —
+stay plain text. Clicking those would 404-redirect, which would
+just confuse the operator.
+
+The MAC column display + the hostname subline are otherwise
+unchanged.
+
+1 race-clean test: fixture with a known MAC + recent sighting
+confirms the detail link is rendered (accepts both raw `:` and
+`%3a` URL-escape forms).
+
 ## v0.75 — GET /api/admin/audit/distinct?field=actor|action
 
 Programmatic equivalent of v0.72's actor datalist (and the
