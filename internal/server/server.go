@@ -240,6 +240,7 @@ func (a *App) Routes() http.Handler {
 	mux.HandleFunc("/api/admin/orders/refund", a.requireAPITokenWrite(a.handleAPIOrderRefund))
 	mux.HandleFunc("/api/admin/vouchers/generate", a.requireAPITokenWrite(a.handleAPIVoucherGenerate))
 	mux.HandleFunc("/api/admin/vouchers/batch/revoke", a.requireAPITokenWrite(a.handleAPIVoucherBatchRevoke))
+	mux.HandleFunc("/api/admin/users/grant", a.requireAPITokenWrite(a.handleAPIUserGrant))
 
 	// User extras
 	mux.HandleFunc("/user/macs/label", a.requireUser(a.handleUserLabelMAC))

@@ -1,5 +1,38 @@
 # Changelog
 
+## v0.29 — POST /api/admin/users/grant (按 user 批量续期)
+
+For support workflows where the customer is identified by their
+account ID, not by a specific device MAC. The existing
+`/api/admin/macs/grant` requires you to know the device; this one
+fans out across every MAC the user owns.
+
+  POST /api/admin/users/grant   Bearer <write-token>
+  { "user_id": 42, "days": 7, "label": "support-extend" }
+  -> 200 { "user_id": 42, "macs_extended": 3,
+           "macs": [ {"mac": "...", "expires_at": "..."}, ... ] }
+
+Behavior:
+- A user with **zero MACs** is NOT an error — returns 200 with
+  `macs_extended: 0`. Useful for partner integrations that
+  don't track per-device state.
+- A nonexistent user_id returns 404 (so support can spot a
+  typo immediately rather than silently succeeding).
+- Per-MAC errors (firewall sync hiccup, etc.) log but don't
+  fail the whole batch. The `macs` response array is the set
+  that actually got extended.
+
+Audit trail:
+- One `grant` row per MAC (matching UI / per-MAC API shape)
+- One `user_grant` summary row at the top with `macs=N`
+  so reviewers don't have to grep N timestamps to reconstruct
+  the batch.
+
+6 race-clean tests including the zero-MAC happy case, the 404,
+the readonly-token reject, both 400 branches (zero user_id / zero
+days), AND the now-standard anti-leak red-line that the response
+never contains password_hash / totp_secret / session_token.
+
 ## v0.28 — Dashboard 月环比 (MoM delta) 标签
 
 /admin/dashboard now shows month-over-month deltas next to each

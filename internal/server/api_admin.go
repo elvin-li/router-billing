@@ -702,6 +702,98 @@ func (a *App) handleAPIVoucherBatchRevoke(w http.ResponseWriter, r *http.Request
 	writeJSON(w, http.StatusOK, map[string]any{"revoked": n})
 }
 
+type apiUserGrantReq struct {
+	UserID int64  `json:"user_id"`
+	Days   int    `json:"days"`
+	Label  string `json:"label,omitempty"`
+}
+
+// POST /api/admin/users/grant  Bearer <write-token>
+//
+//	{ "user_id": 42, "days": 30, "label": "support-extend" }
+//	-> 200 { "user_id": 42, "macs_extended": 3,
+//	         "macs": [ {"mac": "AA:BB:CC:DD:EE:01", "expires_at": "..."}, ... ] }
+//
+// Convenience endpoint: extends every MAC owned by user_id by `days`. Useful
+// for support workflows ("customer called, lost their phone — give them
+// 7 days on everything") and for partner integrations that track users
+// by their own ID rather than per-device MAC.
+//
+// A user with zero MACs is NOT an error — returns 200 with macs_extended=0.
+// Nonexistent user_id returns 404. Per-MAC failures (firewall sync, etc.)
+// log but don't fail the whole batch; the response macs list is the set
+// that actually got extended.
+//
+// Audit: one `grant` entry per MAC (matching the UI / /api/admin/macs/grant
+// shape) so reviewers see the full fan-out, plus one `user_grant` summary
+// row at the top with the total.
+func (a *App) handleAPIUserGrant(w http.ResponseWriter, r *http.Request, actor string) {
+	if r.Method != http.MethodPost {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "POST only"})
+		return
+	}
+	var req apiUserGrantReq
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "bad json: " + err.Error()})
+		return
+	}
+	if req.UserID <= 0 {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "user_id required"})
+		return
+	}
+	if req.Days <= 0 {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "days must be > 0"})
+		return
+	}
+
+	user, err := a.DB.GetUser(r.Context(), req.UserID)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+	if user == nil {
+		writeJSON(w, http.StatusNotFound, map[string]string{"error": "user not found"})
+		return
+	}
+
+	macs, err := a.DB.ListMACsForUser(r.Context(), req.UserID)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+
+	label := strings.TrimSpace(req.Label)
+	if label == "" {
+		label = "user-grant"
+	}
+
+	type extendedMAC struct {
+		MAC       string    `json:"mac"`
+		ExpiresAt time.Time `json:"expires_at"`
+	}
+	out := make([]extendedMAC, 0, len(macs))
+	for i := range macs {
+		extended, err := a.MACSvc.Extend(r.Context(), macs[i].Mac, label, req.Days, &req.UserID)
+		if err != nil {
+			log.Printf("api user grant %d mac=%s: %v", req.UserID, macs[i].Mac, err)
+			continue
+		}
+		a.DB.Audit(r.Context(), actor, "grant", macs[i].Mac,
+			"days="+strconv.Itoa(req.Days)+" via=api user_id="+strconv.FormatInt(req.UserID, 10)+" ip="+clientIP(r))
+		out = append(out, extendedMAC{MAC: extended.Mac, ExpiresAt: extended.ExpiresAt})
+	}
+	// Summary audit row so reviewers don't have to grep for N grant rows
+	// at the same timestamp to reconstruct the batch.
+	a.DB.Audit(r.Context(), actor, "user_grant", strconv.FormatInt(req.UserID, 10),
+		"days="+strconv.Itoa(req.Days)+" macs="+strconv.Itoa(len(out))+" via=api ip="+clientIP(r))
+
+	writeJSON(w, http.StatusOK, map[string]any{
+		"user_id":       req.UserID,
+		"macs_extended": len(out),
+		"macs":          out,
+	})
+}
+
 // itoaSmall: 1..3650 covers our range; no fmt dep needed.
 func itoaSmall(n int) string {
 	if n == 0 {
