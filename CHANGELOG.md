@@ -1,5 +1,25 @@
 # Changelog
 
+## v0.72 — /admin/audit actor autocomplete (datalist)
+
+The actor filter input previously required typing the exact actor
+string (e.g. `user:13800138000` vs `admin:bob` vs `system`).
+Adding a `<datalist>` autocomplete sourced from the distinct
+audit_log.actor values means operators get type-ahead suggestions
+without remembering the exact prefix.
+
+New `db.DistinctAuditActors(ctx) ([]string, error)` — sorted
+SELECT DISTINCT, capped at 500 (each registered user can appear
+as their own actor on busy installs).
+
+UI: actor input now carries `list="audit-actors"` + a `<datalist>`
+populated with all known actors. The browser handles the
+suggestion popup natively (no JS needed).
+
+2 race-clean tests: DistinctAuditActors returns unique + sorted
+over a 4-row 3-actor fixture, /admin/audit page embeds the
+datalist with the seeded actor.
+
 ## v0.71 — Order detail page: webhook deliveries section
 
 Pairs with v0.70's user-detail SMS history. Order detail page

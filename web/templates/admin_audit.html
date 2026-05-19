@@ -31,7 +31,11 @@
       <form method="get" action="/admin/audit" class="form-grid">
         <div class="field">
           <label>动作者（模糊匹配）</label>
-          <input name="actor" value="{{.Filter.Actor}}" placeholder="如 user:138 / admin">
+          <input name="actor" value="{{.Filter.Actor}}" placeholder="如 user:138 / admin"
+                 list="audit-actors" autocomplete="off">
+          <datalist id="audit-actors">
+            {{range .Actors}}<option value="{{.}}"></option>{{end}}
+          </datalist>
         </div>
         <div class="field">
           <label>动作</label>

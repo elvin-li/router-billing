@@ -2019,6 +2019,30 @@ func (d *DB) DistinctAuditActions(ctx context.Context) ([]string, error) {
 	return out, rows.Err()
 }
 
+// DistinctAuditActors returns the unique actors present in the log,
+// sorted. Used by the /admin/audit page's actor input as a datalist
+// autocomplete source so operators don't have to remember the exact
+// "user:13800138000" vs "admin:foo" formatting.
+//
+// Capped at 500 to keep the dropdown manageable on installs with a
+// long history (each registered user can show up as their own actor).
+func (d *DB) DistinctAuditActors(ctx context.Context) ([]string, error) {
+	rows, err := d.conn.QueryContext(ctx, `SELECT DISTINCT actor FROM audit_log ORDER BY actor LIMIT 500`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []string
+	for rows.Next() {
+		var a string
+		if err := rows.Scan(&a); err != nil {
+			return nil, err
+		}
+		out = append(out, a)
+	}
+	return out, rows.Err()
+}
+
 func (d *DB) PurgeAuditLog(ctx context.Context, keep int) error {
 	if keep <= 0 {
 		keep = 10000
