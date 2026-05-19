@@ -61,10 +61,20 @@ func (a *App) handleAdminAudit(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	actions, _ := a.DB.DistinctAuditActions(r.Context())
+	totalRows, _ := a.DB.CountAudit(r.Context())
+	retention := a.Cfg.Security.AuditLogRetention()
 	a.render(w, "admin_audit.html", a.adminCtx(r, "audit", map[string]any{
-		"Entries": entries,
-		"Filter":  f,
-		"Actions": actions,
+		"Entries":   entries,
+		"Filter":    f,
+		"Actions":   actions,
+		"TotalRows": totalRows,
+		"Retention": retention,
+		"UsagePct":  func() int {
+			if retention <= 0 {
+				return 0
+			}
+			return totalRows * 100 / retention
+		}(),
 	}))
 }
 

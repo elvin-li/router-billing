@@ -1805,6 +1805,14 @@ func (d *DB) ListAudit(ctx context.Context, limit int) ([]AuditEntry, error) {
 	return d.SearchAudit(ctx, AuditFilter{Limit: limit})
 }
 
+// CountAudit returns the total number of audit_log rows. Useful for the
+// "you're at N / cap" indicator on /admin/audit.
+func (d *DB) CountAudit(ctx context.Context) (int, error) {
+	var n int
+	err := d.conn.QueryRowContext(ctx, `SELECT COUNT(*) FROM audit_log`).Scan(&n)
+	return n, err
+}
+
 // AuditFilter restricts which entries SearchAudit returns. Empty fields are
 // ignored. Time strings should be YYYY-MM-DD; mismatched/empty = no bound.
 type AuditFilter struct {

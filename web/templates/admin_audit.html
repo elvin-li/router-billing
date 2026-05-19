@@ -13,7 +13,10 @@
     <div class="admin-header">
       <div>
         <h1>审计日志</h1>
-        <div class="crumbs">最近 300 条 · 登录 / 付款 / 授权 / 替换 / 收回 · 可按字段筛选</div>
+        <div class="crumbs">
+          最近 300 条 · 登录 / 付款 / 授权 / 替换 / 收回 · 可按字段筛选
+          {{if .TotalRows}} · 全表 <strong>{{.TotalRows}}</strong> / {{.Retention}}{{if ge .UsagePct 80}} <span style="color:#dc2626;">({{.UsagePct}}%)</span>{{end}}{{end}}
+        </div>
       </div>
       <div style="display:flex; gap:8px;">
         <a href="/admin/export/audit.csv?actor={{.Filter.Actor}}&action={{.Filter.Action}}&target={{.Filter.Target}}&since={{.Filter.Since}}&until={{.Filter.Until}}" class="btn outline small" style="width:auto;">
