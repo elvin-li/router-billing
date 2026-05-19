@@ -1,5 +1,32 @@
 # Changelog
 
+## v0.53 — UI 取消按钮（v0.52 的 UI 对应）
+
+Inline "取消" button on each pending row in /admin/orders. Same
+atomic semantics as v0.52's API endpoint — UPDATE WHERE
+status='pending' so a race that just paid the order can't lose
+the payment.
+
+  POST /admin/orders/cancel  {order_no}
+  -> /admin/orders?ok=canceled
+     ?err=not_pending  (race: order just left pending)
+     ?err=not_found    (bad order_no)
+     ?err=missing_order (no order_no in form)
+
+Reuses `db.CancelPendingOrder` from v0.52 so the behavior can't
+drift between UI and API paths. Confirm dialog spells out "此操作
+会将状态置为 failed，且不可逆转" to avoid fat-finger disasters.
+
+Audit row: `order_canceled` target=order_no detail="via=ui ip=..."
+(distinct via=ui marker so reviewers can tell UI clicks from
+API automation).
+
+5 race-clean tests: happy path with DB state + audit assertion,
+already-paid case redirects with err=not_pending and leaves
+status unchanged, missing-order err=not_found redirect, GET
+redirect (don't fire), orders list renders the form only for
+pending rows.
+
 ## v0.52 — POST /api/admin/orders/cancel
 
 Cleanup automation for stuck pending orders: customer abandoned

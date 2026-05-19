@@ -3,7 +3,9 @@ package server
 import (
 	"context"
 	"crypto/rand"
+	"database/sql"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"log"
 	"net/http"
@@ -1071,6 +1073,45 @@ func (a *App) handleAdminOrderRefund(w http.ResponseWriter, r *http.Request) {
 	a.DB.Audit(r.Context(), "admin", "order_refunded", orderNo,
 		"reason="+reason+" ip="+clientIP(r))
 	http.Redirect(w, r, "/admin/orders?ok=refunded", http.StatusSeeOther)
+}
+
+// POST /admin/orders/cancel  {order_no}
+//
+// UI counterpart to v0.52's /api/admin/orders/cancel. Inline button on
+// each pending order row. Same atomic semantics — UPDATE WHERE
+// status='pending' so a race that just paid the order can't lose the
+// payment.
+//
+// Audited; on conflict (order already paid/refunded) redirects with
+// `err=not_pending` instead of a generic error so admins see a clear
+// message.
+func (a *App) handleAdminOrderCancel(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Redirect(w, r, "/admin/orders", http.StatusSeeOther)
+		return
+	}
+	if err := r.ParseForm(); err != nil {
+		http.Error(w, "form", http.StatusBadRequest)
+		return
+	}
+	orderNo := strings.TrimSpace(r.PostForm.Get("order_no"))
+	if orderNo == "" {
+		http.Redirect(w, r, "/admin/orders?err=missing_order", http.StatusSeeOther)
+		return
+	}
+	if _, err := a.DB.CancelPendingOrder(r.Context(), orderNo); err != nil {
+		log.Printf("admin order cancel %s: %v", orderNo, err)
+		if errors.Is(err, sql.ErrNoRows) {
+			http.Redirect(w, r, "/admin/orders?err=not_found", http.StatusSeeOther)
+			return
+		}
+		// Status mismatch (race or wrong starting state).
+		http.Redirect(w, r, "/admin/orders?err=not_pending", http.StatusSeeOther)
+		return
+	}
+	a.DB.Audit(r.Context(), "admin", "order_canceled", orderNo,
+		"via=ui ip="+clientIP(r))
+	http.Redirect(w, r, "/admin/orders?ok=canceled", http.StatusSeeOther)
 }
 
 func (a *App) handleAdminResync(w http.ResponseWriter, r *http.Request) {

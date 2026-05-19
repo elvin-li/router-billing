@@ -48,6 +48,9 @@
     {{if eq .OK "refunded"}}
     <div class="flash ok">订单已标记为已退款 ✓ MAC 的剩余天数已按订单天数回滚（若已过期则下次防火墙同步会移除）</div>
     {{end}}
+    {{if eq .OK "canceled"}}<div class="flash ok">订单已取消 ✓ 已置为 failed</div>{{end}}
+    {{if eq .Err "not_pending"}}<div class="flash err">无法取消：订单已不是 pending 状态（可能刚被支付了）</div>{{end}}
+    {{if eq .Err "not_found"}}<div class="flash err">订单未找到</div>{{end}}
     {{if eq .Err "refund_confirm"}}<div class="flash err">退款失败：请在确认框中输入完整订单号</div>{{end}}
     {{if eq .Err "refund_no_order"}}<div class="flash err">退款失败：找不到该订单</div>{{end}}
     {{if eq .Err "refund_not_paid"}}<div class="flash err">退款失败：只能退款已支付的订单</div>{{end}}
@@ -74,6 +77,14 @@
                 {{if eq (printf "%s" .Status) "paid"}}
                   <a href="/receipt?order_no={{.OrderNo}}" target="_blank" class="btn outline tiny" style="width:auto;">收据</a>
                   <button class="btn danger tiny" type="button" onclick="confirmRefund('{{.OrderNo}}', '{{.Mac}}', '{{.Days}}', '{{formatYuan .AmountCents}}')">退款</button>
+                {{end}}
+                {{if eq (printf "%s" .Status) "pending"}}
+                  <form method="post" action="/admin/orders/cancel" style="display:inline;"
+                        onsubmit="return confirm('取消订单 {{.OrderNo}}？此操作会将状态置为 failed，且不可逆转。');">
+                    {{template "csrf" $}}
+                    <input type="hidden" name="order_no" value="{{.OrderNo}}">
+                    <button class="btn outline tiny" type="submit" style="width:auto;">取消</button>
+                  </form>
                 {{end}}
                 {{if eq (printf "%s" .Status) "refunded"}}<span class="pill blocked">已退款</span>{{end}}
               </td>
