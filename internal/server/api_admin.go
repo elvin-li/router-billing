@@ -872,6 +872,53 @@ func (a *App) handleAPIUserGrant(w http.ResponseWriter, r *http.Request, actor s
 // can contain temp passwords / reset codes / TOTP-recovery hints), so the
 // message field is returned as-is — same trust model as the persistent
 // DB which already holds it.
+// GET /api/admin/orders/get?order_no=...   Bearer <any-token>
+//
+// Programmatic equivalent of v0.42's UI detail page. Returns the order
+// row, the linked MAC's current state (or null if deleted), and the
+// audit timeline targeting this order_no. Useful for support automation:
+// "given an order number from a customer ticket, build a unified view
+// without scraping the admin HTML."
+//
+//	-> 200 { "order": {...}, "mac": {...}|null, "audit": [...] }
+//	   404 if order_no not found
+//
+// Read-only token acceptable — the response only carries the order's
+// already-stored fields plus public audit text. No password_hash or other
+// auth material is in the payload.
+func (a *App) handleAPIOrderGet(w http.ResponseWriter, r *http.Request, _ string) {
+	if r.Method != http.MethodGet {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "GET only"})
+		return
+	}
+	orderNo := strings.TrimSpace(r.URL.Query().Get("order_no"))
+	if orderNo == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "order_no required"})
+		return
+	}
+	order, err := a.DB.GetOrder(r.Context(), orderNo)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+	if order == nil {
+		writeJSON(w, http.StatusNotFound, map[string]string{"error": "order not found"})
+		return
+	}
+	// MAC may be nil if the device was deleted after the order — still
+	// return the order itself + timeline so support can investigate.
+	mac, _ := a.DB.GetMAC(r.Context(), order.Mac)
+	timeline, _ := a.DB.SearchAudit(r.Context(), db.AuditFilter{
+		Target: orderNo,
+		Limit:  200,
+	})
+	writeJSON(w, http.StatusOK, map[string]any{
+		"order": order,
+		"mac":   mac,
+		"audit": timeline,
+	})
+}
+
 type apiSMSLogEntry struct {
 	ID       int64     `json:"id"`
 	SentAt   time.Time `json:"sent_at"`

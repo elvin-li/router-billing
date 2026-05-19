@@ -1,5 +1,30 @@
 # Changelog
 
+## v0.47 — GET /api/admin/orders/get (programmatic v0.42)
+
+Programmatic equivalent of v0.42's UI detail page. Returns the
+order row, current linked MAC state (or null if deleted), and
+the audit timeline targeting this order_no. Useful for support
+automation: given an order_no from a customer ticket, build a
+unified view without scraping the admin HTML.
+
+  GET /api/admin/orders/get?order_no=ORD-...   Bearer <any-token>
+  -> 200 { "order": {...}, "mac": {...}|null, "audit": [...] }
+  -> 404 if order_no not found
+  -> 400 if order_no missing
+
+Read-only token acceptable — payload contains only the order's
+already-stored fields plus public audit text. No auth material
+slips through (anti-leak test covers password_hash/totp_secret).
+
+5 race-clean tests:
+- Happy path with seeded audit row + MAC link
+- 404 on missing order
+- 400 on missing order_no param
+- Readonly token accepted (GET)
+- MAC-deleted-after-order case returns mac=null + order + audit
+- Anti-leak: response carries no password_hash / totp_secret
+
 ## v0.46 — POST /api/admin/maintenance/optimize-now
 
 API mirror of v0.39's UI button. Completes the three-button
