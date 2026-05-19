@@ -1,5 +1,26 @@
 # Changelog
 
+## v0.64 — POST /api/admin/users/notify-expiry
+
+Programmatic admin toggle for the per-user expiry-reminder opt-out.
+Useful for support workflows ("this customer asked us to stop
+texting them") and bulk re-enable scripts after a deliverability
+issue.
+
+  POST /api/admin/users/notify-expiry  Bearer <write-token>
+  { "user_id": 42, "on": true }
+  -> 200 { "status": "ok", "user_id": 42, "notify_expiry": true }
+  -> 400 if user_id missing
+  -> 404 if user not found
+
+Reuses `db.SetUserNotifyExpiry` from the existing /user/me self-
+service toggle. Audit row: `user_notify_pref` target=user_id
+detail="on=Y via=api ip=...".
+
+4 race-clean tests: flip off → DB reflects, flip back on, missing
+user → 404, missing user_id → 400, readonly token → 403, audit row
+carries via=api + on= value.
+
 ## v0.63 — GET /api/admin/backup
 
 Programmatic DB backup download for off-router backup automation.

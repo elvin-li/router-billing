@@ -256,6 +256,60 @@ func (a *App) handleAPIDashboard(w http.ResponseWriter, r *http.Request, _ strin
 	})
 }
 
+// POST /api/admin/users/notify-expiry   Bearer <write-token>
+//
+//	{ "user_id": 42, "on": true }
+//	-> 200 { "status": "ok", "user_id": 42, "notify_expiry": true }
+//	   404 if user not found
+//
+// Flips the per-user opt-out for the expiry-reminder SMS sweep. Useful
+// for support workflows like "this customer asked us to stop texting
+// them" or for bulk re-enable scripts after a deliverability issue.
+//
+// Audit row: `user_notify_pref` with target=user_id detail="on=Y via=api ip=...".
+func (a *App) handleAPIUserNotifyExpiry(w http.ResponseWriter, r *http.Request, actor string) {
+	if r.Method != http.MethodPost {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "POST only"})
+		return
+	}
+	var req struct {
+		UserID int64 `json:"user_id"`
+		On     bool  `json:"on"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "bad json: " + err.Error()})
+		return
+	}
+	if req.UserID <= 0 {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "user_id required"})
+		return
+	}
+	user, err := a.DB.GetUser(r.Context(), req.UserID)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+	if user == nil {
+		writeJSON(w, http.StatusNotFound, map[string]string{"error": "user not found"})
+		return
+	}
+	if err := a.DB.SetUserNotifyExpiry(r.Context(), req.UserID, req.On); err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+	onStr := "0"
+	if req.On {
+		onStr = "1"
+	}
+	a.DB.Audit(r.Context(), actor, "user_notify_pref", strconv.FormatInt(req.UserID, 10),
+		"on="+onStr+" via=api ip="+clientIP(r))
+	writeJSON(w, http.StatusOK, map[string]any{
+		"status":        "ok",
+		"user_id":       req.UserID,
+		"notify_expiry": req.On,
+	})
+}
+
 // apiUserSummary is the shape returned by /api/admin/users — deliberately a
 // subset of models.User without password_hash / totp_secret / totp_pending
 // so a leaked monitoring token can't exfiltrate auth material.
