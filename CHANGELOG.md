@@ -1,5 +1,39 @@
 # Changelog
 
+## v0.37 — POST /api/admin/audit/note
+
+Programmatic counterpart to the UI's manual-note form (v0.24).
+Useful for webhook handlers or external automation that want to
+leave a trace in audit_log without inventing a new logging surface.
+
+  POST /api/admin/audit/note   Bearer <write-token>
+  { "note":   "Refund issued via gateway dashboard",
+    "action": "manual_note",      // optional, default "manual_note"
+    "target": "ORD-12345" }       // optional
+  -> 200 { "status": "ok" }
+
+Constraints (matched to the UI handler):
+- empty note → 400 (defense against a deploy script writing
+  whitespace rows to the table)
+- note auto-truncated to 1000 chars
+- target capped at 200 chars
+- action: free-form but validated through planKeyOK
+  ([A-Za-z0-9_-]{1,32}) so the audit search box can find rows.
+  "manual_note" passes through unchanged.
+
+Common patterns this unlocks:
+- Deploy script: `action="deploy", target="prod", note="v1.2.3 rolled out"`
+- Webhook handler: `action="manual_note", target=order_no, note="external refund"`
+- Config-reload bot: `action="config_reload", note="diff hash xyz"`
+
+Each entry ends with `via=api ip=...` so reviewers can distinguish
+API-origin notes from UI clicks.
+
+6 race-clean tests: happy-path with detail/via=api assertion,
+custom-action shape (deploy/prod), empty-note 400, slash-in-action
+400 with field=action hint, 2000-char note truncation, readonly-
+token reject.
+
 ## v0.36 — POST /api/admin/webhook/test
 
 Programmatic equivalent of the /admin/maintenance/test-webhook

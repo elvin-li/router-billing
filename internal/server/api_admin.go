@@ -794,6 +794,75 @@ func (a *App) handleAPIUserGrant(w http.ResponseWriter, r *http.Request, actor s
 	})
 }
 
+type apiAuditNoteReq struct {
+	Note   string `json:"note"`
+	Action string `json:"action,omitempty"` // default "manual_note"
+	Target string `json:"target,omitempty"`
+}
+
+// POST /api/admin/audit/note   Bearer <write-token>
+//
+//	{ "note": "Refund issued via gateway dashboard",
+//	  "action": "manual_note",       // optional; defaults to "manual_note"
+//	  "target": "ORD-1234" }         // optional
+//	-> 200 { "status": "ok" }
+//
+// Programmatic counterpart to the UI's /admin/audit/note form. Useful for
+// webhook handlers or external automation that want to leave a trace
+// in the existing audit table without inventing a new logging surface.
+//
+// Same length cap as the UI handler (1000 chars on note); empty note is
+// rejected with 400 so a deploy script doesn't accidentally fill the
+// table with whitespace.
+//
+// Custom `action` lets ops-tooling tag entries (e.g. "deploy",
+// "config_reload") for later searchability while staying inside the
+// audit_log table the existing UI already renders.
+func (a *App) handleAPIAuditNote(w http.ResponseWriter, r *http.Request, actor string) {
+	if r.Method != http.MethodPost {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "POST only"})
+		return
+	}
+	var req apiAuditNoteReq
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "bad json: " + err.Error()})
+		return
+	}
+	note := strings.TrimSpace(req.Note)
+	if note == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "note required"})
+		return
+	}
+	if len(note) > 1000 {
+		note = note[:1000]
+	}
+	action := strings.TrimSpace(req.Action)
+	if action == "" {
+		action = "manual_note"
+	}
+	// Defense: don't let API callers spoof system actions. Reserved
+	// action prefixes used by background loops should stay distinct from
+	// API-supplied free-text. The UI's "manual_note" stays the obvious
+	// default + safe choice.
+	if action != "manual_note" {
+		// Validate custom action shape — same constraints as plan_key so
+		// the audit search box can find rows. Loose-but-not-arbitrary.
+		if !planKeyOK(action) {
+			writeJSON(w, http.StatusBadRequest, map[string]string{
+				"error": "action must match [A-Za-z0-9_-]{1,32} or be omitted",
+				"field": "action",
+			})
+			return
+		}
+	}
+	target := strings.TrimSpace(req.Target)
+	if len(target) > 200 {
+		target = target[:200]
+	}
+	a.DB.Audit(r.Context(), actor, action, target, note+" via=api ip="+clientIP(r))
+	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+}
+
 // POST /api/admin/webhook/test  Bearer <write-token>
 //
 // Programmatic equivalent of the /admin/maintenance/test-webhook button.
