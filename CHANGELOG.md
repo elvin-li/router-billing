@@ -1,5 +1,29 @@
 # Changelog
 
+## v0.70 — User detail page: SMS history section
+
+Milestone release. Support workflow: customer calls about "I
+never got my verification code" — admin opens
+/admin/users/detail and now sees the user's SMS history inline
+without hopping to /admin/sms-log.
+
+Last 30 sms_log rows targeting the user's phone, rendered as
+a table with the OK / FAIL pill (consistent with the main
+sms-log page). FAIL rows expose the underlying error_msg via
+`title=""` attribute so hovering shows the upstream provider
+error.
+
+Link "查看全部 →" jumps to `/admin/sms-log?phone=<user.Phone>`
+(the v0.68 UI filter) for cases where the most-recent 30 aren't
+enough.
+
+Section is hidden when the user has no SMS history (no empty
+card noise on first-day deploys).
+
+2 race-clean tests: 2-row fixture shows OK + FAIL pills + error
+tooltip + the filtered-log link, and the section is hidden on
+clean DB.
+
 ## v0.69 — Webhook log: event_type + MAC filters
 
 Closes the filter gap on the third observability page. After

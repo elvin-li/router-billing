@@ -152,6 +152,32 @@
     </section>
     {{end}}{{end}}
 
+    {{if .SMSLogs}}
+    <section class="admin-card">
+      <h2 style="margin-top:0;">最近 30 条 SMS 投递 ({{len .SMSLogs}})</h2>
+      <p class="desc">支持工单经常需要确认"我们到底给客户发了什么"——这里按手机号展示。
+        点 <a href="/admin/sms-log?phone={{.User.Phone}}">查看全部</a> 查全量。</p>
+      <div class="table-wrap">
+        <table class="data">
+          <thead><tr><th>时间</th><th>provider</th><th>消息</th><th>结果</th></tr></thead>
+          <tbody>
+            {{range .SMSLogs}}
+            <tr>
+              <td style="color:var(--text-soft); white-space:nowrap;">{{formatTime .SentAt}}</td>
+              <td><code>{{.Provider}}</code></td>
+              <td class="mono small">{{.Message}}</td>
+              <td>
+                {{if .Success}}<span class="pill paid">OK</span>
+                {{else}}<span class="pill failed" title="{{.ErrorMsg}}">FAIL</span>{{end}}
+              </td>
+            </tr>
+            {{end}}
+          </tbody>
+        </table>
+      </div>
+    </section>
+    {{end}}
+
     <section class="admin-card">
       <h2 style="margin-top:0;">最近 30 条审计</h2>
       <div class="table-wrap">

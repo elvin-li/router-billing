@@ -435,6 +435,12 @@ func (a *App) handleAdminUserDetail(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	trustedDevices, _ := a.DB.ListTrustedDevices(r.Context(), id)
+	// v0.70: pull the user's SMS history so support can see what messages
+	// they've received without hopping to /admin/sms-log.
+	smsLogs, _ := a.DB.SearchSMSLogs(r.Context(), db.SMSLogFilter{
+		Phone: user.Phone,
+		Limit: 30,
+	})
 	a.render(w, "admin_user_detail.html", a.adminCtx(r, "users", map[string]any{
 		"User":            user,
 		"MACs":            macs,
@@ -443,6 +449,7 @@ func (a *App) handleAdminUserDetail(w http.ResponseWriter, r *http.Request) {
 		"Activity":        formatActivity(activity),
 		"BackupRemaining": backupCount,
 		"TrustedDevices":  trustedDevices,
+		"SMSLogs":         smsLogs,
 		"SMSAvailable":    a.SMS != nil && a.SMS.Available(),
 		"SMSProvider": func() string {
 			if a.SMS == nil {
