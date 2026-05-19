@@ -1,5 +1,37 @@
 # Changelog
 
+## v0.33 — Orders 按 user_id 筛选 + 导出
+
+Support workflow: "show me every order this customer ever placed
+→ CSV → forward to refund team." Previously you had to click into
+the user's detail page (which only listed up to 50). The orders
+search now accepts `?user_id=N` end-to-end:
+
+  GET /admin/orders?user_id=42
+  GET /admin/export/orders.csv?user_id=42
+
+The filter composes with the existing q/status/since/until params
+so you can scope further ("paid orders from user 42 in May 2026").
+Orders with NULL user_id (anonymous voucher redeems, legacy data)
+are EXCLUDED from the user_id-filtered view by design.
+
+DB layer: new `UserID int64` field on OrderFilter; the query adds
+`AND user_id = ?` only when UserID > 0 so the filter stays
+backwards-compatible (zero value = no filter).
+
+UI: a small `<input name="user_id" type="number">` in the existing
+toolbar form; the CSV-export link carries the user_id through;
+the "清除" reset button now also resets the user_id field.
+
+2 race-clean tests:
+- DB-layer: 4-order fixture (2 for u1, 1 for u2, 1 with NULL
+  user_id) confirms UserID=u1.ID returns exactly the 2 expected,
+  UserID=u2.ID exactly the 1, UserID=0 leaves the filter off.
+- UI-level: page-render check that user_id=999999 matches nothing
+  AND that orphan orders (NULL user_id) don't leak into the
+  user-filtered view, AND that the export link carries the
+  param.
+
 ## v0.32 — API 套餐 CRUD
 
 Completes the API surface for plans. Mirrors the /admin/plans UI:

@@ -894,9 +894,16 @@ func (a *App) handleAdminOrders(w http.ResponseWriter, r *http.Request) {
 	status := strings.TrimSpace(r.URL.Query().Get("status"))
 	since := strings.TrimSpace(r.URL.Query().Get("since"))
 	until := strings.TrimSpace(r.URL.Query().Get("until"))
+	userIDStr := strings.TrimSpace(r.URL.Query().Get("user_id"))
+	var userID int64
+	if userIDStr != "" {
+		if n, err := strconv.ParseInt(userIDStr, 10, 64); err == nil && n > 0 {
+			userID = n
+		}
+	}
 	var orders []models.Order
 	var err error
-	if q == "" && status == "" && since == "" && until == "" {
+	if q == "" && status == "" && since == "" && until == "" && userID == 0 {
 		orders, err = a.DB.ListOrders(r.Context(), 200)
 	} else {
 		orders, err = a.DB.SearchOrdersFiltered(r.Context(), db.OrderFilter{
@@ -904,6 +911,7 @@ func (a *App) handleAdminOrders(w http.ResponseWriter, r *http.Request) {
 			Status: status,
 			Since:  since,
 			Until:  until,
+			UserID: userID,
 			Limit:  1000,
 		})
 	}
@@ -917,6 +925,7 @@ func (a *App) handleAdminOrders(w http.ResponseWriter, r *http.Request) {
 		"Status": status,
 		"Since":  since,
 		"Until":  until,
+		"UserID": userIDStr,
 	}))
 }
 

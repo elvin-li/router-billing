@@ -415,6 +415,7 @@ type OrderFilter struct {
 	Status string // exact match on status column
 	Since  string // YYYY-MM-DD UTC; only orders created on/after this date
 	Until  string // YYYY-MM-DD UTC; only orders created on/before this date
+	UserID int64  // 0 = no filter; non-zero filters to exactly that user_id
 	Limit  int    // default 200, cap 1000
 }
 
@@ -452,6 +453,10 @@ func (d *DB) SearchOrdersFiltered(ctx context.Context, f OrderFilter) ([]models.
 		// < start of NEXT day so the until date is inclusive.
 		sb.WriteString(` AND created_at < datetime(?,'start of day','+1 day')`)
 		args = append(args, f.Until)
+	}
+	if f.UserID > 0 {
+		sb.WriteString(` AND user_id = ?`)
+		args = append(args, f.UserID)
 	}
 	sb.WriteString(` ORDER BY created_at DESC LIMIT ?`)
 	args = append(args, limit)
