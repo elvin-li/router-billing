@@ -1,5 +1,36 @@
 # Changelog
 
+## v0.79 — SMS/Webhook log: since/until date range filters
+
+Closes the last filter gap on the observability pages. Previously
+the persistent log views (sms_log, webhook_deliveries) could be
+narrowed by phone / event_type / MAC / only_failed but NOT by
+date. Forensic workflows like "show me last Tuesday's webhook
+failures" required scrolling.
+
+UI:
+  GET /admin/sms-log?since=2026-05-12&until=2026-05-19
+  GET /admin/webhook-log?since=2026-05-12&until=2026-05-19
+
+API:
+  GET /api/admin/sms/log?since=YYYY-MM-DD&until=YYYY-MM-DD
+  GET /api/admin/webhook/log?since=YYYY-MM-DD&until=YYYY-MM-DD
+
+`Since` is inclusive of the day's start; `Until` is inclusive of
+the day's end (`< start_of_day(until + 1 day)` in the WHERE so
+00:00–23:59:59 of the until date all appear). Matches v0.16's
+order-date-range semantics.
+
+DB: SMSLogFilter / WebhookDeliveryFilter gained Since + Until
+fields; zero strings = no bound. Existing callers unchanged.
+
+UI: date inputs on both filter forms; reset includes them in
+the "any filter active" check.
+
+4 race-clean tests: SMSLogs since-filter excludes future-since
+rows, WebhookDeliveries until-in-past excludes everything, both
+admin pages render the new date inputs.
+
 ## v0.78 — GET /api/admin/macs/get (programmatic v0.48)
 
 Programmatic equivalent of v0.48's MAC detail page. Returns the

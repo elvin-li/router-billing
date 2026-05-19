@@ -1369,6 +1369,8 @@ func (a *App) handleAPISMSLog(w http.ResponseWriter, r *http.Request, _ string) 
 	logs, err := a.DB.SearchSMSLogs(r.Context(), db.SMSLogFilter{
 		Phone:      strings.TrimSpace(q.Get("phone")),
 		OnlyFailed: q.Get("only_failed") == "1",
+		Since:      strings.TrimSpace(q.Get("since")),
+		Until:      strings.TrimSpace(q.Get("until")),
 		Limit:      limit,
 	})
 	if err != nil {
@@ -1427,6 +1429,8 @@ func (a *App) handleAPIWebhookLog(w http.ResponseWriter, r *http.Request, _ stri
 		EventType:  strings.TrimSpace(q.Get("event_type")),
 		MAC:        strings.TrimSpace(q.Get("mac")),
 		OnlyFailed: q.Get("only_failed") == "1",
+		Since:      strings.TrimSpace(q.Get("since")),
+		Until:      strings.TrimSpace(q.Get("until")),
 		Limit:      limit,
 	})
 	if err != nil {

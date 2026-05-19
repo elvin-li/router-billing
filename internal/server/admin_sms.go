@@ -35,9 +35,13 @@ func (a *App) handleAdminSMSLog(w http.ResponseWriter, r *http.Request) {
 	// drill in without scraping the JSON endpoint.
 	phoneFilter := strings.TrimSpace(r.URL.Query().Get("phone"))
 	onlyFailed := r.URL.Query().Get("only_failed") == "1"
+	sinceFilter := strings.TrimSpace(r.URL.Query().Get("since"))
+	untilFilter := strings.TrimSpace(r.URL.Query().Get("until"))
 	dbLogs, _ := a.DB.SearchSMSLogs(r.Context(), db.SMSLogFilter{
 		Phone:      phoneFilter,
 		OnlyFailed: onlyFailed,
+		Since:      sinceFilter,
+		Until:      untilFilter,
 		Limit:      100,
 	})
 	// Pass through the raw query so the "reminders" flash can read
@@ -56,6 +60,8 @@ func (a *App) handleAdminSMSLog(w http.ResponseWriter, r *http.Request) {
 		"ReminderDisabled": a.Cfg.SMS.ExpiryReminderDisable,
 		"PhoneFilter":      phoneFilter,
 		"OnlyFailed":       onlyFailed,
+		"Since":            sinceFilter,
+		"Until":            untilFilter,
 	}))
 }
 

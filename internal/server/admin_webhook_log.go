@@ -23,6 +23,8 @@ func (a *App) handleAdminWebhookLog(w http.ResponseWriter, r *http.Request) {
 		EventType:  strings.TrimSpace(q.Get("event_type")),
 		MAC:        strings.TrimSpace(q.Get("mac")),
 		OnlyFailed: q.Get("only_failed") == "1",
+		Since:      strings.TrimSpace(q.Get("since")),
+		Until:      strings.TrimSpace(q.Get("until")),
 		Limit:      200,
 	}
 	logs, _ := a.DB.SearchWebhookDeliveries(r.Context(), f)
@@ -31,6 +33,8 @@ func (a *App) handleAdminWebhookLog(w http.ResponseWriter, r *http.Request) {
 		"OnlyFailed": f.OnlyFailed,
 		"EventType":  f.EventType,
 		"MAC":        f.MAC,
+		"Since":      f.Since,
+		"Until":      f.Until,
 		"WebhookURL": a.Cfg.Webhook.URL,
 	}))
 }

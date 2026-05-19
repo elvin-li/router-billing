@@ -2105,6 +2105,8 @@ func (d *DB) LogSMS(ctx context.Context, provider, phone, message string, succes
 type SMSLogFilter struct {
 	Phone      string // exact match
 	OnlyFailed bool   // success = 0
+	Since      string // YYYY-MM-DD (inclusive)
+	Until      string // YYYY-MM-DD (inclusive)
 	Limit      int    // default 100, cap 1000
 }
 
@@ -2129,6 +2131,15 @@ func (d *DB) SearchSMSLogs(ctx context.Context, f SMSLogFilter) ([]SMSLogEntry, 
 	}
 	if f.OnlyFailed {
 		sb.WriteString(` AND success = 0`)
+	}
+	if f.Since != "" {
+		sb.WriteString(` AND sent_at >= datetime(?,'start of day')`)
+		args = append(args, f.Since)
+	}
+	if f.Until != "" {
+		// < start of NEXT day so the until date is inclusive.
+		sb.WriteString(` AND sent_at < datetime(?,'start of day','+1 day')`)
+		args = append(args, f.Until)
 	}
 	sb.WriteString(` ORDER BY id DESC LIMIT ?`)
 	args = append(args, limit)
@@ -2212,6 +2223,8 @@ type WebhookDeliveryFilter struct {
 	EventType  string // exact match
 	MAC        string // exact match
 	OnlyFailed bool   // success = 0
+	Since      string // YYYY-MM-DD (inclusive)
+	Until      string // YYYY-MM-DD (inclusive)
 	Limit      int    // default 100, cap 1000
 }
 
@@ -2243,6 +2256,14 @@ func (d *DB) SearchWebhookDeliveries(ctx context.Context, f WebhookDeliveryFilte
 	}
 	if f.OnlyFailed {
 		sb.WriteString(` AND success = 0`)
+	}
+	if f.Since != "" {
+		sb.WriteString(` AND sent_at >= datetime(?,'start of day')`)
+		args = append(args, f.Since)
+	}
+	if f.Until != "" {
+		sb.WriteString(` AND sent_at < datetime(?,'start of day','+1 day')`)
+		args = append(args, f.Until)
 	}
 	sb.WriteString(` ORDER BY id DESC LIMIT ?`)
 	args = append(args, limit)

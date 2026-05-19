@@ -114,15 +114,19 @@
       <h2>持久化发送记录（最近 100 条）</h2>
       <p class="desc">每次 SendSMS 调用都会写入 <code>sms_log</code> 表，跨重启可见。
         purgeLoop 按 <code>security.audit_log_keep</code> 配额定期裁剪。</p>
-      <form method="get" action="/admin/sms-log" style="display:flex; gap:8px; align-items:center; margin-bottom:10px;">
+      <form method="get" action="/admin/sms-log" style="display:flex; gap:8px; align-items:center; margin-bottom:10px; flex-wrap:wrap;">
         <input name="phone" value="{{.PhoneFilter}}" placeholder="按手机号过滤"
                style="padding:6px 8px; border:1px solid var(--border); border-radius:6px; font-size:13px; width:160px;">
+        <input name="since" type="date" value="{{.Since}}" title="起始日期 (含)"
+               style="padding:6px 8px; border:1px solid var(--border); border-radius:6px; font-size:13px;">
+        <input name="until" type="date" value="{{.Until}}" title="结束日期 (含)"
+               style="padding:6px 8px; border:1px solid var(--border); border-radius:6px; font-size:13px;">
         <label style="display:flex; align-items:center; gap:4px; font-size:13px;">
           <input type="checkbox" name="only_failed" value="1" {{if .OnlyFailed}}checked{{end}}>
           仅显示失败
         </label>
         <button class="btn outline small" type="submit" style="width:auto;">筛选</button>
-        {{if or .PhoneFilter .OnlyFailed}}<a href="/admin/sms-log" class="btn ghost small" style="width:auto;">重置</a>{{end}}
+        {{if or .PhoneFilter .OnlyFailed .Since .Until}}<a href="/admin/sms-log" class="btn ghost small" style="width:auto;">重置</a>{{end}}
       </form>
       {{if eq .OK "sms_log_trim"}}<div class="flash ok">sms_log 已立即裁剪 ✓</div>{{end}}
       <form method="post" action="/admin/maintenance/sms-log-trim" style="margin-bottom:10px;"
