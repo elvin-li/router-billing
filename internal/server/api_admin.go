@@ -794,6 +794,130 @@ func (a *App) handleAPIUserGrant(w http.ResponseWriter, r *http.Request, actor s
 	})
 }
 
+type apiPlan struct {
+	Key        string `json:"key"`
+	Label      string `json:"label"`
+	Days       int    `json:"days"`
+	PriceCents int    `json:"price_cents"`
+	SortOrder  int    `json:"sort_order"`
+	Enabled    bool   `json:"enabled"`
+	// UpdatedAt zero-value omitted so config-file plans (no DB row) don't
+	// echo a 0001-01-01 timestamp.
+	UpdatedAt *time.Time `json:"updated_at,omitempty"`
+}
+
+// GET /api/admin/plans  Bearer <any-token>
+//
+// Returns the resolved plan list — same merge logic as the /admin/plans UI
+// (DB overlay first, fall back to config-defined plans). Useful for
+// integrations that build their own /buy flow and need to know what plans
+// are currently offered.
+func (a *App) handleAPIPlanList(w http.ResponseWriter, r *http.Request, _ string) {
+	if r.Method != http.MethodGet {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "GET only"})
+		return
+	}
+	plans := a.activePlans(r.Context())
+	out := make([]apiPlan, 0, len(plans))
+	for _, p := range plans {
+		ap := apiPlan{
+			Key: p.Key, Label: p.Label, Days: p.Days, PriceCents: p.PriceCents,
+			SortOrder: p.SortOrder, Enabled: p.Enabled,
+		}
+		if !p.UpdatedAt.IsZero() {
+			t := p.UpdatedAt
+			ap.UpdatedAt = &t
+		}
+		out = append(out, ap)
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"plans": out})
+}
+
+// POST /api/admin/plans/save  Bearer <write-token>
+//
+//	{ "key": "month", "label": "30 天", "days": 30,
+//	  "price_cents": 500, "sort_order": 10, "enabled": true }
+//	-> 200 { "status": "ok" }
+//
+// Same validation as the UI handler (see v0.31): planKeyOK + bounds on
+// days/price/label. Validation failures return 400 with a `field` hint so
+// the caller can show a useful message.
+func (a *App) handleAPIPlanSave(w http.ResponseWriter, r *http.Request, actor string) {
+	if r.Method != http.MethodPost {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "POST only"})
+		return
+	}
+	var req apiPlan
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "bad json: " + err.Error()})
+		return
+	}
+	key := strings.TrimSpace(req.Key)
+	label := strings.TrimSpace(req.Label)
+	if key == "" || label == "" || req.Days <= 0 || req.PriceCents <= 0 {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "key/label required, days+price_cents must be > 0"})
+		return
+	}
+	if !planKeyOK(key) {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "bad key (must match [A-Za-z0-9_-]{1,32})", "field": "key"})
+		return
+	}
+	if len(label) > 64 {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "label too long (max 64)", "field": "label"})
+		return
+	}
+	if req.Days > 3650 {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "days too large (max 3650)", "field": "days"})
+		return
+	}
+	if req.PriceCents > 10000000 {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "price_cents too large (max 10_000_000)", "field": "price_cents"})
+		return
+	}
+	p := models.Plan{
+		Key: key, Label: label, Days: req.Days, PriceCents: req.PriceCents,
+		SortOrder: req.SortOrder, Enabled: req.Enabled,
+	}
+	if err := a.DB.UpsertPlan(r.Context(), p); err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+	a.DB.Audit(r.Context(), actor, "plan_save", key, "label="+label+" via=api ip="+clientIP(r))
+	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+}
+
+// POST /api/admin/plans/delete  Bearer <write-token>
+//
+//	{ "key": "month" }  -> 200 { "status": "ok" }
+//
+// No-op on missing key (matches UI behavior). The config-defined fallback
+// plan (if any) remains visible — UI semantics is "delete DB override; let
+// the config base re-surface."
+func (a *App) handleAPIPlanDelete(w http.ResponseWriter, r *http.Request, actor string) {
+	if r.Method != http.MethodPost {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "POST only"})
+		return
+	}
+	var req struct {
+		Key string `json:"key"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "bad json: " + err.Error()})
+		return
+	}
+	key := strings.TrimSpace(req.Key)
+	if key == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "key required"})
+		return
+	}
+	if err := a.DB.DeletePlan(r.Context(), key); err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+	a.DB.Audit(r.Context(), actor, "plan_delete", key, "via=api ip="+clientIP(r))
+	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+}
+
 // itoaSmall: 1..3650 covers our range; no fmt dep needed.
 func itoaSmall(n int) string {
 	if n == 0 {

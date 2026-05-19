@@ -1,5 +1,39 @@
 # Changelog
 
+## v0.32 — API 套餐 CRUD
+
+Completes the API surface for plans. Mirrors the /admin/plans UI:
+
+  GET  /api/admin/plans                Bearer <any-token>
+                                       -> 200 { plans: [...] }
+  POST /api/admin/plans/save           Bearer <write-token>
+                                       -> 200 { status: "ok" }
+  POST /api/admin/plans/delete         Bearer <write-token>
+                                       -> 200 { status: "ok" }
+
+LIST merges DB-overlay plans on top of config-defined fallbacks
+(same logic activePlans() uses for the UI). Read-only tokens are
+accepted.
+
+SAVE shares the v0.31 validation: planKeyOK + label≤64 + days≤3650
++ price_cents≤10_000_000. Each rejection includes a `field` hint
+in the JSON so the caller can highlight the offending input:
+
+  400 { "error": "bad key (must match ...)", "field": "key" }
+  400 { "error": "days too large (max 3650)", "field": "days" }
+  ...
+
+DELETE is a noop on missing key when the DB has nothing to remove
+(matches UI semantics — the config-defined fallback would
+re-surface).
+
+Audit shape matches UI plan_save / plan_delete, with `via=api`
+appended so reviewers see source attribution.
+
+9 race-clean tests including a 4-case table-driven validation
+test asserting the `field` hint is exactly the offending field,
+plus the now-standard readonly-write-rejection pair (save + delete).
+
 ## v0.31 — 套餐保存严格校验
 
 Server-side validation on /admin/plans/save catches the typo where
