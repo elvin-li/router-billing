@@ -204,6 +204,46 @@ func (a *App) handleAdminVouchersRevoke(w http.ResponseWriter, r *http.Request) 
 	http.Redirect(w, r, redirectBack(r, "ok=1"), http.StatusSeeOther)
 }
 
+// POST /admin/vouchers/batch/revoke   {batch}
+//
+// Mass-revoke every still-usable voucher in a batch. Useful when a partner
+// deal falls through and the entire batch needs to be killed — clicking
+// each row's revoke button would take forever for a 500-row batch.
+// Redeemed vouchers are intentionally untouched (revoking those would
+// invalidate real usage). Returns to /admin/vouchers with revoked=N in the
+// flash so the UI can confirm the count.
+func (a *App) handleAdminVoucherBatchRevoke(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Redirect(w, r, "/admin/vouchers", http.StatusSeeOther)
+		return
+	}
+	if err := r.ParseForm(); err != nil {
+		http.Error(w, "form", http.StatusBadRequest)
+		return
+	}
+	batch := strings.TrimSpace(r.PostForm.Get("batch"))
+	// Special "(no batch)" sentinel maps back to empty string for the DB
+	// query — that's what VoucherBatchStats labels the unbatched bucket.
+	if batch == "(no batch)" {
+		batch = ""
+	}
+	n, err := a.DB.RevokeVoucherBatch(r.Context(), batch)
+	if err != nil {
+		log.Printf("revoke voucher batch %q: %v", batch, err)
+		http.Redirect(w, r, "/admin/vouchers?err=db", http.StatusSeeOther)
+		return
+	}
+	displayBatch := batch
+	if displayBatch == "" {
+		displayBatch = "(no batch)"
+	}
+	a.DB.Audit(r.Context(), "admin", "voucher_batch_revoke", displayBatch,
+		fmt.Sprintf("count=%d ip=%s", n, clientIP(r)))
+	http.Redirect(w, r,
+		fmt.Sprintf("/admin/vouchers?ok=batch_revoke&revoked=%d&batch=%s", n, displayBatch),
+		http.StatusSeeOther)
+}
+
 func (a *App) handleAdminVouchersExport(w http.ResponseWriter, r *http.Request) {
 	batch := r.URL.Query().Get("batch")
 	list, err := a.DB.ListVouchers(r.Context(), batch, 1000)

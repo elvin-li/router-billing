@@ -1616,6 +1616,29 @@ func (d *DB) RevokeVoucher(ctx context.Context, code string) error {
 	return err
 }
 
+// RevokeVoucherBatch marks every still-usable voucher in `batch` as revoked.
+// Already-redeemed vouchers are left alone (revoking those would lie about
+// real usage). Already-revoked rows are no-ops thanks to `revoked = 0` in the
+// WHERE. Returns the number of rows that flipped to revoked — useful for
+// audit trails and the admin flash message.
+//
+// Pass the empty string to revoke unbatched ("(no batch)" in the UI)
+// vouchers — the query treats NULL and "" the same way as VoucherBatchStats
+// does for consistency.
+func (d *DB) RevokeVoucherBatch(ctx context.Context, batch string) (int, error) {
+	res, err := d.conn.ExecContext(ctx, `
+		UPDATE vouchers
+		   SET revoked = 1
+		 WHERE redeemed_at IS NULL
+		   AND revoked = 0
+		   AND COALESCE(NULLIF(batch, ''), '') = ?`, batch)
+	if err != nil {
+		return 0, err
+	}
+	n, err := res.RowsAffected()
+	return int(n), err
+}
+
 // RedeemVoucher atomically marks a voucher consumed. Returns the voucher row
 // on success; on already-redeemed/revoked/expired returns a typed error.
 func (d *DB) RedeemVoucher(ctx context.Context, code, mac string, userID *int64) (*models.Voucher, error) {

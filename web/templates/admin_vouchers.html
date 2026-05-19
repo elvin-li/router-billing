@@ -26,6 +26,9 @@
     {{if eq .OK "import"}}
     <div class="flash ok">充值码导入完成 ✓ 成功 {{index .Query0 "added"}} · 失败 {{index .Query0 "failed"}}</div>
     {{end}}
+    {{if eq .OK "batch_revoke"}}
+    <div class="flash ok">已批量作废 batch <code>{{index .Query0 "batch"}}</code> 下 {{index .Query0 "revoked"}} 张未使用码 ✓</div>
+    {{end}}
 
     <div class="stats-row" style="grid-template-columns: repeat(auto-fit,minmax(140px,1fr));">
       <div class="stat"><div class="stat-icon brand"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="2" y="6" width="20" height="12" rx="2"/></svg></div><div class="stat-text"><span class="stat-label">本视图总数</span><span class="stat-value">{{.Counts.total}}</span></div></div>
@@ -93,7 +96,7 @@
       <p class="desc">每个 batch 的可用 / 已用 / 已撤销 / 已过期统计。点 batch 名查看具体码。</p>
       <div class="table-wrap">
         <table class="data">
-          <thead><tr><th>Batch</th><th>总数</th><th>可用</th><th>已用</th><th>已撤销</th><th>已过期</th><th>最早创建</th><th>导出</th></tr></thead>
+          <thead><tr><th>Batch</th><th>总数</th><th>可用</th><th>已用</th><th>已撤销</th><th>已过期</th><th>最早创建</th><th>导出</th><th>批量作废</th></tr></thead>
           <tbody>
             {{range .BatchStats}}
             <tr>
@@ -105,6 +108,17 @@
               <td style="color:var(--text-soft);">{{.Expired}}</td>
               <td style="color:var(--text-soft);">{{formatTime .Created}}</td>
               <td><a href="/admin/vouchers/export.csv?batch={{.Batch}}" class="btn outline tiny" style="width:auto;">CSV</a></td>
+              <td>
+                {{if .Unused}}
+                <form method="post" action="/admin/vouchers/batch/revoke"
+                      onsubmit="return confirm('作废 batch {{.Batch}} 下全部 {{.Unused}} 张未使用的码? 已兑换的码不会变。');"
+                      style="display:inline;">
+                  {{template "csrf" $}}
+                  <input type="hidden" name="batch" value="{{.Batch}}">
+                  <button class="btn danger tiny" type="submit" style="width:auto;">作废 {{.Unused}}</button>
+                </form>
+                {{else}}<span style="color:var(--text-soft);">—</span>{{end}}
+              </td>
             </tr>
             {{end}}
           </tbody>
