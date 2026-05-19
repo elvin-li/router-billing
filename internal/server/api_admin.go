@@ -256,6 +256,70 @@ func (a *App) handleAPIDashboard(w http.ResponseWriter, r *http.Request, _ strin
 	})
 }
 
+// POST /api/admin/users/suspend   Bearer <write-token>
+//
+//	{ "user_id": 42, "suspend": true }
+//	-> 200 { "status": "ok", "user_id": 42, "suspended": true }
+//	   400 if user_id missing
+//	   404 if user not found
+//
+// Programmatic equivalent of v0.5's /admin/users/suspend UI button.
+// Suspended users keep their existing MAC time but can't log in
+// (sessions are killed and login is denied with a clear error message).
+// Useful for anti-abuse automation that wants to lock accounts on a
+// fraud signal from elsewhere.
+//
+// Audit row: `user_suspend` (or `user_unsuspend`) target=user_id
+// detail="via=api ip=...".
+func (a *App) handleAPIUserSuspend(w http.ResponseWriter, r *http.Request, actor string) {
+	if r.Method != http.MethodPost {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "POST only"})
+		return
+	}
+	var req struct {
+		UserID  int64 `json:"user_id"`
+		Suspend bool  `json:"suspend"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "bad json: " + err.Error()})
+		return
+	}
+	if req.UserID <= 0 {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "user_id required"})
+		return
+	}
+	user, err := a.DB.GetUser(r.Context(), req.UserID)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+	if user == nil {
+		writeJSON(w, http.StatusNotFound, map[string]string{"error": "user not found"})
+		return
+	}
+	if err := a.DB.SuspendUser(r.Context(), req.UserID, req.Suspend); err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+	// SuspendUser sets suspended=1; we also need to evict their sessions
+	// so a currently-logged-in suspended user can't keep using the system
+	// on a stale cookie. Match UI semantics.
+	if req.Suspend {
+		_, _ = a.DB.DeleteSessionsByUserID(r.Context(), req.UserID)
+	}
+	action := "user_unsuspend"
+	if req.Suspend {
+		action = "user_suspend"
+	}
+	a.DB.Audit(r.Context(), actor, action, strconv.FormatInt(req.UserID, 10),
+		"via=api ip="+clientIP(r))
+	writeJSON(w, http.StatusOK, map[string]any{
+		"status":    "ok",
+		"user_id":   req.UserID,
+		"suspended": req.Suspend,
+	})
+}
+
 // POST /api/admin/users/notify-expiry   Bearer <write-token>
 //
 //	{ "user_id": 42, "on": true }

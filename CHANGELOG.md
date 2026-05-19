@@ -1,5 +1,32 @@
 # Changelog
 
+## v0.65 — POST /api/admin/users/suspend
+
+Programmatic equivalent of v0.5's /admin/users/suspend UI button.
+Anti-abuse automation can lock an account on a fraud signal
+without an admin clicking through.
+
+  POST /api/admin/users/suspend  Bearer <write-token>
+  { "user_id": 42, "suspend": true }
+  -> 200 { "status": "ok", "user_id": 42, "suspended": true }
+  -> 400 / 404
+
+Suspended users keep their existing MAC time but can't log in
+(sessions die immediately, future logins are denied).
+
+The API endpoint mirrors UI semantics including the session
+eviction — without it, a currently-logged-in abusive user
+would keep the cookie and the suspend would do nothing until
+the cookie expired.
+
+Audit rows: `user_suspend` (or `user_unsuspend`) target=user_id
+detail="via=api ip=...". Distinct action verbs so dashboards
+can show the time-series of locks and unlocks separately.
+
+5 race-clean tests: flip on + off with DB confirmation + both
+audit rows, suspend evicts existing sessions, missing user 404,
+readonly reject, audit row marks via=api.
+
 ## v0.64 — POST /api/admin/users/notify-expiry
 
 Programmatic admin toggle for the per-user expiry-reminder opt-out.
