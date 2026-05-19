@@ -1,5 +1,66 @@
 # Changelog
 
+## v0.26 — 批量作废充值码
+
+When a partner deal falls through, killing 500 vouchers one-by-one
+isn't realistic. Add a one-click "作废 N" button next to each batch
+in the /admin/vouchers stats table.
+
+  POST /admin/vouchers/batch/revoke   {batch}
+  -> /admin/vouchers?ok=batch_revoke&revoked=N&batch=...
+
+DB-level `RevokeVoucherBatch(ctx, batch) (int, error)` returns
+the count of rows that newly flipped to revoked (excludes
+already-redeemed AND already-revoked — `revoked = 0` in the
+WHERE means no double-flip side effect, the returned count is
+exactly the rows that changed).
+
+Already-redeemed rows are intentionally left alone. Flipping
+those would lie about real usage — `redeemed_at` is the source
+of truth for "this code paid for service".
+
+Empty-string batch maps to the "(no batch)" bucket consistent
+with VoucherBatchStats, so unbatched vouchers can also be killed.
+The handler swaps the display sentinel before the DB query so
+the UI/URL roundtrip stays clean.
+
+Audit: `voucher_batch_revoke` target=<batch> detail="count=N ip=...".
+
+5 race-clean tests covering DB-mixed-state, unbatched bucket, full
+e2e POST flow with audit-row assertion, CSRF rejection, and the
+UI form rendering check.
+
+## v0.25 — API 批量发放 (JSON 流量入口)
+
+`/admin/macs/import` (textarea, v0.4) is great for ops typing
+into a browser. For partner automation (corporate WiFi VPN
+gateway issuing 200 MACs at once when an employee joins) you want
+JSON in / JSON out.
+
+  POST /api/admin/macs/import   Bearer <write-token>
+  { "default_days": 90,
+    "macs": [
+      {"mac": "AA:BB:CC:00:00:01", "days": 30, "label": "phone"},
+      {"mac": "aa-bb-cc-00-00-02",                "label": "tv"},
+      {"mac": "AA:BB:CC:00:00:03"}
+    ] }
+  -> 200 { "added": 3, "failed": 0 }
+
+Rules:
+- Each row's `days` falls back to `default_days`, which itself
+  defaults to 30 if absent.
+- Invalid MACs (anything `models.NormalizeMAC` can't parse)
+  bump the failed counter — the rest of the batch still runs.
+- Empty `macs` list → 400.
+- More than 1000 rows → 400 (same per-call cap as the UI path).
+- Readonly tokens → 403.
+- Each successful grant audits `action=grant` with
+  `detail="days=N via=api ip=..."`, matching the UI handler's
+  trail so reviewers don't see two flavors of grant rows.
+
+6 race-clean tests including the >1000-row reject and the
+default_days propagation regression.
+
 ## v0.24 — 充值码导入 + API 退款 + 审计可观测性
 
 Four operational additions covering admin tooling + API completeness.
