@@ -1,0 +1,100 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>MAC {{.MAC.Mac}} · router-billing</title>
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body class="admin">
+<div class="admin-shell">
+  {{template "admin-sidebar" .}}
+  <main class="admin-main">
+    <div class="admin-header">
+      <div>
+        <h1>
+          <a href="/admin/macs" style="color:var(--text-soft); text-decoration:none;">← MAC</a>
+          / <code>{{.MAC.Mac}}</code>
+        </h1>
+        <div class="crumbs">
+          {{if eq (printf "%s" .MAC.Status) "active"}}<span class="pill active">活跃</span>
+          {{else if eq (printf "%s" .MAC.Status) "blocked"}}<span class="pill blocked">已封禁</span>
+          {{else}}<span class="pill expired">已过期</span>{{end}}
+          · 到期 {{formatTime .MAC.ExpiresAt}}
+          · 创建于 {{formatTime .MAC.CreatedAt}}
+        </div>
+      </div>
+    </div>
+
+    {{template "flash" .}}
+
+    <section class="admin-card">
+      <h2 style="margin-top:0;">基本信息</h2>
+      <table class="data">
+        <tbody>
+          <tr><th style="text-align:left;width:140px;">MAC</th><td class="mono">{{.MAC.Mac}}</td></tr>
+          <tr><th style="text-align:left;">备注</th><td>{{if .MAC.Label}}{{.MAC.Label}}{{else}}<span style="color:var(--text-soft);">—</span>{{end}}</td></tr>
+          <tr><th style="text-align:left;">状态</th><td>
+            {{if eq (printf "%s" .MAC.Status) "active"}}<span class="pill active">活跃</span>
+            {{else if eq (printf "%s" .MAC.Status) "blocked"}}<span class="pill blocked">已封禁</span>
+            {{else}}<span class="pill expired">已过期</span>{{end}}
+          </td></tr>
+          <tr><th style="text-align:left;">到期时间</th><td>{{formatTime .MAC.ExpiresAt}}</td></tr>
+          <tr><th style="text-align:left;">归属用户</th><td>
+            {{if .Owner}}<a href="/admin/users/detail?id={{.Owner.ID}}">{{.Owner.Phone}}</a>{{else}}<span style="color:var(--text-soft);">未绑定</span>{{end}}
+          </td></tr>
+          <tr><th style="text-align:left;">更新时间</th><td>{{formatTime .MAC.UpdatedAt}}</td></tr>
+        </tbody>
+      </table>
+    </section>
+
+    <section class="admin-card">
+      <h2 style="margin-top:0;">相关订单 ({{len .Orders}})</h2>
+      {{if .Orders}}
+      <div class="table-wrap">
+        <table class="data">
+          <thead><tr><th>订单号</th><th>套餐</th><th>金额</th><th>状态</th><th>支付时间</th></tr></thead>
+          <tbody>
+            {{range .Orders}}
+            <tr>
+              <td class="mono"><a href="/admin/orders/detail?order_no={{.OrderNo}}">{{.OrderNo}}</a></td>
+              <td>{{.Plan}} ({{.Days}}天)</td>
+              <td>¥{{formatYuan .AmountCents}}</td>
+              <td><span class="pill {{.Status}}">{{.Status}}</span></td>
+              <td style="color:var(--text-soft);">{{formatTimePtr .PaidAt}}</td>
+            </tr>
+            {{end}}
+          </tbody>
+        </table>
+      </div>
+      {{else}}
+      <p class="hint" style="color:var(--text-soft); font-size:13px;">该 MAC 尚无关联订单（可能通过充值码或管理员手动添加）。</p>
+      {{end}}
+    </section>
+
+    <section class="admin-card">
+      <h2 style="margin-top:0;">时间线 · 审计日志 ({{len .Timeline}})</h2>
+      {{if .Timeline}}
+      <div class="table-wrap">
+        <table class="data">
+          <thead><tr><th>时间</th><th>操作者</th><th>动作</th><th>详情</th></tr></thead>
+          <tbody>
+            {{range .Timeline}}
+            <tr>
+              <td style="white-space:nowrap;">{{formatTime .At}}</td>
+              <td class="mono">{{.Actor}}</td>
+              <td><code>{{.Action}}</code></td>
+              <td style="font-size:12px; color:var(--text-soft);">{{.Detail}}</td>
+            </tr>
+            {{end}}
+          </tbody>
+        </table>
+      </div>
+      {{else}}
+      <p class="hint" style="color:var(--text-soft); font-size:13px;">无审计记录。</p>
+      {{end}}
+    </section>
+  </main>
+</div>
+</body>
+</html>

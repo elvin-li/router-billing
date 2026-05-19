@@ -929,6 +929,50 @@ func (a *App) handleAdminOrders(w http.ResponseWriter, r *http.Request) {
 	}))
 }
 
+// GET /admin/macs/detail?mac=...
+//
+// Drilldown for a single MAC: current state, owner (if any), recent
+// orders that paid for it, and the audit timeline (grant/revoke/replace
+// rows tagged with this MAC).
+//
+// Support workflow: customer says "my phone isn't online" and reads off
+// their MAC. Admin pastes it into the URL, sees the full history without
+// hopping between /admin/users, /admin/orders, and /admin/audit.
+func (a *App) handleAdminMACDetail(w http.ResponseWriter, r *http.Request) {
+	macStr := strings.TrimSpace(r.URL.Query().Get("mac"))
+	if macStr == "" {
+		http.Redirect(w, r, "/admin/macs", http.StatusSeeOther)
+		return
+	}
+	normalized, ok := models.NormalizeMAC(macStr)
+	if !ok {
+		http.Redirect(w, r, "/admin/macs?err=bad_mac", http.StatusSeeOther)
+		return
+	}
+	m, err := a.DB.GetMAC(r.Context(), normalized)
+	if err != nil || m == nil {
+		http.Redirect(w, r, "/admin/macs?err=not_found", http.StatusSeeOther)
+		return
+	}
+	var owner *models.User
+	if m.UserID != nil {
+		owner, _ = a.DB.GetUser(r.Context(), *m.UserID)
+	}
+	// Last 50 orders that targeted this MAC.
+	orders, _ := a.DB.SearchOrders(r.Context(), normalized, "", 50)
+	// Audit rows targeting this MAC.
+	timeline, _ := a.DB.SearchAudit(r.Context(), db.AuditFilter{
+		Target: normalized,
+		Limit:  200,
+	})
+	a.render(w, "admin_mac_detail.html", a.adminCtx(r, "macs", map[string]any{
+		"MAC":      m,
+		"Owner":    owner,
+		"Orders":   orders,
+		"Timeline": timeline,
+	}))
+}
+
 // GET /admin/orders/detail?order_no=...
 //
 // Single-order drilldown: the order row + linked MAC current state + the

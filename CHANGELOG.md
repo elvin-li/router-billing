@@ -1,5 +1,39 @@
 # Changelog
 
+## v0.48 — /admin/macs/detail?mac=… (MAC timeline)
+
+Companion to v0.42's order-detail page. Customer says "my phone
+isn't online" and reads off their MAC; admin pastes it into the
+URL, sees the full history in one page.
+
+  GET /admin/macs/detail?mac=AA:BB:CC:DD:EE:FF
+
+Renders:
+- Basic info: current status, expiry, label, updated_at
+- Owner link (if any) → /admin/users/detail?id=N
+- Last 50 orders that paid for this MAC (each row links to the
+  order-detail page from v0.42, so admins can drill further)
+- Audit timeline targeting this MAC up to 200 rows
+  (`grant`/`revoke`/`replace` etc.)
+
+Input is normalized through models.NormalizeMAC so dashed /
+lowercase / colon forms all resolve to the canonical row. Bad MAC
+strings redirect to `/admin/macs?err=bad_mac`; missing rows go to
+`?err=not_found`.
+
+/admin/macs list now turns the MAC cell into a link to the detail
+page so the workflow is `click → see full history`.
+
+5 race-clean tests:
+- Full-render check: MAC + label + owner phone + order link +
+  audit row content all present
+- Input normalization: lowercase dashed input finds the canonical
+  MAC and renders it back in colon form
+- Missing MAC → 303 with ?err=not_found
+- Malformed MAC → 303 with ?err=bad_mac
+- Macs list cell links to detail (accepts both raw `:` and
+  html/template's `%3a` URL-escape variants)
+
 ## v0.47 — GET /api/admin/orders/get (programmatic v0.42)
 
 Programmatic equivalent of v0.42's UI detail page. Returns the

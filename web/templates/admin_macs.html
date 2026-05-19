@@ -154,7 +154,7 @@
             {{range .MACs}}
             <tr>
               <td><input type="checkbox" value="{{.Mac}}" class="bulk-pick" onchange="refreshBulk()"></td>
-              <td class="mono">{{.Mac}}</td>
+              <td class="mono"><a href="/admin/macs/detail?mac={{.Mac}}" style="color:inherit; text-decoration:none;" title="查看完整时间线">{{.Mac}}</a></td>
               <td>{{if .Label}}{{.Label}}{{else}}<span style="color:#9ca3af;">—</span>{{end}}</td>
               <td><span class="pill {{.Status}}">{{.Status}}</span></td>
               <td>{{formatTime .ExpiresAt}}</td>
