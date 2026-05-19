@@ -1,5 +1,73 @@
 # Changelog
 
+## v0.24 — 充值码导入 + API 退款 + 审计可观测性
+
+Four operational additions covering admin tooling + API completeness.
+
+### `/admin/vouchers/import` — CSV import of pre-existing codes
+
+For deployers migrating from another voucher system or printing
+codes offline. The existing `/admin/vouchers/generate` creates
+random codes; this one accepts what you give it.
+
+  POST /admin/vouchers/import  bulk=<csv>
+
+Each line: `code,days[,label[,batch[,expires_at_RFC3339]]]`.
+Blank lines + `# ...` comments skipped. Codes go through
+`voucher.Canon` (uppercase, strip dashes/spaces). days defaults to
+30. Codes < 6 chars are rejected. Duplicate codes hit UNIQUE
+constraint and bump the failed counter. Each successful insert
+audits as `voucher_imported`.
+
+UI: collapsed `<details>` 导入已有充值码 section under 批量生成.
+Flash shows added=N · failed=M counts.
+
+5 tests including Canon-normalization regression guard.
+
+### `POST /api/admin/orders/refund` — programmatic refund (write)
+
+Pairs with the v0.15 admin-UI refund button. Useful for chargeback
+automation tied to webhook handlers on the gateway side.
+
+  POST /api/admin/orders/refund  Bearer <write-token>
+  { "order_no": "...", "reason": "..." }
+  -> 200 { "status": "refunded", "mac": {...post-rollback MAC...} }
+
+Same atomic DB transition (`MarkOrderRefunded`). Audit detail
+gets `via=api` so reviewers can tell the source. Error mapping:
+400 missing order_no, 403 readonly token, 404 missing order, 409
+order not paid.
+
+6 tests including the readonly-token regression guard.
+
+### `/admin/audit` usage indicator (`全表 N / cap`)
+
+The janitor purges audit_log above `security.audit_log_keep` (cap
+default 10000). Admins running long-lived deploys want to know
+when they're approaching the cap so they can bump it before
+interesting history gets evicted.
+
+UI: a small "全表 N / 10000" suffix in the audit page crumbs. Past
+80% the percentage flips red. Backed by new `DB.CountAudit`
+(cheap COUNT(*)).
+
+### `/admin/audit` 手动添加备注 — free-text audit entry
+
+For out-of-band actions where there's no specific handler:
+"refund issued via Aliyun console directly", "customer called
+confirming lost phone". A collapsed `<details>` form posts to
+`/admin/audit/note` which writes `action=manual_note` with the
+admin's username attribution + IP.
+
+Rejects empty / whitespace-only. Caps text at 1000 chars (truncates
+rather than 4xx-ing on long input).
+
+4 tests including the attribution + truncation cases.
+
+### Stats
+- 17 packages tested
+- 385 test functions (was 370 in v0.23)
+
 ## v0.23 — 每日运营日报短信
 
 Adds a daily-summary SMS to the configured admin phone — completes
