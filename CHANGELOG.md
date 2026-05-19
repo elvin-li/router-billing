@@ -1,5 +1,25 @@
 # Changelog
 
+## v0.74 — GET /api/admin/sightings
+
+Programmatic access to the device_sightings table. Ops automation
+can now inventory who's currently on the network without scraping
+/admin/devices.
+
+  GET /api/admin/sightings?since_hours=24   Bearer <any-token>
+  -> 200 { "sightings": [...], "count": N }
+
+since_hours defaults to 24, max 720 (30 days). Read-only token
+acceptable — payload is detection metadata only (no auth material).
+
+Common pattern: drift-detection cron compares
+`/api/admin/sightings` against `/api/admin/macs?status=active`
+and alerts on "MACs paid but never seen" or "MACs seen but
+never paid."
+
+4 race-clean tests: 24h window excludes >24h-old rows, wider
+window includes them, readonly accepted, POST → 405.
+
 ## v0.73 — MAC detail page: last-seen sighting
 
 Adds a "最近在线" row to /admin/macs/detail (v0.48) populated from

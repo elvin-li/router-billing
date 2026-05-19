@@ -201,6 +201,40 @@ func (a *App) handleAPIMACList(w http.ResponseWriter, r *http.Request, _ string)
 	writeJSON(w, http.StatusOK, map[string]any{"macs": macs, "count": len(macs)})
 }
 
+// GET /api/admin/sightings?since_hours=24   Bearer <any-token>
+//
+// Programmatic access to the device_sightings table. Useful for ops
+// automation that wants to inventory devices currently on the paid SSID:
+// "give me everyone seen in the last hour and cross-check against
+// active MACs to detect drift."
+//
+//	-> 200 { "sightings": [ {mac, last_ip, hostname, first_seen,
+//	                         last_seen}, ... ], "count": N }
+//
+// since_hours defaults to 24, max 720 (30 days). Read-only token
+// acceptable — no auth material in the payload.
+func (a *App) handleAPISightings(w http.ResponseWriter, r *http.Request, _ string) {
+	if r.Method != http.MethodGet {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "GET only"})
+		return
+	}
+	hours := 24
+	if s := r.URL.Query().Get("since_hours"); s != "" {
+		if n, err := strconv.Atoi(s); err == nil && n > 0 && n <= 720 {
+			hours = n
+		}
+	}
+	sightings, err := a.DB.ListRecentSightings(r.Context(), time.Duration(hours)*time.Hour)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"sightings": sightings,
+		"count":     len(sightings),
+	})
+}
+
 // GET /api/admin/dashboard   Bearer <any-token>
 //
 // Programmatic equivalent of the /admin/dashboard panels. Returns the
