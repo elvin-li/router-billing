@@ -34,24 +34,34 @@ OpenWrt（aarch64）上运行的 MAC 地址计费认证系统。**只对收费 S
   - **数据可携 + 注销账号**：JSON 导出 / 密码确认后注销
   - 自助 sign-out-others（踢其他登录设备）
 - 管理后台（一处看全）:
-  - 仪表盘：今日 / 7 天 / 累计 营收、活跃 MAC、当前 session，sparkline
-  - MAC 管理：搜索过滤、批量续费 / 删除、按状态筛选、可逆封禁
-  - 在线设备：实时 ARP + dnsmasq lease + 主机名，一键授权 IoT
-  - 订单：搜索 / 状态 / 日期范围筛选 + CSV 导出（含筛选）+ 退款
-  - 用户：详情下钻（MAC + 订单 + session + 信任设备 + 30 条审计）
-  - 充值码：按 batch 库存 + 打印卡片（含 QR）
-  - SMS：发送测试 / 立即扫描发送到期提醒 / Console ring buffer
-  - 维护：备份 / 恢复 / Webhook 测试 / Session 应急下线
-  - API Tokens：只读查看 / 4 位前缀 / readonly 标记 / 速率限制
-  - 审计日志：搜索 + 日期范围
+  - **仪表盘**：今日 / 7 天 / 30 天 营收，**月环比 (MoM) 标签**（v0.28），累计 + 活跃 session
+  - **关注事项面板**：即将到期 MAC、滞留 pending 订单、停用用户、今日失败订单；侧边栏对应位置显示徽章数字（v0.58）
+  - **过去 24 小时投递失败面板**：SMS / Webhook 失败计数（v0.59）
+  - **MAC 管理**：搜索过滤、批量续费 / 删除、按状态筛选、可逆封禁；点 MAC 进**详情时间线**（订单 + 审计，v0.48）
+  - **在线设备**：实时 ARP + dnsmasq lease + 主机名，一键授权 IoT
+  - **订单**：搜索（含 q / 状态 / 日期 / **user_id**，v0.33）+ CSV 导出 + 单笔退款 + **取消按钮**（v0.53）+ **一键清理过期订单**（v0.56）；点订单号进**详情时间线**（v0.42）
+  - **用户**：详情下钻（MAC + 订单 + session + 信任设备 + 30 条审计）
+  - **充值码**：按 batch 库存 + 打印卡片（QR）+ **整批作废**（v0.26）+ **CSV 导出按状态过滤**（v0.41）
+  - **SMS log**：DB 持久化记录（**所有 provider，跨重启可见**，v0.43）+ Console ring buffer + 立即裁剪
+  - **Webhook log**：投递历史（每次重试一行 + HTTP code + duration_ms，v0.49）+ 仅显示失败筛选 + 立即裁剪
+  - **审计日志**：搜索 + 日期范围 + **详情关键字 q** （v0.54）
+  - **维护**：备份下载 / 恢复 / Webhook 测试 / Session 应急下线 / **立即执行到期扫描** / **立即裁剪审计日志** / **PRAGMA optimize** (v0.35 / v0.39)
+  - **API Tokens**：只读查看 / 4 位前缀 / readonly 标记 / 速率限制
 - 主动 SMS:
   - 套餐到期提醒（3 天前；每个 MAC 22h 去重）
   - 管理员登录告警（可选；发到 ops 手机）
+  - **每日运营日报**（v0.23）
+- **后台维护循环**：每 2 小时清理 sessions / audit / sms_log / webhook_deliveries / 过期 MAC / **可选 auto-cancel-stale-orders**（v0.60）；每周 PRAGMA optimize + VACUUM
 - API 完整覆盖（`/api/admin/*` Bearer token）:
-  - GET: `/health` / `/macs` / `/users` / `/orders` / `/audit` / `/vouchers`
-  - POST: `/macs/grant` / `/macs/revoke` / `/sms/send`
-  - 只读 token（`readonly: true`）+ 每 token 速率限制（`rate_limit_per_min`）
-  - 字段级安全：用户列表不暴露 password_hash / totp_secret；充值码仅前 4 位
+  - **读端点**: `/health` `/dashboard` `/macs` `/users` `/orders` `/orders/get` `/audit` `/vouchers` `/sms/log` `/webhook/log` `/plans` `/backup` — 全部支持 `readonly` token
+  - **写端点 (mutate)**: `/macs/grant` `/macs/revoke` `/macs/import` `/users/grant` `/users/grant-by-phone` `/vouchers/generate` `/vouchers/batch/revoke` `/orders/refund` `/orders/cancel` `/orders/cancel-stale` `/sms/send` `/audit/note` `/webhook/test` `/maintenance/expire-now` `/maintenance/audit-trim` `/maintenance/optimize-now` `/plans/save` `/plans/delete`
+  - 字段级安全：用户列表不暴露 password_hash / totp_secret；充值码列表仅前 4 位；订单详情不带 trade_no 流水
+  - **`/health` 端点**：无 auth，简单 200/503（`SELECT 1` 探测，v0.30）—— 给负载均衡器和 uptime monitor 用
+  - **`/metrics` 端点**：Prometheus exposition（v0.13+），支持 `metrics_token` 限制
+- **观测能力**:
+  - **持久化 SMS 投递记录** `sms_log` 表（v0.43，跨重启）
+  - **持久化 Webhook 投递记录** `webhook_deliveries` 表（v0.49，每次重试一行）
+  - 失败的投递在 `/admin/health` 响应里出现（24 小时滚动窗口，v0.61）
 - 防火墙后端：nftables（默认）+ iptables/ipset（OpenWrt 21.02 兼容）
 - IoT/充电桩友好：完全不用浏览器也能加白名单
 - 体积：单个 ARM64 静态二进制 ≈ 13 MB
