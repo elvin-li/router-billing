@@ -432,14 +432,17 @@ func (a *App) purgeLoop(ctx context.Context) {
 }
 
 // auditTargetHref returns the smart drill-down URL for an audit target
-// string, or "" if the target doesn't fit a known shape. v0.92.
+// string, or "" if the target doesn't fit a known shape. v0.92 / v0.95.
 //
 // Shapes:
-//   - looks like a MAC (NormalizeMAC accepts it)            → /admin/macs/detail?mac=...
-//   - prefixes ORD- / order_no                              → /admin/orders/detail?order_no=...
-//   - all-digit user_id (rare in audit targets, but covered) → /admin/users/detail?id=...
-//   - phone (11-digit Chinese mobile)                       → /admin/sms-log?phone=...
-//   - anything else                                          → "" (template renders plain text)
+//   - MAC (NormalizeMAC accepts it)                    → /admin/macs/detail?mac=...
+//   - "ORD" / "ord" prefix                             → /admin/orders/detail?order_no=...
+//   - 11-digit starts-with-1 (CN mobile)               → /admin/sms-log?phone=...
+//   - pure digits, 1-9 chars (user_id from user_grant) → /admin/users/detail?id=N
+//   - anything else                                     → "" (plain text)
+//
+// Precedence: MAC → order → phone → user_id. A 11-digit string that
+// starts with 1 routes to phone (the more common case in audit detail).
 func auditTargetHref(target string) string {
 	target = strings.TrimSpace(target)
 	if target == "" {
@@ -449,23 +452,24 @@ func auditTargetHref(target string) string {
 	if mac, ok := models.NormalizeMAC(target); ok {
 		return "/admin/macs/detail?mac=" + mac
 	}
-	// Order number — heuristic: starts with "ORD" or contains a dash.
-	// The system prefixes most order_nos with the gateway shorthand, but
-	// the admin UI lookup is on the full string regardless.
+	// Order number — starts with "ORD" or "ord".
 	if strings.HasPrefix(target, "ORD") || strings.HasPrefix(target, "ord") {
 		return "/admin/orders/detail?order_no=" + target
 	}
-	// 11-digit Chinese mobile → SMS log filter.
-	if len(target) == 11 && target[0] == '1' {
-		allDigits := true
-		for _, c := range target {
-			if c < '0' || c > '9' {
-				allDigits = false
-				break
-			}
+	// All-digit shapes: 11-digit starts-with-1 → phone; 1-9 digits → user_id.
+	allDigits := true
+	for _, c := range target {
+		if c < '0' || c > '9' {
+			allDigits = false
+			break
 		}
-		if allDigits {
+	}
+	if allDigits {
+		if len(target) == 11 && target[0] == '1' {
 			return "/admin/sms-log?phone=" + target
+		}
+		if len(target) >= 1 && len(target) <= 9 {
+			return "/admin/users/detail?id=" + target
 		}
 	}
 	return ""

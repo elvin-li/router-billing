@@ -19,12 +19,15 @@ func TestAuditTargetHrefShapes(t *testing.T) {
 		{"", ""},
 		{"random text", ""},
 		{"not-a-mac-or-order", ""},
-		// 11-digit starts-with-1 is intentionally treated as a phone — Chinese
-		// mobile numbers all match this pattern. Non-Chinese-prefix numbers
-		// (10-digit, or starting with 2-9) don't.
+		// 11-digit starts-with-1 → phone (CN mobile shape).
 		{"12345678901", "/admin/sms-log?phone=12345678901"},
-		{"23456789012", ""}, // starts with 2 → not phone shape
-		{"1234567890", ""},  // 10 digits, not 11
+		// v0.95: short pure-digit targets are user IDs (from user_grant
+		// audit rows where target = user.ID stringified).
+		{"42", "/admin/users/detail?id=42"},
+		{"100000", "/admin/users/detail?id=100000"},
+		// 10-digit pure number: not phone (not 11), not user_id (too long).
+		{"1234567890", ""},
+		{"23456789012", ""}, // 11 digits but doesn't start with 1
 	}
 	for _, c := range cases {
 		t.Run(c.target, func(t *testing.T) {

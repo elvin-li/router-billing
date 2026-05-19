@@ -1,5 +1,23 @@
 # Changelog
 
+## v0.95 — auditTargetHref recognizes user IDs
+
+Extends v0.92's smart-link function. Pure-digit audit targets of
+1-9 chars now route to /admin/users/detail?id=N. This covers the
+`user_grant` action rows (introduced in v0.29) where target is
+the user.ID stringified — clicking once now jumps to the user's
+detail page.
+
+Precedence chain stays:
+  MAC → ORD prefix → 11-digit-1-prefix (phone) → 1-9 digit (user_id)
+
+10-digit numbers and 11-digit-non-1 numbers stay unlinked
+(probably noise; better silent than wrong).
+
+1 race-clean test case added to the shape-coverage table covering
+both the user_id positive case ("42", "100000") and the
+10-digit/11-digit-non-1 negative cases.
+
 ## v0.94 — GET /api/admin/plans/sales
 
 Per-plan paid-revenue + order count over the last N days for ops
