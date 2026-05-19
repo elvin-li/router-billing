@@ -1,5 +1,38 @@
 # Changelog
 
+## v0.62 — GET /api/admin/dashboard (programmatic snapshot)
+
+Programmatic equivalent of /admin/dashboard's roll-up panels.
+Returns the same DashboardSnapshot + Attention counters in one
+JSON payload so ops scripts can chart trends without scraping
+HTML.
+
+  GET /api/admin/dashboard   Bearer <any-token>
+  -> 200 {
+       "snapshot": {
+         today_revenue_cents, today_paid_orders, today_new_users,
+         today_new_macs, week7_revenue_cents, week7_paid_orders,
+         month30_revenue_cents, month30_paid_orders,
+         month30_new_users, prev_month30_revenue_cents,
+         prev_month30_paid_orders, prev_month30_new_users,
+         active_sessions
+       },
+       "attention": {
+         expiring_soon, stale_pending, suspended_users,
+         failed_today, sms_failures_24h, webhook_failures_24h
+       }
+     }
+
+prev_month30_* fields (from v0.28's MoM logic) let callers compute
+their own MoM deltas without re-running the math.
+
+Read-only token acceptable — payload is aggregate stats only, no
+user-identifying data leaks.
+
+4 race-clean tests: payload shape (all 13 snapshot keys + 6
+attention keys), seeded-data round-trip (today revenue + SMS
+failure counter), readonly accepted, POST → 405.
+
 ## v0.61 — /admin/health expose attention counters
 
 Adds `attention` block to both /admin/health and /api/admin/health

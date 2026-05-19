@@ -201,6 +201,61 @@ func (a *App) handleAPIMACList(w http.ResponseWriter, r *http.Request, _ string)
 	writeJSON(w, http.StatusOK, map[string]any{"macs": macs, "count": len(macs)})
 }
 
+// GET /api/admin/dashboard   Bearer <any-token>
+//
+// Programmatic equivalent of the /admin/dashboard panels. Returns the
+// snapshot used to render the dash plus the attention counters. Useful
+// for ops scripts that want to chart trends without scraping HTML.
+//
+//	-> 200 {
+//	     "snapshot": { today_revenue_cents, today_paid_orders,
+//	                   today_new_users, today_new_macs,
+//	                   week7_revenue_cents, week7_paid_orders,
+//	                   month30_revenue_cents, month30_paid_orders,
+//	                   month30_new_users, prev_month30_revenue_cents,
+//	                   prev_month30_paid_orders, prev_month30_new_users,
+//	                   active_sessions },
+//	     "attention": { expiring_soon, stale_pending, suspended_users,
+//	                    failed_today, sms_failures_24h,
+//	                    webhook_failures_24h }
+//	   }
+//
+// Read-only token acceptable — payload contains aggregate stats only,
+// no user-identifying data.
+func (a *App) handleAPIDashboard(w http.ResponseWriter, r *http.Request, _ string) {
+	if r.Method != http.MethodGet {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "GET only"})
+		return
+	}
+	snap, _ := a.DB.DashboardSnapshot(r.Context())
+	att, _ := a.DB.Attention(r.Context())
+	writeJSON(w, http.StatusOK, map[string]any{
+		"snapshot": map[string]int{
+			"today_revenue_cents":        snap.TodayRevenueCents,
+			"today_paid_orders":          snap.TodayPaidOrders,
+			"today_new_users":            snap.TodayNewUsers,
+			"today_new_macs":             snap.TodayNewMACs,
+			"week7_revenue_cents":        snap.Week7RevenueCents,
+			"week7_paid_orders":          snap.Week7PaidOrders,
+			"month30_revenue_cents":      snap.Month30RevenueCents,
+			"month30_paid_orders":        snap.Month30PaidOrders,
+			"month30_new_users":          snap.Month30NewUsers,
+			"prev_month30_revenue_cents": snap.PrevMonth30RevenueCents,
+			"prev_month30_paid_orders":   snap.PrevMonth30PaidOrders,
+			"prev_month30_new_users":     snap.PrevMonth30NewUsers,
+			"active_sessions":            snap.ActiveSessions,
+		},
+		"attention": map[string]int{
+			"expiring_soon":        att.ExpiringSoon,
+			"stale_pending":        att.StalePending,
+			"suspended_users":      att.SuspendedUsers,
+			"failed_today":         att.FailedToday,
+			"sms_failures_24h":     att.SMSFailures24h,
+			"webhook_failures_24h": att.WebhookFailures24h,
+		},
+	})
+}
+
 // apiUserSummary is the shape returned by /api/admin/users — deliberately a
 // subset of models.User without password_hash / totp_secret / totp_pending
 // so a leaked monitoring token can't exfiltrate auth material.
