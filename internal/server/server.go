@@ -303,6 +303,7 @@ func (a *App) Routes() http.Handler {
 	mux.HandleFunc("/api/admin/maintenance/audit-trim", a.requireAPITokenWrite(a.handleAPIAuditTrim))
 	mux.HandleFunc("/api/admin/maintenance/optimize-now", a.requireAPITokenWrite(a.handleAPIOptimizeNow))
 	mux.HandleFunc("/api/admin/plans", a.requireAPITokenRead(a.handleAPIPlanList))
+	mux.HandleFunc("/api/admin/plans/sales", a.requireAPITokenRead(a.handleAPIPlansSales))
 	mux.HandleFunc("/api/admin/plans/save", a.requireAPITokenWrite(a.handleAPIPlanSave))
 	mux.HandleFunc("/api/admin/plans/delete", a.requireAPITokenWrite(a.handleAPIPlanDelete))
 

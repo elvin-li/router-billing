@@ -1,5 +1,19 @@
 # Changelog
 
+## v0.94 — GET /api/admin/plans/sales
+
+Per-plan paid-revenue + order count over the last N days for ops
+dashboards charting "which plan is selling best?"
+
+  GET /api/admin/plans/sales?days=30  Bearer
+  -> 200 { plans: [{plan, orders, revenue_cents}, ...], days: 30 }
+
+Reuses db.PlanSalesSince. Sorted DESC by revenue. days defaults
+to 30, max 3650. Readonly acceptable.
+
+4 race-clean tests: aggregate correctness on 3-order fixture,
+sort by revenue, readonly accepted, POST 405.
+
 ## v0.93 — /admin/audit actor cells link to actor-filtered view
 
 Mirror of v0.92's smart target link. Each actor cell in the audit

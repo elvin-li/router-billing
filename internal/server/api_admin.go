@@ -224,6 +224,49 @@ func (a *App) handleAPIVersion(w http.ResponseWriter, r *http.Request, _ string)
 	})
 }
 
+// GET /api/admin/plans/sales?days=N   Bearer <any-token>
+//
+// Per-plan paid-revenue + order count over the last N days. For ops
+// dashboards charting "which plan is selling best?" without HTML scrape.
+//
+//	-> 200 { "plans": [ {"plan":"month","orders":42,"revenue_cents":21000},
+//	                    ... ],
+//	         "days":  30 }
+//
+// days defaults to 30, max 3650. Read-only token acceptable.
+func (a *App) handleAPIPlansSales(w http.ResponseWriter, r *http.Request, _ string) {
+	if r.Method != http.MethodGet {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "GET only"})
+		return
+	}
+	days := 30
+	if s := r.URL.Query().Get("days"); s != "" {
+		if n, err := strconv.Atoi(s); err == nil && n > 0 && n <= 3650 {
+			days = n
+		}
+	}
+	sales, err := a.DB.PlanSalesSince(r.Context(), days)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+	type apiPlanSale struct {
+		Plan         string `json:"plan"`
+		Orders       int    `json:"orders"`
+		RevenueCents int    `json:"revenue_cents"`
+	}
+	out := make([]apiPlanSale, 0, len(sales))
+	for _, p := range sales {
+		out = append(out, apiPlanSale{
+			Plan: p.Plan, Orders: p.OrdersCount, RevenueCents: p.TotalCents,
+		})
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"plans": out,
+		"days":  days,
+	})
+}
+
 // POST /api/admin/macs/label   Bearer <write-token>
 //
 //	{ "mac": "AA:BB:CC:DD:EE:FF", "label": "office tablet" }
