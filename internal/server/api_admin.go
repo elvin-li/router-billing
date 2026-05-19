@@ -369,6 +369,74 @@ type apiSMSReq struct {
 	Message string `json:"message"`
 }
 
+type apiMACImportRow struct {
+	MAC   string `json:"mac"`
+	Days  int    `json:"days,omitempty"`
+	Label string `json:"label,omitempty"`
+}
+
+type apiMACImportReq struct {
+	DefaultDays int               `json:"default_days,omitempty"`
+	MACs        []apiMACImportRow `json:"macs"`
+}
+
+// POST /api/admin/macs/import  Bearer <write-token>
+//
+// Bulk grant. Mirrors the /admin/macs/import textarea but accepts JSON
+// for scripting. Each row missing `days` uses `default_days` (or 30 if
+// that's also missing).
+//
+//	{ "default_days": 365,
+//	  "macs": [ {"mac": "AA:BB:CC:DD:EE:FF", "days": 30, "label": "phone"},
+//	            {"mac": "aa-bb-cc-dd-ee-01", "label": "tv"} ] }
+//
+// Returns the added/failed counts. Each grant audits as the existing
+// "grant" action so the trail matches the UI path.
+func (a *App) handleAPIMACImport(w http.ResponseWriter, r *http.Request, actor string) {
+	if r.Method != http.MethodPost {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "POST only"})
+		return
+	}
+	var req apiMACImportReq
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "bad json: " + err.Error()})
+		return
+	}
+	if len(req.MACs) == 0 {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "macs required"})
+		return
+	}
+	if len(req.MACs) > 1000 {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "too many rows (max 1000)"})
+		return
+	}
+	defaultDays := req.DefaultDays
+	if defaultDays <= 0 {
+		defaultDays = 30
+	}
+	added, failed := 0, 0
+	for _, row := range req.MACs {
+		mac, ok := models.NormalizeMAC(row.MAC)
+		if !ok {
+			failed++
+			continue
+		}
+		days := row.Days
+		if days <= 0 {
+			days = defaultDays
+		}
+		if _, err := a.MACSvc.Extend(r.Context(), mac, strings.TrimSpace(row.Label), days, nil); err != nil {
+			log.Printf("api mac import %s: %v", mac, err)
+			failed++
+			continue
+		}
+		a.DB.Audit(r.Context(), actor, "grant", mac,
+			"days="+strconv.Itoa(days)+" via=api ip="+clientIP(r))
+		added++
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"added": added, "failed": failed})
+}
+
 type apiRefundReq struct {
 	OrderNo string `json:"order_no"`
 	Reason  string `json:"reason,omitempty"`
