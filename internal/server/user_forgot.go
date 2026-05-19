@@ -191,7 +191,7 @@ func (a *App) handleUserForgotPasswordVerify(w http.ResponseWriter, r *http.Requ
 		a.renderForgot(w, r, 2, phone, "bad_code")
 		return
 	}
-	if !models.ValidPassword(newPwd) {
+	if !a.passwordValidatorFor()(newPwd) {
 		a.renderForgot(w, r, 2, phone, "bad_password")
 		return
 	}

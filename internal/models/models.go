@@ -197,7 +197,63 @@ func ValidPhone(s string) bool {
 	return phoneRe.MatchString(strings.TrimSpace(s))
 }
 
-// ValidPassword rejects passwords < 6 chars. Liberal otherwise.
+// ValidPassword rejects passwords < 6 chars or > 72 (bcrypt limit).
+// Liberal otherwise; for stricter checks use ValidPasswordStrong.
 func ValidPassword(p string) bool {
-	return len(p) >= 6 && len(p) <= 72 // bcrypt limit 72
+	return len(p) >= 6 && len(p) <= 72
+}
+
+// ValidPasswordStrong is the opt-in strict checker (config.security.
+// password_strength = "strict"):
+//   - Length 6..72 same as ValidPassword.
+//   - Long passphrases (10+ chars) pass without further checks.
+//   - Short passwords (6-9 chars) MUST contain at least 1 letter AND 1
+//     digit AND must not be in the commons dictionary below.
+//
+// The intent is to block "123456" / "111111" / "qwerty" style passwords
+// without forcing arbitrary symbol requirements on long passphrases.
+func ValidPasswordStrong(p string) bool {
+	if !ValidPassword(p) {
+		return false
+	}
+	if len(p) >= 10 {
+		return true
+	}
+	if commonWeakPasswords[strings.ToLower(p)] {
+		return false
+	}
+	hasLetter := false
+	hasDigit := false
+	for _, r := range p {
+		switch {
+		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z':
+			hasLetter = true
+		case r >= '0' && r <= '9':
+			hasDigit = true
+		}
+	}
+	return hasLetter && hasDigit
+}
+
+// commonWeakPasswords is a small dictionary of the most-frequently-used
+// awful passwords. Used only by ValidPasswordStrong.
+var commonWeakPasswords = map[string]bool{
+	"123456":    true,
+	"password":  true,
+	"123456789": true,
+	"qwerty":    true,
+	"abc123":    true,
+	"111111":    true,
+	"12345678":  true,
+	"iloveyou":  true,
+	"admin123":  true,
+	"letmein":   true,
+	"welcome":   true,
+	"monkey":    true,
+	"dragon":    true,
+	"baseball":  true,
+	"football":  true,
+	"sunshine":  true,
+	"princess":  true,
+	"qwerty123": true,
 }

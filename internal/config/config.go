@@ -66,6 +66,19 @@ type Security struct {
 	// the default. There's intentionally no "unlimited" — an audit
 	// table that grows forever will eventually hurt query latency.
 	AuditLogKeep int `yaml:"audit_log_keep,omitempty"`
+
+	// PasswordStrength selects which validator runs at user register /
+	// reset:
+	//   "" / "lax"    → models.ValidPassword (length-only)
+	//   "strict"      → models.ValidPasswordStrong (commons + letter+digit)
+	// Default "" / lax preserves the original v0.0 behavior.
+	PasswordStrength string `yaml:"password_strength,omitempty"`
+}
+
+// PasswordStrengthStrict returns true when the config opts into the
+// strict (commons + letter+digit) validator.
+func (s Security) PasswordStrengthStrict() bool {
+	return strings.EqualFold(strings.TrimSpace(s.PasswordStrength), "strict")
 }
 
 // AuditLogKeep returns the clamped retention count.

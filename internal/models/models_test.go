@@ -59,7 +59,7 @@ func TestValidPassword(t *testing.T) {
 		t.Error("5 chars should be invalid")
 	}
 	if !ValidPassword("123456") {
-		t.Error("6 chars should be valid")
+		t.Error("6 chars should be valid under the default (lax) policy")
 	}
 	if !ValidPassword("a-very-strong-password!") {
 		t.Error("normal password should be valid")
@@ -70,5 +70,46 @@ func TestValidPassword(t *testing.T) {
 	}
 	if ValidPassword(string(tooLong)) {
 		t.Error("73 chars should exceed bcrypt limit")
+	}
+}
+
+func TestValidPasswordStrongRejectsCommons(t *testing.T) {
+	for _, bad := range []string{
+		"123456", "password", "abc123", "qwerty", "111111",
+		"admin123", "letmein", "12345678",
+	} {
+		if ValidPasswordStrong(bad) {
+			t.Errorf("strong(%q) = true; should be rejected (commons)", bad)
+		}
+	}
+}
+
+func TestValidPasswordStrongRequiresLetterAndDigitWhenShort(t *testing.T) {
+	cases := []struct {
+		pw   string
+		want bool
+	}{
+		{"abcdef", false},  // 6 letters, no digit
+		{"123987", false},  // 6 digits, no letter
+		{"abc987", true},   // 6 chars, letter+digit, not in commons
+		{"Aa1xyz", true},   // mixed
+		{"!!!!@@", false},  // symbols only
+		{"abcd1234", true}, // 8 chars, mixed
+	}
+	for _, c := range cases {
+		got := ValidPasswordStrong(c.pw)
+		if got != c.want {
+			t.Errorf("strong(%q) = %v; want %v", c.pw, got, c.want)
+		}
+	}
+}
+
+func TestValidPasswordStrongAcceptsLongPassphrases(t *testing.T) {
+	// 10+ chars bypass the letter+digit + dictionary check.
+	if !ValidPasswordStrong("correcthorsebatterystaple") {
+		t.Error("long all-letter passphrase should be valid in strict mode")
+	}
+	if !ValidPasswordStrong("a-very-strong-password!") {
+		t.Error("long mixed passphrase should be valid in strict mode")
 	}
 }

@@ -222,6 +222,16 @@ func (a *App) handleUserLogin(w http.ResponseWriter, r *http.Request) {
 	http.Redirect(w, r, next, http.StatusSeeOther)
 }
 
+// passwordValidatorFor returns the password-policy function selected by
+// config.security.password_strength. Used at register / password-change /
+// forgot-password reset so all three paths share one policy.
+func (a *App) passwordValidatorFor() func(string) bool {
+	if a.Cfg.Security.PasswordStrengthStrict() {
+		return models.ValidPasswordStrong
+	}
+	return models.ValidPassword
+}
+
 func (a *App) handleUserRegister(w http.ResponseWriter, r *http.Request) {
 	if r.Method == http.MethodGet {
 		a.render(w, "user_register.html", a.userCtx(r, "register", nil))
@@ -245,7 +255,7 @@ func (a *App) handleUserRegister(w http.ResponseWriter, r *http.Request) {
 		http.Redirect(w, r, "/user/register?err=bad_phone", http.StatusSeeOther)
 		return
 	}
-	if !models.ValidPassword(password) {
+	if !a.passwordValidatorFor()(password) {
 		http.Redirect(w, r, "/user/register?err=bad_password", http.StatusSeeOther)
 		return
 	}
@@ -762,7 +772,7 @@ func (a *App) handleUserPassword(w http.ResponseWriter, r *http.Request) {
 		http.Redirect(w, r, "/user/me?err=bad_credentials", http.StatusSeeOther)
 		return
 	}
-	if !models.ValidPassword(newP) {
+	if !a.passwordValidatorFor()(newP) {
 		http.Redirect(w, r, "/user/me?err=bad_password", http.StatusSeeOther)
 		return
 	}
