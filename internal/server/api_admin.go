@@ -929,6 +929,38 @@ func (a *App) handleAPISMSLog(w http.ResponseWriter, r *http.Request, _ string) 
 	writeJSON(w, http.StatusOK, map[string]any{"logs": out, "count": len(out)})
 }
 
+// POST /api/admin/maintenance/optimize-now  Bearer <write-token>
+//
+// API mirror of v0.39's UI button. Runs `PRAGMA optimize` (SQLite's
+// recommended lightweight reanalysis). Sub-second on every realistic
+// router-billing DB size.
+//
+//	-> 200 { "ms": N }
+//
+// VACUUM is intentionally NOT exposed via API for the same reason it's
+// not on the UI button — it can hold a write lock for minutes. Operators
+// who want disk reclaim run `sqlite3 ... "VACUUM"` manually during a
+// quiet window.
+//
+// Audit: `optimize_now` detail="ms=N via=api ip=...".
+func (a *App) handleAPIOptimizeNow(w http.ResponseWriter, r *http.Request, actor string) {
+	if r.Method != http.MethodPost {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "POST only"})
+		return
+	}
+	start := time.Now()
+	if _, err := a.DB.Exec(r.Context(), "PRAGMA optimize"); err != nil {
+		a.DB.Audit(r.Context(), actor, "optimize_now_failed", "",
+			"err="+err.Error()+" via=api ip="+clientIP(r))
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+	ms := time.Since(start).Milliseconds()
+	a.DB.Audit(r.Context(), actor, "optimize_now", "",
+		"ms="+strconv.FormatInt(ms, 10)+" via=api ip="+clientIP(r))
+	writeJSON(w, http.StatusOK, map[string]any{"ms": ms})
+}
+
 // POST /api/admin/maintenance/expire-now  Bearer <write-token>
 //
 // Programmatic mirror of v0.35's UI button. Runs ExpireDueMACs +

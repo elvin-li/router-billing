@@ -1,5 +1,24 @@
 # Changelog
 
+## v0.46 — POST /api/admin/maintenance/optimize-now
+
+API mirror of v0.39's UI button. Completes the three-button
+"manual maintenance trigger" API set (alongside v0.38's
+expire-now + audit-trim).
+
+  POST /api/admin/maintenance/optimize-now   Bearer <write-token>
+  -> 200 { "ms": N }
+
+Same posture as the UI handler: runs `PRAGMA optimize` (SQLite's
+recommended lightweight reanalysis), sub-second on every
+realistic router-billing DB size. VACUUM is intentionally NOT
+exposed — it can hold a write lock for minutes.
+
+Audit: `optimize_now` detail="ms=N via=api ip=...".
+
+3 race-clean tests: POST + ms + audit assertion, readonly-token
+reject, GET → 405.
+
 ## v0.45 — /api/admin/sms/log filters
 
 v0.44 returned the last N rows undiscriminately. v0.45 adds two
