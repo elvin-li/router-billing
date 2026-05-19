@@ -1,5 +1,33 @@
 # Changelog
 
+## v0.55 — POST /api/admin/orders/cancel-stale (bulk cleanup)
+
+Companion to v0.52's single-order cancel. Designed for hourly
+cron use to keep the pending backlog small. Customer abandons
+checkout → order sits at pending forever → /admin/orders gets
+noisier every day.
+
+  POST /api/admin/orders/cancel-stale   Bearer <write-token>
+  { "older_than_hours": 24 }    // optional, default 24
+  -> 200 { "canceled": N }
+
+Empty body is also fine — cron can POST nothing and rely on the
+24h default.
+
+Bounds: older_than_hours in [1, 720] (1h .. 30d). 0 / unset → 24.
+Single atomic UPDATE so a payment arriving mid-sweep can't lose:
+the `status = 'pending'` guard in the WHERE makes the race
+correct either way (we transition pending → failed, payment
+handler transitions pending → paid; only one wins per row).
+
+New DB helper `CancelStalePendingOrders(ctx, olderThan)`.
+
+Audit: `orders_cancel_stale` detail="count=N hours=H via=api ip=...".
+
+5 race-clean tests: 4-row mixed-age fixture confirms only the
+>cutoff pending rows flip (paid + fresh untouched), default 24h
+case, oversize-hours 400, readonly token reject, empty-body OK.
+
 ## v0.54 — Audit 详情关键字搜索 (q=…)
 
 The existing `actor` / `action` / `target` filters covered the

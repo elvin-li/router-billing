@@ -1121,6 +1121,49 @@ func (a *App) handleAPIAuditTrim(w http.ResponseWriter, r *http.Request, actor s
 	writeJSON(w, http.StatusOK, map[string]any{"kept": keep})
 }
 
+// POST /api/admin/orders/cancel-stale   Bearer <write-token>
+//
+//	{ "older_than_hours": 24 }  // optional, default 24
+//	-> 200 { "canceled": N }
+//
+// Bulk cleanup: flips every order with status='pending' AND created_at
+// older than the cutoff to status='failed' in one SQL statement. Designed
+// for hourly cron use to keep the pending backlog small.
+//
+// Bounds: older_than_hours in [1, 720] (1h .. 30d). 0 / unset → 24.
+// Atomic single UPDATE so a payment that arrives mid-sweep can't lose:
+// the status='pending' guard in the WHERE makes the race correct.
+//
+// Audit row: `orders_cancel_stale` with count + cutoff hours.
+func (a *App) handleAPIOrderCancelStale(w http.ResponseWriter, r *http.Request, actor string) {
+	if r.Method != http.MethodPost {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "POST only"})
+		return
+	}
+	var req struct {
+		OlderThanHours int `json:"older_than_hours"`
+	}
+	// Tolerate empty body: cleanup cron may POST nothing and rely on the
+	// 24h default.
+	_ = json.NewDecoder(r.Body).Decode(&req)
+	hours := req.OlderThanHours
+	if hours <= 0 {
+		hours = 24
+	}
+	if hours > 720 {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "older_than_hours must be <= 720"})
+		return
+	}
+	n, err := a.DB.CancelStalePendingOrders(r.Context(), time.Duration(hours)*time.Hour)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+	a.DB.Audit(r.Context(), actor, "orders_cancel_stale", "",
+		"count="+strconv.Itoa(n)+" hours="+strconv.Itoa(hours)+" via=api ip="+clientIP(r))
+	writeJSON(w, http.StatusOK, map[string]any{"canceled": n})
+}
+
 // POST /api/admin/orders/cancel   Bearer <write-token>
 //
 //	{ "order_no": "ORD-..." }

@@ -674,6 +674,32 @@ func (d *DB) CancelPendingOrder(ctx context.Context, orderNo string) (*models.Or
 	return o, nil
 }
 
+// CancelStalePendingOrders flips every order with status='pending' AND
+// created_at older than `olderThan` to status='failed' in one statement.
+// Returns the number of rows that flipped.
+//
+// Used by v0.55's /api/admin/orders/cancel-stale endpoint for periodic
+// cleanup automation: cron polls hourly with older_than_hours=24 to keep
+// the pending backlog small. Atomic (single UPDATE) so a payment that
+// arrives mid-sweep either wins (status moves to paid before our UPDATE
+// touches it) or loses (we already set it to failed and the payment
+// handler logs the conflict). The status='pending' guard in the WHERE
+// makes the race outcome correct either way.
+func (d *DB) CancelStalePendingOrders(ctx context.Context, olderThan time.Duration) (int, error) {
+	if olderThan <= 0 {
+		return 0, fmt.Errorf("olderThan must be > 0")
+	}
+	cutoff := time.Now().UTC().Add(-olderThan)
+	res, err := d.conn.ExecContext(ctx,
+		`UPDATE orders SET status = 'failed' WHERE status = 'pending' AND created_at < ?`,
+		cutoff)
+	if err != nil {
+		return 0, err
+	}
+	n, err := res.RowsAffected()
+	return int(n), err
+}
+
 // ---------- Sessions ----------
 
 func (d *DB) CreateSession(ctx context.Context, token, kind, subject string, userID *int64, ttl time.Duration) error {
