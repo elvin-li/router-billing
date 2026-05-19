@@ -1,5 +1,26 @@
 # Changelog
 
+## v0.75 — GET /api/admin/audit/distinct?field=actor|action
+
+Programmatic equivalent of v0.72's actor datalist (and the
+pre-existing action dropdown source). Useful for ops dashboards
+that build their own audit-search UI.
+
+  GET /api/admin/audit/distinct?field=actor    Bearer <any-token>
+  -> 200 { "values": ["admin:alice", "admin:bob", ...] }
+
+  GET /api/admin/audit/distinct?field=action
+  -> 200 { "values": ["grant", "login", "revoke", ...] }
+
+`field` is required and must be exactly "actor" or "action".
+Anything else returns 400 — narrow allowlist by design so we
+don't accidentally expose `detail` (which can contain sensitive
+text like SMS messages or IPs).
+
+5 race-clean tests: actor returns sorted unique over a 3-actor
+fixture, action de-duplicates a duplicated grant row, bad/missing
+field both 400, readonly token accepted.
+
 ## v0.74 — GET /api/admin/sightings
 
 Programmatic access to the device_sightings table. Ops automation

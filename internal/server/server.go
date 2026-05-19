@@ -263,6 +263,7 @@ func (a *App) Routes() http.Handler {
 	mux.HandleFunc("/api/admin/health", a.requireAPITokenRead(a.handleAPIHealth))
 	mux.HandleFunc("/api/admin/dashboard", a.requireAPITokenRead(a.handleAPIDashboard))
 	mux.HandleFunc("/api/admin/sightings", a.requireAPITokenRead(a.handleAPISightings))
+	mux.HandleFunc("/api/admin/audit/distinct", a.requireAPITokenRead(a.handleAPIAuditDistinct))
 	mux.HandleFunc("/api/admin/backup", a.requireAPITokenRead(a.handleAPIBackup))
 	mux.HandleFunc("/api/admin/macs", a.requireAPITokenRead(a.handleAPIMACList))
 	mux.HandleFunc("/api/admin/users", a.requireAPITokenRead(a.handleAPIUserList))

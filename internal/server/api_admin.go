@@ -201,6 +201,44 @@ func (a *App) handleAPIMACList(w http.ResponseWriter, r *http.Request, _ string)
 	writeJSON(w, http.StatusOK, map[string]any{"macs": macs, "count": len(macs)})
 }
 
+// GET /api/admin/audit/distinct?field=actor|action   Bearer <any-token>
+//
+// Returns the distinct set of audit_log.<field> values, sorted, for
+// populating autocomplete UI in custom dashboards. Single endpoint
+// keeps the API surface tidy; `field` is required and rejected if
+// not in the allowlist.
+//
+//	-> 200 { "values": ["admin:bob", "admin:alice", ...] }
+//	   400 if field is missing or unknown
+//
+// Read-only token acceptable.
+func (a *App) handleAPIAuditDistinct(w http.ResponseWriter, r *http.Request, _ string) {
+	if r.Method != http.MethodGet {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "GET only"})
+		return
+	}
+	field := strings.TrimSpace(r.URL.Query().Get("field"))
+	var values []string
+	var err error
+	switch field {
+	case "actor":
+		values, err = a.DB.DistinctAuditActors(r.Context())
+	case "action":
+		values, err = a.DB.DistinctAuditActions(r.Context())
+	default:
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "field must be actor or action"})
+		return
+	}
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+	if values == nil {
+		values = []string{}
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"values": values})
+}
+
 // GET /api/admin/sightings?since_hours=24   Bearer <any-token>
 //
 // Programmatic access to the device_sightings table. Useful for ops
