@@ -1,5 +1,32 @@
 # Changelog
 
+## v0.52 — POST /api/admin/orders/cancel
+
+Cleanup automation for stuck pending orders: customer abandoned
+the payment flow, gateway never reported back, the order sits in
+`pending` forever (until /admin/orders shows a noisy backlog).
+
+  POST /api/admin/orders/cancel   Bearer <write-token>
+  { "order_no": "ORD-..." }
+  -> 200 { "status": "canceled", "order_no": "..." }
+  -> 404 if order_no missing
+  -> 409 if order isn't pending (already paid / failed / refunded)
+
+Transitions `pending → failed` atomically via UPDATE WHERE
+status='pending', so a race that just paid the order can't lose
+the payment. The order moves to `failed` not a new "canceled"
+status — keeps the schema vocabulary stable.
+
+New DB helper `CancelPendingOrder(ctx, orderNo) (*Order, error)`
+returns sql.ErrNoRows for missing, fmt error for wrong-status,
+and the post-transition order on success.
+
+Audit row: `order_canceled` target=order_no detail="via=api ip=...".
+
+6 race-clean tests: happy path + audit row, 404, 409 on paid,
+400 on missing order_no, readonly token reject, and a DB-level
+idempotence-style test that the second cancel call errors.
+
 ## v0.51 — 立即裁剪 sms_log / webhook_deliveries 按钮
 
 Round out the v0.35 + v0.39 trim-now button family with the two

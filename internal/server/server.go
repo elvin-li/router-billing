@@ -272,6 +272,7 @@ func (a *App) Routes() http.Handler {
 	mux.HandleFunc("/api/admin/macs/import", a.requireAPITokenWrite(a.handleAPIMACImport))
 	mux.HandleFunc("/api/admin/sms/send", a.requireAPITokenWrite(a.handleAPISMSSend))
 	mux.HandleFunc("/api/admin/orders/refund", a.requireAPITokenWrite(a.handleAPIOrderRefund))
+	mux.HandleFunc("/api/admin/orders/cancel", a.requireAPITokenWrite(a.handleAPIOrderCancel))
 	mux.HandleFunc("/api/admin/vouchers/generate", a.requireAPITokenWrite(a.handleAPIVoucherGenerate))
 	mux.HandleFunc("/api/admin/vouchers/batch/revoke", a.requireAPITokenWrite(a.handleAPIVoucherBatchRevoke))
 	mux.HandleFunc("/api/admin/users/grant", a.requireAPITokenWrite(a.handleAPIUserGrant))

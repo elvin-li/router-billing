@@ -17,7 +17,9 @@ package server
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
+	"errors"
 	"log"
 	"net/http"
 	"strconv"
@@ -1116,6 +1118,52 @@ func (a *App) handleAPIAuditTrim(w http.ResponseWriter, r *http.Request, actor s
 	a.DB.Audit(r.Context(), actor, "audit_trim", "",
 		"keep="+strconv.Itoa(keep)+" via=api ip="+clientIP(r))
 	writeJSON(w, http.StatusOK, map[string]any{"kept": keep})
+}
+
+// POST /api/admin/orders/cancel   Bearer <write-token>
+//
+//	{ "order_no": "ORD-..." }
+//	-> 200 { "status": "canceled", "order_no": "..." }
+//	   404 if order_no not found
+//	   409 if order isn't pending (already paid / failed / refunded)
+//
+// Cleanup automation for stuck pending orders: customer abandoned the
+// payment, gateway never reported back, etc. Transitions pending → failed
+// atomically (UPDATE WHERE status='pending'), so a race that just paid
+// the order can't lose the payment. Audit row carries `via=api`.
+func (a *App) handleAPIOrderCancel(w http.ResponseWriter, r *http.Request, actor string) {
+	if r.Method != http.MethodPost {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "POST only"})
+		return
+	}
+	var req struct {
+		OrderNo string `json:"order_no"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "bad json: " + err.Error()})
+		return
+	}
+	orderNo := strings.TrimSpace(req.OrderNo)
+	if orderNo == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "order_no required"})
+		return
+	}
+	o, err := a.DB.CancelPendingOrder(r.Context(), orderNo)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			writeJSON(w, http.StatusNotFound, map[string]string{"error": "order not found"})
+			return
+		}
+		// Status mismatch (not pending) → 409.
+		writeJSON(w, http.StatusConflict, map[string]string{"error": err.Error()})
+		return
+	}
+	a.DB.Audit(r.Context(), actor, "order_canceled", orderNo,
+		"via=api ip="+clientIP(r))
+	writeJSON(w, http.StatusOK, map[string]any{
+		"status":   "canceled",
+		"order_no": o.OrderNo,
+	})
 }
 
 type apiAuditNoteReq struct {

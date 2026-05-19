@@ -628,6 +628,52 @@ func (d *DB) MarkOrderRefunded(ctx context.Context, orderNo, reason string) (*mo
 	return &m, nil
 }
 
+// CancelPendingOrder transitions a `pending` order to `failed`. Used by the
+// programmatic /api/admin/orders/cancel endpoint (v0.52) for cleanup
+// automation that wants to retire stuck orders (gateway didn't respond,
+// customer abandoned, etc.) without waiting for them to drift to `expired`
+// on their own.
+//
+// Atomic — uses UPDATE WHERE status='pending' so a race that just paid
+// the order can't accidentally lose the payment. Returns:
+//   - the order row + nil on success
+//   - nil + sql.ErrNoRows if order_no doesn't exist
+//   - nil + fmt-wrapped status error if the order isn't pending
+func (d *DB) CancelPendingOrder(ctx context.Context, orderNo string) (*models.Order, error) {
+	tx, err := d.conn.BeginTx(ctx, nil)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	row := tx.QueryRowContext(ctx, `SELECT `+orderCols+` FROM orders WHERE order_no = ?`, orderNo)
+	o, err := scanOrder(row)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, sql.ErrNoRows
+	}
+	if err != nil {
+		return nil, err
+	}
+	if o.Status != models.OrderPending {
+		return nil, fmt.Errorf("order %s is %s, only pending orders can be canceled", orderNo, o.Status)
+	}
+	res, err := tx.ExecContext(ctx,
+		`UPDATE orders SET status = 'failed' WHERE order_no = ? AND status = 'pending'`, orderNo)
+	if err != nil {
+		return nil, err
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		// Lost a race — somebody else transitioned the order in between
+		// our SELECT and our UPDATE. Surface as a conflict.
+		return nil, fmt.Errorf("order %s no longer pending (raced)", orderNo)
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, err
+	}
+	o.Status = models.OrderFailed
+	return o, nil
+}
+
 // ---------- Sessions ----------
 
 func (d *DB) CreateSession(ctx context.Context, token, kind, subject string, userID *int64, ttl time.Duration) error {
