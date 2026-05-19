@@ -244,8 +244,17 @@ func (a *App) handleAdminVoucherBatchRevoke(w http.ResponseWriter, r *http.Reque
 		http.StatusSeeOther)
 }
 
+// GET /admin/vouchers/export.csv?batch=&status=
+//
+// status filter (optional): unused|redeemed|revoked|expired. Matches the
+// derived status the per-row CSV already emits, so an operator who
+// downloaded a previous export and filtered "status=redeemed" in Excel
+// can now ask for that directly. The filter happens in Go (since the
+// DB doesn't store the derived status column) — list size is capped
+// at 1000 by the underlying ListVouchers so the in-memory pass is fine.
 func (a *App) handleAdminVouchersExport(w http.ResponseWriter, r *http.Request) {
 	batch := r.URL.Query().Get("batch")
+	wantStatus := strings.TrimSpace(r.URL.Query().Get("status"))
 	list, err := a.DB.ListVouchers(r.Context(), batch, 1000)
 	if err != nil {
 		http.Error(w, "db", http.StatusInternalServerError)
@@ -253,8 +262,12 @@ func (a *App) handleAdminVouchersExport(w http.ResponseWriter, r *http.Request) 
 	}
 	stamp := time.Now().Format("20060102-150405")
 	w.Header().Set("Content-Type", "text/csv; charset=utf-8")
+	filenameSuffix := batch
+	if wantStatus != "" {
+		filenameSuffix = batch + "-" + wantStatus
+	}
 	w.Header().Set("Content-Disposition",
-		fmt.Sprintf(`attachment; filename="vouchers-%s-%s.csv"`, batch, stamp))
+		fmt.Sprintf(`attachment; filename="vouchers-%s-%s.csv"`, filenameSuffix, stamp))
 	cw := csv.NewWriter(w)
 	defer cw.Flush()
 	_ = cw.Write([]string{"code_pretty", "code", "days", "batch", "expires_at", "status", "redeemed_by_mac", "created_at"})
@@ -267,6 +280,9 @@ func (a *App) handleAdminVouchersExport(w http.ResponseWriter, r *http.Request) 
 			status = "redeemed"
 		} else if v.ExpiresAt != nil && v.ExpiresAt.Before(now) {
 			status = "expired"
+		}
+		if wantStatus != "" && status != wantStatus {
+			continue
 		}
 		expires := ""
 		if v.ExpiresAt != nil {

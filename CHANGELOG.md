@@ -1,5 +1,27 @@
 # Changelog
 
+## v0.41 — Voucher CSV export filter by status
+
+  GET /admin/vouchers/export.csv?batch=...&status=unused|redeemed|revoked|expired
+
+For accounting workflows like "give me only the redeemed ones from
+this batch so I can reconcile the revenue", or "give me the unused
+ones to reprint as a promo".
+
+Filter happens in Go on the result of ListVouchers (capped at 1000
+rows already), so the in-memory pass is fine — no new SQL surface
+needed. The Content-Disposition filename embeds the status when
+filtered (`vouchers-batch-unused-20260519-093015.csv`) so the
+download is self-describing.
+
+No-status legacy callers still get every row in the batch.
+
+6 race-clean tests:
+- 4-row fixture (one per status) confirms each filter returns
+  exactly its row + excludes the other 3
+- No-status request returns everything
+- Filename includes the status when filtered
+
 ## v0.40 — /api/admin/macs filter + limit params
 
 Pre-v0.40, `GET /api/admin/macs` returned every MAC row unfiltered.
