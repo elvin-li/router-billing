@@ -1,5 +1,32 @@
 # Changelog
 
+## v0.31 — 套餐保存严格校验
+
+Server-side validation on /admin/plans/save catches the typo where
+an operator types "30000" instead of "30 days" or "1000000" instead
+of "1000" (=¥10). Without these bounds the saved plan immediately
+ships to /buy and could trigger an absurd customer charge or a
+1000-year expiry date.
+
+New rejections (each redirect with a distinct ?err=<reason>):
+- `bad_key`         — plan_key must match `[A-Za-z0-9_-]{1,32}`
+                      (used in /buy?plan=<key>, audit targets, DB PK).
+- `label_too_long`  — label > 64 chars
+- `days_too_large`  — days > 3650 (10 years, sanity cap)
+- `price_too_large` — price_cents > 10_000_000 (¥100,000)
+
+Lower-bound rejections (key empty / days≤0 / price≤0) keep their
+existing `err=invalid_days` flash for backwards compatibility.
+
+6 race-clean tests:
+- TestPlanKeyOK — 15-case table-driven pin on every accept/reject
+  edge of the key validator (empty, oversize, non-ASCII, slash,
+  dot, semicolon, plus, etc.)
+- One test per rejection branch (bad_key, days_too_large,
+  price_too_large, label_too_long) confirming the redirect AND
+  the DB is unchanged.
+- One happy-path test confirming a valid plan does land.
+
 ## v0.30 — 公开 /health 端点（无 auth）
 
 For load balancers, uptime monitors (UptimeRobot, Pingdom, k8s

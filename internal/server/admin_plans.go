@@ -36,8 +36,31 @@ func (a *App) handleAdminPlanSave(w http.ResponseWriter, r *http.Request) {
 	price, _ := strconv.Atoi(r.PostForm.Get("price_cents"))
 	sortOrder, _ := strconv.Atoi(r.PostForm.Get("sort_order"))
 	enabled := r.PostForm.Get("enabled") != "off"
+
+	// Lower-bound checks (existing behavior) — required fields must be set
+	// to something usable.
 	if key == "" || label == "" || days <= 0 || price <= 0 {
 		http.Redirect(w, r, "/admin/plans?err=invalid_days", http.StatusSeeOther)
+		return
+	}
+	// Upper-bound + format checks — catch the typo where an operator types
+	// "30000" instead of "30 days" or "1000000" (=¥10000) instead of "10000"
+	// (=¥100). Without these the saved plan ships immediately to /buy and
+	// could result in a real customer charge or an absurd expiry date.
+	if !planKeyOK(key) {
+		http.Redirect(w, r, "/admin/plans?err=bad_key", http.StatusSeeOther)
+		return
+	}
+	if len(label) > 64 {
+		http.Redirect(w, r, "/admin/plans?err=label_too_long", http.StatusSeeOther)
+		return
+	}
+	if days > 3650 { // 10 years
+		http.Redirect(w, r, "/admin/plans?err=days_too_large", http.StatusSeeOther)
+		return
+	}
+	if price > 10000000 { // ¥100,000 — extra-zero typo guard
+		http.Redirect(w, r, "/admin/plans?err=price_too_large", http.StatusSeeOther)
 		return
 	}
 	p := models.Plan{
@@ -69,6 +92,29 @@ func (a *App) handleAdminPlanDelete(w http.ResponseWriter, r *http.Request) {
 	}
 	a.DB.Audit(r.Context(), "admin", "plan_delete", key, "")
 	http.Redirect(w, r, "/admin/plans?ok=1", http.StatusSeeOther)
+}
+
+// planKeyOK validates the plan_key form input. The key is used in URLs
+// (/buy?plan=<key>), audit-log targets, and as a primary key in the DB,
+// so we restrict it to ASCII letters/digits/hyphen/underscore. Length cap
+// matches the DB column's practical use — anything longer is almost
+// certainly a paste accident.
+func planKeyOK(s string) bool {
+	if len(s) == 0 || len(s) > 32 {
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		switch {
+		case c >= 'a' && c <= 'z':
+		case c >= 'A' && c <= 'Z':
+		case c >= '0' && c <= '9':
+		case c == '-' || c == '_':
+		default:
+			return false
+		}
+	}
+	return true
 }
 
 // activePlans returns DB plans where present, falling back to config plans.
