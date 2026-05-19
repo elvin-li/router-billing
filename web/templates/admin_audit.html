@@ -114,7 +114,7 @@
             {{range .Entries}}
             <tr>
               <td style="color:var(--text-soft); white-space:nowrap;">{{formatTime .At}}</td>
-              <td class="mono">{{.Actor}}</td>
+              <td class="mono"><a href="/admin/audit?actor={{.Actor}}{{if $.Filter.Since}}&since={{$.Filter.Since}}{{end}}{{if $.Filter.Until}}&until={{$.Filter.Until}}{{end}}" style="color:inherit;" title="只看此 actor">{{.Actor}}</a></td>
               <td><span class="pill {{if eq .Action "pay"}}paid{{else if eq .Action "login"}}active{{else if eq .Action "revoke"}}blocked{{else if eq .Action "login_failed"}}failed{{else if eq .Action "login_suspended"}}blocked{{else}}pending{{end}}">{{.Action}}</span></td>
               <td class="mono">
                 {{$href := auditTargetHref .Target}}

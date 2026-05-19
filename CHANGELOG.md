@@ -1,5 +1,24 @@
 # Changelog
 
+## v0.93 — /admin/audit actor cells link to actor-filtered view
+
+Mirror of v0.92's smart target link. Each actor cell in the audit
+table becomes a one-click "show me only this actor" link. Date
+range filter (since/until) is preserved through the link so
+clicking doesn't reset the rest of the filter.
+
+  Before: <td class="mono">admin:bob</td>
+  After:  <td class="mono"><a href="/admin/audit?actor=admin:bob">admin:bob</a></td>
+
+Use case: investigating a security alert — "show me everything
+admin:bob did between 2026-05-12 and 2026-05-19." Pre-v0.93
+required typing the actor into the filter; now click once on
+any of bob's audit rows to scope to just bob, then refine.
+
+2 race-clean tests: actor cell IS a link (accepts both `:` and
+`%3a` URL-escape variants), since/until are preserved in the
+generated href.
+
 ## v0.92 — /admin/audit target cells become smart links
 
 Each audit target string is auto-linked based on its shape:
