@@ -224,6 +224,60 @@ func (a *App) handleAPIVersion(w http.ResponseWriter, r *http.Request, _ string)
 	})
 }
 
+// POST /api/admin/macs/label   Bearer <write-token>
+//
+//	{ "mac": "AA:BB:CC:DD:EE:FF", "label": "office tablet" }
+//	-> 200 { "status": "ok", "mac": "..." }
+//	   400 missing/malformed; 404 not found
+//
+// Programmatic admin counterpart to the user-side /user/macs/label form.
+// Useful for bulk-rename automation after a customer-ID migration without
+// touching expiry. Label trimmed + capped 64 chars.
+//
+// Audit: mac_label target=mac detail="label=<value> via=api ip=...".
+func (a *App) handleAPIMACLabel(w http.ResponseWriter, r *http.Request, actor string) {
+	if r.Method != http.MethodPost {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "POST only"})
+		return
+	}
+	var req struct {
+		MAC   string `json:"mac"`
+		Label string `json:"label"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "bad json: " + err.Error()})
+		return
+	}
+	normalized, ok := models.NormalizeMAC(req.MAC)
+	if !ok {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid mac"})
+		return
+	}
+	m, err := a.DB.GetMAC(r.Context(), normalized)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+	if m == nil {
+		writeJSON(w, http.StatusNotFound, map[string]string{"error": "mac not found"})
+		return
+	}
+	label := strings.TrimSpace(req.Label)
+	if len(label) > 64 {
+		label = label[:64]
+	}
+	if err := a.DB.SetMACLabel(r.Context(), normalized, label); err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+	a.DB.Audit(r.Context(), actor, "mac_label", normalized,
+		"label="+label+" via=api ip="+clientIP(r))
+	writeJSON(w, http.StatusOK, map[string]any{
+		"status": "ok",
+		"mac":    normalized,
+	})
+}
+
 // POST /api/admin/macs/notes   Bearer <write-token>
 //
 //	{ "mac": "AA:BB:CC:DD:EE:FF", "notes": "support context" }

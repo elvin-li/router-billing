@@ -1,5 +1,24 @@
 # Changelog
 
+## v0.87 — POST /api/admin/macs/label (programmatic rename)
+
+Pairs with v0.84's /api/admin/macs/notes — admins can now rename
+a MAC via API without touching expiry or any other field. Useful
+for bulk-rename automation after a customer-ID migration.
+
+  POST /api/admin/macs/label  Bearer <write-token>
+  { "mac": "AA:BB:CC:DD:EE:FF", "label": "office tablet" }
+  -> 200 { "status": "ok", "mac": "..." }
+  -> 400 / 404
+
+Label trimmed and capped at 64 chars (same as plan label). Input
+normalized through models.NormalizeMAC. Audit row marks via=api
+and records the new label value for the audit trail.
+
+5 race-clean tests: happy-path persists + audit, 100-char input
+truncates to 64, expiry untouched after label change, 404 on
+missing mac, 400 on bad mac, readonly token reject.
+
 ## v0.86 — /admin/audit action-frequency chip row
 
 Surfaces v0.85's CountAuditActionsByDate output inline at the top
