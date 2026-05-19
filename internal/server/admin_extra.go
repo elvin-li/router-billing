@@ -117,13 +117,18 @@ func (a *App) handleAdminAudit(w http.ResponseWriter, r *http.Request) {
 	actors, _ := a.DB.DistinctAuditActors(r.Context())
 	totalRows, _ := a.DB.CountAudit(r.Context())
 	retention := a.Cfg.Security.AuditLogRetention()
+	// v0.86: action-frequency totals honoring the current date filter so
+	// the chip row at the top of /admin/audit shows the operator the
+	// volume distribution in the window they're looking at.
+	actionTotals, _ := a.DB.CountAuditActionsByDate(r.Context(), f.Since, f.Until)
 	a.render(w, "admin_audit.html", a.adminCtx(r, "audit", map[string]any{
-		"Entries":   entries,
-		"Filter":    f,
-		"Actions":   actions,
-		"Actors":    actors,
-		"TotalRows": totalRows,
-		"Retention": retention,
+		"Entries":      entries,
+		"Filter":       f,
+		"Actions":      actions,
+		"Actors":       actors,
+		"ActionTotals": actionTotals,
+		"TotalRows":    totalRows,
+		"Retention":    retention,
 		"UsagePct": func() int {
 			if retention <= 0 {
 				return 0

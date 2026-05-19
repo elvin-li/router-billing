@@ -27,6 +27,21 @@
       </div>
     </div>
 
+    {{if .ActionTotals}}
+    <section class="admin-card">
+      <h2 style="margin-top:0; font-size:14px;">动作频次{{if or .Filter.Since .Filter.Until}}（按日期范围过滤后）{{end}}</h2>
+      <div style="display:flex; flex-wrap:wrap; gap:6px;">
+        {{range .ActionTotals}}
+        <a href="/admin/audit?action={{.Action}}{{if $.Filter.Since}}&since={{$.Filter.Since}}{{end}}{{if $.Filter.Until}}&until={{$.Filter.Until}}{{end}}"
+           class="pill active" style="text-decoration:none;" title="点击 → 仅显示 {{.Action}}">
+          <code style="background:transparent;">{{.Action}}</code>
+          <strong>{{.Count}}</strong>
+        </a>
+        {{end}}
+      </div>
+    </section>
+    {{end}}
+
     <section class="admin-card">
       <form method="get" action="/admin/audit" class="form-grid">
         <div class="field">

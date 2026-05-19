@@ -1,5 +1,28 @@
 # Changelog
 
+## v0.86 — /admin/audit action-frequency chip row
+
+Surfaces v0.85's CountAuditActionsByDate output inline at the top
+of /admin/audit. Operators get a one-glance histogram of "what's
+been happening in the window I'm looking at" — and each chip is a
+shortcut that re-applies its action to the filter:
+
+  动作频次（按日期范围过滤后）
+  [grant 42] [login 18] [revoke 5] [voucher_batch 3] [refund 1]
+
+Clicking [grant 42] navigates to /admin/audit?action=grant
+(preserving the current since/until). Inverse of the v0.72
+actor-autocomplete: where that helped you remember the actor
+string, this helps you scan the action distribution.
+
+Section hidden when no rows match the current filter (e.g.
+future-dated since → no chips).
+
+2 race-clean tests: chips render with a 2-action fixture, future-
+since hides the action-specific chip. (No "empty DB" test
+because loginAdmin() always writes a login row, so the table is
+never truly empty.)
+
 ## v0.85 — GET /api/admin/audit/totals
 
 Action-frequency report over a date range. Useful for ops
