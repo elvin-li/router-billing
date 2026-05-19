@@ -91,7 +91,8 @@
             </div>
             <div class="field-actions">
               <button class="btn primary" type="submit">导入</button>
-              <a href="/admin/export/macs.csv" class="btn outline" style="width:auto;">导出全部 MAC</a>
+              <a href="/admin/export/macs.csv?q={{.Query}}&status={{.Status}}" class="btn outline" style="width:auto;"
+                 title="按当前筛选条件导出">{{if or .Query .Status}}导出筛选 MAC{{else}}导出全部 MAC{{end}}</a>
             </div>
           </div>
         </form>

@@ -186,15 +186,66 @@ func (a *App) handleAdminMACImport(w http.ResponseWriter, r *http.Request) {
 	http.Redirect(w, r, fmt.Sprintf("/admin/macs?ok=import&added=%d&failed=%d", added, failed), http.StatusSeeOther)
 }
 
-// GET /admin/export/macs.csv
+// GET /admin/export/macs.csv?q=&status=&user_id=
+//
+// v0.67: same filter set as v0.40's /api/admin/macs so the CSV export
+// matches what's on the /admin/macs screen. Active filters switch the
+// downloaded filename to macs-filtered.csv (matches v0.41 voucher +
+// v0.66 users export pattern).
 func (a *App) handleAdminExportMACs(w http.ResponseWriter, r *http.Request) {
-	macs, err := a.DB.ListMACs(r.Context())
-	if err != nil {
-		http.Error(w, "db", http.StatusInternalServerError)
-		return
+	q := r.URL.Query()
+	qSearch := strings.TrimSpace(q.Get("q"))
+	statusFilter := strings.TrimSpace(q.Get("status"))
+	userIDStr := strings.TrimSpace(q.Get("user_id"))
+	var userID int64
+	if userIDStr != "" {
+		if n, perr := strconv.ParseInt(userIDStr, 10, 64); perr == nil && n > 0 {
+			userID = n
+		}
 	}
+
+	var macs []models.MAC
+	var err error
+	if userID > 0 {
+		macs, err = a.DB.ListMACsForUser(r.Context(), userID)
+		if err != nil {
+			http.Error(w, "db", http.StatusInternalServerError)
+			return
+		}
+		// Post-filter q + status in memory (bounded by user's MAC count).
+		if qSearch != "" || statusFilter != "" {
+			filtered := macs[:0]
+			for _, m := range macs {
+				if statusFilter != "" && string(m.Status) != statusFilter {
+					continue
+				}
+				if qSearch != "" && !strings.Contains(m.Mac, qSearch) && !strings.Contains(m.Label, qSearch) {
+					continue
+				}
+				filtered = append(filtered, m)
+			}
+			macs = filtered
+		}
+	} else if qSearch != "" || statusFilter != "" {
+		macs, err = a.DB.SearchMACs(r.Context(), qSearch, statusFilter, 5000)
+		if err != nil {
+			http.Error(w, "db", http.StatusInternalServerError)
+			return
+		}
+	} else {
+		macs, err = a.DB.ListMACs(r.Context())
+		if err != nil {
+			http.Error(w, "db", http.StatusInternalServerError)
+			return
+		}
+	}
+
 	w.Header().Set("Content-Type", "text/csv; charset=utf-8")
-	w.Header().Set("Content-Disposition", `attachment; filename="macs.csv"`)
+	filename := "macs.csv"
+	if qSearch != "" || statusFilter != "" || userID > 0 {
+		filename = "macs-filtered.csv"
+	}
+	w.Header().Set("Content-Disposition", `attachment; filename="`+filename+`"`)
 	cw := csv.NewWriter(w)
 	defer cw.Flush()
 	_ = cw.Write([]string{"mac", "label", "status", "expires_at", "user_id", "created_at"})

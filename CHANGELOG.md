@@ -1,5 +1,28 @@
 # Changelog
 
+## v0.67 — /admin/export/macs.csv 支持 q/status/user_id 过滤
+
+Closes the last gap in the "CSV export matches the on-screen
+filter" trio. After v0.33 (orders), v0.41 (vouchers), and v0.66
+(users), the MAC CSV export now also accepts the same filters
+as the /admin/macs page.
+
+  GET /admin/export/macs.csv?q=AB:CD&status=active&user_id=42
+
+Routes through the v0.40 indexed-by-user-id path when user_id is
+set; falls back to SearchMACs for q/status; defaults to ListMACs
+when no filter.
+
+`/admin/macs` page's export link now passes through q + status
+filters; button label switches to "导出筛选 MAC" when active.
+
+Filename pattern matches v0.41/v0.66:
+- no filter   → `macs.csv`
+- any filter  → `macs-filtered.csv`
+
+5 race-clean tests covering each filter (status, user_id, q), the
+filename flavor switch, and the page link round-trip.
+
 ## v0.66 — /admin/export/users.csv 支持 q/suspended/totp 过滤
 
 Pre-v0.66 the users CSV export returned every registered account
