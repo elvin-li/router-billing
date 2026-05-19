@@ -161,8 +161,8 @@
             {{range .PlanSales}}
             <tr>
               <td>{{.Plan}}</td>
-              <td>{{.Count}}</td>
-              <td><strong>¥{{formatYuan .Revenue}}</strong></td>
+              <td>{{.OrdersCount}}</td>
+              <td><strong>¥{{formatYuan .TotalCents}}</strong></td>
             </tr>
             {{end}}
           </tbody>

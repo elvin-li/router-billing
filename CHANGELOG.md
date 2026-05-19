@@ -1,5 +1,28 @@
 # Changelog
 
+## v0.96 — Fix: dashboard plan-sales table was silently empty
+
+Pre-v0.96 the /admin/dashboard "最近 30 天按套餐" table referenced
+`{{.Count}}` and `{{.Revenue}}` on each row, but the
+`db.PlanSales` struct actually exports `OrdersCount` and
+`TotalCents`. Go's html/template silently renders `<no value>`
+for unknown field references, so the table showed:
+
+  套餐       笔数            营收
+  month      <no value>      ¥<no value>
+
+…which has been the dashboard output for months on every install.
+Fixed by aligning the template to the actual struct field names.
+
+The bug-discovery vector was deciding to write the v0.94
+plan-sales API tests — comparing field names made it obvious the
+dashboard had been silently broken. (`admin_macs.html` had it
+right all along; only `admin_dashboard.html` was wrong.)
+
+1 race-clean test pinning the post-fix behavior + the
+anti-regression "no `<no value>` in the response" assertion so
+this can't silently regress again.
+
 ## v0.95 — auditTargetHref recognizes user IDs
 
 Extends v0.92's smart-link function. Pure-digit audit targets of
