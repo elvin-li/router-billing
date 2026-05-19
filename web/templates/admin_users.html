@@ -21,7 +21,8 @@
                  style="padding:7px 10px; border:1px solid var(--border); border-radius:6px; font-size:13px; width:200px;">
           <button class="btn outline small" type="submit" style="width:auto;">搜索</button>
         </form>
-        <a href="/admin/export/users.csv" class="btn outline small" style="width:auto;">导出 CSV</a>
+        <a href="/admin/export/users.csv?q={{.Query}}" class="btn outline small" style="width:auto;"
+           title="按当前搜索过滤导出">{{if .Query}}导出筛选结果{{else}}导出 CSV{{end}}</a>
       </div>
     </div>
 

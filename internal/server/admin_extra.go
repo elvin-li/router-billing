@@ -214,16 +214,43 @@ func (a *App) handleAdminExportMACs(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// GET /admin/export/users.csv
+// GET /admin/export/users.csv?q=&suspended=&totp=
 //
 // One row per registered user. Phone + suspended + 2FA-enabled + count of
 // MACs + created_at. Excludes password_hash + totp_secret + totp_pending —
 // those should never leave the DB.
+//
+// v0.66: accepts the same q / suspended / totp filters as /api/admin/users
+// (v0.57) so the CSV export matches what's on screen.
 func (a *App) handleAdminExportUsers(w http.ResponseWriter, r *http.Request) {
-	users, err := a.DB.ListUsers(r.Context(), 5000)
+	q := r.URL.Query()
+	qSearch := strings.TrimSpace(q.Get("q"))
+	users, err := a.DB.SearchUsers(r.Context(), qSearch, 5000)
 	if err != nil {
 		http.Error(w, "db", http.StatusInternalServerError)
 		return
+	}
+	// Post-filter on suspended / totp (matches v0.57's API semantics).
+	suspendedFilter := q.Get("suspended")
+	totpFilter := q.Get("totp")
+	if suspendedFilter != "" || totpFilter != "" {
+		filtered := users[:0]
+		for _, u := range users {
+			if suspendedFilter == "1" && !u.Suspended {
+				continue
+			}
+			if suspendedFilter == "0" && u.Suspended {
+				continue
+			}
+			if totpFilter == "1" && u.TOTPSecret == "" {
+				continue
+			}
+			if totpFilter == "0" && u.TOTPSecret != "" {
+				continue
+			}
+			filtered = append(filtered, u)
+		}
+		users = filtered
 	}
 	// Pre-aggregate mac counts so we don't N+1.
 	macCount := map[int64]int{}
@@ -235,7 +262,13 @@ func (a *App) handleAdminExportUsers(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	w.Header().Set("Content-Type", "text/csv; charset=utf-8")
-	w.Header().Set("Content-Disposition", `attachment; filename="users.csv"`)
+	// Filename includes the filters when set so the download is self-
+	// describing alongside v0.41's voucher export.
+	filename := "users.csv"
+	if qSearch != "" || suspendedFilter != "" || totpFilter != "" {
+		filename = "users-filtered.csv"
+	}
+	w.Header().Set("Content-Disposition", `attachment; filename="`+filename+`"`)
 	cw := csv.NewWriter(w)
 	defer cw.Flush()
 	_ = cw.Write([]string{"id", "phone", "suspended", "totp_enabled", "macs", "created_at"})

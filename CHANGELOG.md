@@ -1,5 +1,33 @@
 # Changelog
 
+## v0.66 — /admin/export/users.csv 支持 q/suspended/totp 过滤
+
+Pre-v0.66 the users CSV export returned every registered account
+regardless of what the user was looking at on /admin/users.
+With v0.57's API filters already supporting q/suspended/totp,
+the CSV export was the last surface where ops had to dump
+everything and post-filter in Excel.
+
+  GET /admin/export/users.csv?q=138&suspended=0&totp=0
+
+Filters compose. Phone substring via SearchUsers, suspended/totp
+post-filter in Go (same logic as v0.57).
+
+`/admin/users` page's export link now embeds the current `q`
+filter and switches the button label to "导出筛选结果" when a
+filter is active.
+
+Content-Disposition filename:
+- no filter   → `users.csv`
+- any filter  → `users-filtered.csv`
+
+So a downloaded export is self-describing — match the v0.41
+voucher-export filename pattern.
+
+4 race-clean tests: q filter excludes non-matches, suspended=1
+filter isolates suspended rows, filename flavor switches with
+filter presence, /admin/users page embeds q in the export link.
+
 ## v0.65 — POST /api/admin/users/suspend
 
 Programmatic equivalent of v0.5's /admin/users/suspend UI button.
