@@ -1,5 +1,62 @@
 # Changelog
 
+## v0.22 — 用户偏好 + 30 天面板 + 严格密码策略
+
+Three additive bits — small but each enables a real customer
+workflow.
+
+### 用户级 SMS 到期提醒 opt-out
+
+v0.17 shipped the auto-reminder loop with no way to turn it off.
+Some users want it off (privacy, signal issues, auto-renewal
+elsewhere). New `users.notify_expiry` column (default 1) +
+checkbox on `/user/me` 通知偏好 card. Schema migration is
+additive via `addColumnIfMissing`. The
+`ListExpiringMACsWithoutRecentReminder` query gains an EXISTS
+clause that joins on `users.notify_expiry = 1`, so opted-out
+users drop out of the candidate set entirely. Toggle audited as
+`notify_expiry_on` / `notify_expiry_off`.
+
+5 tests including the SMS-loop-skips-opted-out regression guard.
+
+### `/admin/dashboard` 最近 30 天 panel
+
+The dashboard had today + 7 days + cumulative but no month-window.
+Admins doing monthly bookkeeping had to dig into /admin/orders?
+since=... Now there's a 最近 30 天 panel with 30 天营收 +
+30 天新增用户 tiles between 最近 7 天 and 累计.
+
+DashboardSnapshot gains Month30RevenueCents / Month30PaidOrders /
+Month30NewUsers. Same single-round-trip helper pattern.
+
+2 tests covering page render + the 30-day window math.
+
+### Strict password policy (opt-in)
+
+```yaml
+security:
+  password_strength: strict   # default "" / "lax"
+```
+
+`ValidPasswordStrong` is the new strict checker:
+- Length 6..72 (same).
+- Long passphrases (10+ chars) bypass — passphrase users
+  shouldn't be forced to add a digit.
+- Short passwords (6-9 chars): letter+digit required AND must not
+  be in a small 18-item commons dictionary
+  (`123456`, `password`, `qwerty`, etc.).
+
+`a.passwordValidatorFor()` helper picks the right function from
+the config. Three call sites updated: register, password change,
+forgot-password reset. Default = lax preserves the v0.0 behavior
+so no existing deployment / test breaks.
+
+9 tests total across the models + server packages.
+
+### Stats
+- 17 packages tested
+- 362 test functions (was 348 in v0.21)
+
 ## v0.21 — 审计 CSV 导出 + README 刷新
 
 Small but useful: rounds out the v0.18 reporting story.
