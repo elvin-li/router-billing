@@ -5,6 +5,7 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"time"
 
 	"router-billing/internal/notify"
 )
@@ -75,6 +76,38 @@ func notifyTestEvent(actor, ip string) notify.Event {
 		Actor:  actor,
 		Detail: "manual webhook test ip=" + ip,
 	}
+}
+
+// POST /admin/maintenance/optimize-now
+//
+// Runs `PRAGMA optimize` immediately. This is what purgeLoop runs once a
+// week (recommended by SQLite docs for keeping query plans good after
+// schema/data churn). Useful when ops just did a large data migration
+// and want plans re-analyzed without waiting up to 7 days.
+//
+// VACUUM is deliberately NOT included here — it can take minutes on a
+// large DB and holds a write lock. Ops who want a vacuum still go through
+// the weekly scheduler or run sqlite3 ... "VACUUM" directly during a
+// known-quiet window. PRAGMA optimize is sub-second on every realistic
+// router-billing DB size.
+func (a *App) handleAdminOptimizeNow(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Redirect(w, r, "/admin/maintenance", http.StatusSeeOther)
+		return
+	}
+	start := time.Now()
+	if _, err := a.DB.Exec(r.Context(), "PRAGMA optimize"); err != nil {
+		log.Printf("admin optimize-now: %v", err)
+		a.DB.Audit(r.Context(), "admin", "optimize_now_failed", "",
+			"err="+err.Error()+" ip="+clientIP(r))
+		http.Redirect(w, r, "/admin/maintenance?err=optimize_failed", http.StatusSeeOther)
+		return
+	}
+	a.DB.Audit(r.Context(), "admin", "optimize_now", "",
+		fmt.Sprintf("ms=%d ip=%s", time.Since(start).Milliseconds(), clientIP(r)))
+	http.Redirect(w, r,
+		fmt.Sprintf("/admin/maintenance?ok=optimize_now&ms=%d", time.Since(start).Milliseconds()),
+		http.StatusSeeOther)
 }
 
 // POST /admin/maintenance/expire-now

@@ -208,6 +208,7 @@ func (a *App) Routes() http.Handler {
 	mux.HandleFunc("/admin/maintenance/test-webhook", a.requireAdmin(a.handleAdminTestWebhook))
 	mux.HandleFunc("/admin/maintenance/expire-now", a.requireAdmin(a.handleAdminExpireNow))
 	mux.HandleFunc("/admin/maintenance/audit-trim", a.requireAdmin(a.handleAdminAuditTrim))
+	mux.HandleFunc("/admin/maintenance/optimize-now", a.requireAdmin(a.handleAdminOptimizeNow))
 	mux.HandleFunc("/admin/sms-log", a.requireAdmin(a.handleAdminSMSLog))
 	mux.HandleFunc("/admin/api-tokens", a.requireAdmin(a.handleAdminAPITokens))
 	mux.HandleFunc("/admin/sms-log/test", a.requireAdmin(a.handleAdminSMSTest))

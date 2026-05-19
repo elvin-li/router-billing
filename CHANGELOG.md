@@ -1,5 +1,29 @@
 # Changelog
 
+## v0.39 — /admin/maintenance/optimize-now (PRAGMA optimize)
+
+Third button in the "手动触发后台任务" card (after v0.35's
+expire-now and audit-trim). Runs SQLite's recommended-lightweight
+`PRAGMA optimize` immediately. purgeLoop runs it weekly; this
+button is for "I just did a big data migration and want plans
+re-analyzed now."
+
+  POST /admin/maintenance/optimize-now
+    -> /admin/maintenance?ok=optimize_now&ms=N
+
+VACUUM is **deliberately** not bundled in. VACUUM can hold a write
+lock for minutes on a busy DB and isn't safe to fire from a UI
+button; the docstring tells operators to run `sqlite3 ... "VACUUM"`
+manually during a known-quiet window if they need disk reclaim.
+PRAGMA optimize itself is sub-second on every realistic
+router-billing DB size.
+
+Audit: `optimize_now` target="" detail="ms=N ip=..." so reviewers
+see how long it took.
+
+3 race-clean tests: POST runs + audit assertion, GET-redirects-
+without-firing, page-render confirms the form is present.
+
 ## v0.38 — API mirrors of v0.35 maintenance triggers
 
 For deploy scripts that just rolled a config change and want

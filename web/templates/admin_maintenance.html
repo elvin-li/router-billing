@@ -116,6 +116,25 @@
         保留最新 <code>security.audit_log_keep</code>（当前 {{.AuditKeep}}）条，
         其余按时间从旧到新删除。
       </p>
+
+      <hr style="margin:18px 0; border:none; border-top:1px solid var(--border);">
+
+      {{if eq .OK "optimize_now"}}
+        <div class="flash ok">PRAGMA optimize 已完成，耗时 {{index .Query0 "ms"}} ms</div>
+      {{end}}
+      {{if eq .Err "optimize_failed"}}
+        <div class="flash err">PRAGMA optimize 失败，详见日志</div>
+      {{end}}
+      <form method="post" action="/admin/maintenance/optimize-now">
+        {{template "csrf" .}}
+        <button class="btn outline" type="submit" style="width:auto;">立即执行 PRAGMA optimize</button>
+      </form>
+      <p class="hint" style="font-size:12px; color:var(--text-soft); margin-top:10px;">
+        SQLite 建议的"轻量级"优化（重新分析查询计划）。purgeLoop 每周执行；
+        刚做完较大数据迁移想立即生效时点这里。<strong>VACUUM 不在这里</strong>——
+        它会锁住数据库且耗时较长，请使用 <code>sqlite3 ... "VACUUM"</code>
+        在静默时段手动执行。
+      </p>
     </section>
   </main>
 </div>
