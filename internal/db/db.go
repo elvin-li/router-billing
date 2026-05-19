@@ -1305,6 +1305,46 @@ func (d *DB) Stats(ctx context.Context) (Stats, error) {
 	return s, nil
 }
 
+// AdminDigestStats is the count set the daily admin-digest SMS embeds.
+// Yesterday's revenue (00:00 yesterday UTC .. 00:00 today UTC) + today's
+// failed-order count + count of MACs expiring within the next 3 days.
+type AdminDigestStats struct {
+	YesterdayRevenueCents int
+	YesterdayPaidOrders   int
+	ExpiringWithin3Days   int
+	FailedOrdersToday     int
+}
+
+func (d *DB) AdminDigestStats(ctx context.Context) (AdminDigestStats, error) {
+	var s AdminDigestStats
+	queries := []struct {
+		q   string
+		out *int
+	}{
+		{`SELECT COALESCE(SUM(amount_cents),0) FROM orders
+		   WHERE status='paid'
+		     AND paid_at >= datetime('now','start of day','-1 day')
+		     AND paid_at <  datetime('now','start of day')`, &s.YesterdayRevenueCents},
+		{`SELECT COUNT(*) FROM orders
+		   WHERE status='paid'
+		     AND paid_at >= datetime('now','start of day','-1 day')
+		     AND paid_at <  datetime('now','start of day')`, &s.YesterdayPaidOrders},
+		{`SELECT COUNT(*) FROM macs
+		   WHERE status='active'
+		     AND expires_at > CURRENT_TIMESTAMP
+		     AND expires_at < datetime('now','+3 days')`, &s.ExpiringWithin3Days},
+		{`SELECT COUNT(*) FROM orders
+		   WHERE status='failed'
+		     AND created_at >= datetime('now','start of day')`, &s.FailedOrdersToday},
+	}
+	for _, q := range queries {
+		if err := d.conn.QueryRowContext(ctx, q.q).Scan(q.out); err != nil {
+			return s, err
+		}
+	}
+	return s, nil
+}
+
 // DashboardSnapshot is a roll-up tailored for /admin/dashboard. Fits in
 // one SQL round-trip per stat so the page renders fast even on a low-end
 // router. All counts are best-effort — errors are returned but the

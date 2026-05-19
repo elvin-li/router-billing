@@ -241,6 +241,12 @@ type SMSConfig struct {
 	// log in at 3am?" alarm — surfaces credential compromises fast.
 	// Disabled (no SMS sent) when empty / when no SMS provider is wired.
 	AdminLoginAlertPhone string `yaml:"admin_login_alert_phone,omitempty"`
+
+	// AdminDigestHour, if 1..24, enables a daily summary SMS to
+	// AdminLoginAlertPhone at the given UTC hour. Body covers yesterday's
+	// revenue, today's MACs expiring soon, and failed-orders count. 0 =
+	// disabled.
+	AdminDigestHour int `yaml:"admin_digest_hour,omitempty"`
 }
 
 // ExpiryReminderWindowDays returns the configured window, clamped to
