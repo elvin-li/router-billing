@@ -123,3 +123,20 @@
 {{end}}
 
 {{define "csrf"}}<input type="hidden" name="_csrf" value="{{.CSRFToken}}">{{end}}
+
+{{/* momPill renders a tiny coloured chip showing the MoM percent change.
+     Expects a momDeltaInfo struct (Percent int, Direction string, HasPrev bool).
+     Direction: up=green, down=red, flat=neutral, new=blue, gone=red. */}}
+{{define "momPill"}}
+{{- if eq .Direction "up" -}}
+<span class="mom-pill mom-up" title="vs 上 30 天">↑ {{.Percent}}%</span>
+{{- else if eq .Direction "down" -}}
+<span class="mom-pill mom-down" title="vs 上 30 天">↓ {{.Percent}}%</span>
+{{- else if eq .Direction "gone" -}}
+<span class="mom-pill mom-down" title="vs 上 30 天">↓ {{.Percent}}%</span>
+{{- else if eq .Direction "new" -}}
+<span class="mom-pill mom-new" title="上一周期为零，无法计算百分比">NEW</span>
+{{- else if eq .Direction "flat" -}}
+{{- if .HasPrev -}}<span class="mom-pill mom-flat" title="vs 上 30 天">→ 0%</span>{{- end -}}
+{{- end -}}
+{{end}}

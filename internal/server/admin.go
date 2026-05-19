@@ -455,7 +455,65 @@ func (a *App) handleAdminDashboard(w http.ResponseWriter, r *http.Request) {
 		"Attention": att,
 		"PlanSales": planSales,
 		"Recent":    recent,
+		// Month-over-month deltas — current 30d vs the preceding 30d. The
+		// "direction" field is a small string the template uses to pick a
+		// CSS class: "up" = green, "down" = red, "flat" = neutral, "new"
+		// = blue (current > 0 but previous was 0, so no percentage is
+		// meaningful).
+		"RevenueMoM": momDelta(snap.Month30RevenueCents, snap.PrevMonth30RevenueCents),
+		"OrdersMoM":  momDelta(snap.Month30PaidOrders, snap.PrevMonth30PaidOrders),
+		"UsersMoM":   momDelta(snap.Month30NewUsers, snap.PrevMonth30NewUsers),
 	}))
+}
+
+// momDeltaInfo is the bundle the dashboard template renders next to each
+// 30-day stat. Percent is rounded to the nearest integer; Direction picks
+// the pill color.
+type momDeltaInfo struct {
+	Percent   int
+	Direction string // "up" | "down" | "flat" | "new" | "gone"
+	HasPrev   bool   // false when there was zero in the previous window
+}
+
+// momDelta computes a month-over-month percentage and a direction sentinel
+// the template can switch on. Edge cases:
+//   - prev == 0, curr > 0  → "new"   (no percentage; both windows had real
+//     data + we just gained some, "+∞%" would be misleading)
+//   - prev == 0, curr == 0 → "flat"
+//   - prev > 0,  curr == 0 → "gone"  (-100%)
+//   - otherwise: signed integer percent.
+//
+// Pulled out into its own function so a single test can pin every edge
+// without having to drive the whole dashboard handler.
+func momDelta(curr, prev int) momDeltaInfo {
+	if prev == 0 && curr == 0 {
+		return momDeltaInfo{Direction: "flat"}
+	}
+	if prev == 0 {
+		return momDeltaInfo{Direction: "new"}
+	}
+	if curr == 0 {
+		return momDeltaInfo{Percent: -100, Direction: "gone", HasPrev: true}
+	}
+	// Round to the nearest integer percent. Negative numbers floor toward
+	// zero in Go, but we want -7% not -8% so handle the sign explicitly.
+	num := (curr - prev) * 100
+	pct := num / prev
+	rem := num % prev
+	// Round half away from zero.
+	if rem*2 >= prev {
+		pct++
+	} else if -rem*2 >= prev {
+		pct--
+	}
+	switch {
+	case pct > 0:
+		return momDeltaInfo{Percent: pct, Direction: "up", HasPrev: true}
+	case pct < 0:
+		return momDeltaInfo{Percent: pct, Direction: "down", HasPrev: true}
+	default:
+		return momDeltaInfo{Direction: "flat", HasPrev: true}
+	}
 }
 
 // /admin/users — list with optional ?q= phone search.

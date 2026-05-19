@@ -1359,7 +1359,14 @@ type DashboardSnapshot struct {
 	Month30RevenueCents int // last 30 days
 	Month30PaidOrders   int
 	Month30NewUsers     int
-	ActiveSessions      int
+	// Previous-period counters for month-over-month delta. The window is
+	// days -60 .. -30 from now, exclusive of the current Month30 window so
+	// no double-counting. Used by /admin/dashboard to render "+12% vs
+	// prev 30d" pills next to the Month30* values.
+	PrevMonth30RevenueCents int
+	PrevMonth30PaidOrders   int
+	PrevMonth30NewUsers     int
+	ActiveSessions          int
 }
 
 func (d *DB) DashboardSnapshot(ctx context.Context) (DashboardSnapshot, error) {
@@ -1381,6 +1388,12 @@ func (d *DB) DashboardSnapshot(ctx context.Context) (DashboardSnapshot, error) {
 		{`SELECT COALESCE(SUM(amount_cents),0) FROM orders WHERE status='paid' AND paid_at >= datetime('now','-30 days')`, &s.Month30RevenueCents},
 		{`SELECT COUNT(*) FROM orders WHERE status='paid' AND paid_at >= datetime('now','-30 days')`, &s.Month30PaidOrders},
 		{`SELECT COUNT(*) FROM users WHERE created_at >= datetime('now','-30 days')`, &s.Month30NewUsers},
+		// Previous-period window: -60d .. -30d. Exclusive on the upper
+		// edge so the current Month30 window doesn't overlap. SQLite's
+		// `datetime('now','-30 days')` is the boundary both windows share.
+		{`SELECT COALESCE(SUM(amount_cents),0) FROM orders WHERE status='paid' AND paid_at >= datetime('now','-60 days') AND paid_at < datetime('now','-30 days')`, &s.PrevMonth30RevenueCents},
+		{`SELECT COUNT(*) FROM orders WHERE status='paid' AND paid_at >= datetime('now','-60 days') AND paid_at < datetime('now','-30 days')`, &s.PrevMonth30PaidOrders},
+		{`SELECT COUNT(*) FROM users WHERE created_at >= datetime('now','-60 days') AND created_at < datetime('now','-30 days')`, &s.PrevMonth30NewUsers},
 		{`SELECT COUNT(*) FROM sessions WHERE expires_at > CURRENT_TIMESTAMP`, &s.ActiveSessions},
 	}
 	for _, q := range queries {

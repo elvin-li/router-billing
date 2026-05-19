@@ -759,6 +759,24 @@ table.data tbody tr:last-child { border-bottom: none; }
 .pill.failed  { background: var(--danger-soft); color: #991b1b; }
 .pill.failed::before  { background: var(--danger); }
 
+/* Month-over-month delta chips on /admin/dashboard. Smaller + chip-shaped
+   so multiple can sit on one line next to a stat value. The chip is
+   inline so labels reflow naturally. */
+.mom-pill {
+  display: inline-block;
+  margin-left: 6px;
+  padding: 1px 7px;
+  border-radius: 999px;
+  font-size: 11px;
+  font-weight: 600;
+  vertical-align: middle;
+  letter-spacing: 0.02em;
+}
+.mom-up   { background: var(--success-soft); color: #065f46; }
+.mom-down { background: var(--danger-soft);  color: #991b1b; }
+.mom-flat { background: #e5e7eb;             color: #4b5563; }
+.mom-new  { background: #e0f2fe;             color: #075985; }
+
 .row-actions { display: flex; gap: 6px; justify-content: flex-end; align-items: center; }
 .row-actions form { display: inline-flex; gap: 4px; align-items: center; margin: 0; }
 .row-actions input[type="number"] {

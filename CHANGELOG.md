@@ -1,5 +1,38 @@
 # Changelog
 
+## v0.28 — Dashboard 月环比 (MoM delta) 标签
+
+/admin/dashboard now shows month-over-month deltas next to each
+30-day stat. The comparison window is `[-60d, -30d)` vs the current
+`[-30d, now)` — the boundary `datetime('now','-30 days')` is shared
+between both queries so no row is counted twice.
+
+The chip is a tiny coloured pill rendered by a reusable
+`{{template "momPill" .X}}` snippet:
+- ↑ 12% (green)  — growing
+- ↓ 8%  (red)    — shrinking
+- → 0%  (grey)   — unchanged but with real previous-period data
+- NEW  (blue)    — current > 0 but prev = 0 (no percentage)
+- ↓ -100% (red)  — prev > 0 but curr = 0 ("gone")
+
+The math lives in `momDelta(curr, prev) momDeltaInfo` (server pkg)
+so the rounding is testable independently from the template — half-
+away-from-zero so 14.7% → 15% and -14.7% → -15% (Go's integer
+division floors toward zero by default which would give the wrong
+sign on negative remainders).
+
+Three new DB columns on DashboardSnapshot (PrevMonth30RevenueCents,
+PrevMonth30PaidOrders, PrevMonth30NewUsers); each backed by one
+extra SQL query in the existing batched round-trip.
+
+CSS: `.mom-pill` + `.mom-up` / `.mom-down` / `.mom-flat` / `.mom-new`
+in style.css — chip-shaped, inline, 11px, sits next to the label.
+
+10 race-clean unit-test cases on the momDelta function (zero/zero,
+new-from-zero, complete-dropoff, unchanged, both rounding edges,
+etc.) + an integration check that /admin/dashboard never leaks the
+`<no value>` template-key-miss footprint.
+
 ## v0.27 — API 充值码生成 + 批量作废
 
 Completes the API write-surface for vouchers. Partners with the
