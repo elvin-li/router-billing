@@ -15,8 +15,13 @@ import (
 )
 
 // GET /admin/health  → JSON
+//
+// v0.61 expanded the payload with the attention counters that
+// /admin/dashboard already shows, so monitoring scripts that poll
+// /api/admin/health can alert without computing it themselves.
 func (a *App) handleAdminHealth(w http.ResponseWriter, r *http.Request) {
 	stats, _ := a.DB.Stats(r.Context())
+	att, _ := a.DB.Attention(r.Context())
 	fwMACs, fwErr := a.MACSvc.FW.List(r.Context())
 	fwStatus := "ok"
 	if fwErr != nil {
@@ -41,6 +46,17 @@ func (a *App) handleAdminHealth(w http.ResponseWriter, r *http.Request) {
 		"revenue_cents":       stats.RevenueCents,
 		"firewall_set_count":  len(fwMACs),
 		"firewall_set_status": fwStatus,
+		// v0.61: attention counters previously only visible via the
+		// dashboard. Monitoring scripts can now alert on these without
+		// parsing HTML.
+		"attention": map[string]int{
+			"expiring_soon":        att.ExpiringSoon,
+			"stale_pending":        att.StalePending,
+			"suspended_users":      att.SuspendedUsers,
+			"failed_today":         att.FailedToday,
+			"sms_failures_24h":     att.SMSFailures24h,
+			"webhook_failures_24h": att.WebhookFailures24h,
+		},
 	})
 }
 

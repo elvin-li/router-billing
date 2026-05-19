@@ -1,5 +1,37 @@
 # Changelog
 
+## v0.61 — /admin/health expose attention counters
+
+Adds `attention` block to both /admin/health and /api/admin/health
+responses so monitoring scripts can alert on the dashboard's
+attention metrics without parsing HTML.
+
+  GET /api/admin/health
+  -> 200 { ...legacy fields...,
+           "attention": {
+             "expiring_soon":        3,
+             "stale_pending":        0,
+             "suspended_users":      1,
+             "failed_today":         0,
+             "sms_failures_24h":     2,
+             "webhook_failures_24h": 0
+           } }
+
+Common alert recipes:
+- `attention.sms_failures_24h > 5` → pager
+- `attention.stale_pending > 50` → run cancel-stale
+- `attention.expiring_soon > 100` → expedite reminder campaign
+- `attention.suspended_users == 0` → all good
+
+Reuses the existing `db.Attention()` query (cheap single batch)
+so the endpoint stays sub-millisecond.
+
+Pre-v0.61 fields are unchanged (anti-regression test pins all 11
+legacy keys so existing scripts don't break).
+
+2 race-clean tests: attention block populated when fixtures hit
+each category, legacy fields all still present in the response.
+
 ## v0.60 — Config-driven auto-cancel stale orders
 
 Saves operators from wiring cron for v0.55's bulk cancel. Set
