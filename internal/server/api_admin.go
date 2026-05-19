@@ -882,7 +882,7 @@ type apiSMSLogEntry struct {
 	ErrorMsg string    `json:"error_msg,omitempty"`
 }
 
-// GET /api/admin/sms/log?limit=N   Bearer <any-token>
+// GET /api/admin/sms/log?limit=N&phone=...&only_failed=1   Bearer <any-token>
 //
 // Programmatic access to the v0.43 sms_log table. Useful for monitoring
 // scripts that want to alert on a streak of FAIL rows (e.g. Aliyun creds
@@ -892,19 +892,28 @@ type apiSMSLogEntry struct {
 //	-> 200 { "logs": [ {id, sent_at, provider, phone, message,
 //	                   success, error_msg}, ... ], "count": N }
 //
+// Optional filters (v0.45):
+//   - phone=13800...       exact match (support workflows)
+//   - only_failed=1        success=0 only (monitoring alerts)
+//
 // limit defaults to 100, max 1000. Newest rows first.
 func (a *App) handleAPISMSLog(w http.ResponseWriter, r *http.Request, _ string) {
 	if r.Method != http.MethodGet {
 		writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "GET only"})
 		return
 	}
+	q := r.URL.Query()
 	limit := 100
-	if s := r.URL.Query().Get("limit"); s != "" {
+	if s := q.Get("limit"); s != "" {
 		if n, err := strconv.Atoi(s); err == nil && n > 0 && n <= 1000 {
 			limit = n
 		}
 	}
-	logs, err := a.DB.RecentSMSLogs(r.Context(), limit)
+	logs, err := a.DB.SearchSMSLogs(r.Context(), db.SMSLogFilter{
+		Phone:      strings.TrimSpace(q.Get("phone")),
+		OnlyFailed: q.Get("only_failed") == "1",
+		Limit:      limit,
+	})
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 		return

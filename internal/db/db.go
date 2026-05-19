@@ -1969,15 +1969,39 @@ func (d *DB) LogSMS(ctx context.Context, provider, phone, message string, succes
 	return err
 }
 
-// RecentSMSLogs returns the most-recent rows, newest first. Default limit
-// 100, cap 1000.
+// SMSLogFilter restricts which rows SearchSMSLogs returns. Empty/zero
+// fields are ignored.
+type SMSLogFilter struct {
+	Phone      string // exact match
+	OnlyFailed bool   // success = 0
+	Limit      int    // default 100, cap 1000
+}
+
+// RecentSMSLogs is the zero-filter shortcut — keeps the v0.43 caller call
+// site small.
 func (d *DB) RecentSMSLogs(ctx context.Context, limit int) ([]SMSLogEntry, error) {
+	return d.SearchSMSLogs(ctx, SMSLogFilter{Limit: limit})
+}
+
+// SearchSMSLogs returns rows newest-first matching the optional filter.
+func (d *DB) SearchSMSLogs(ctx context.Context, f SMSLogFilter) ([]SMSLogEntry, error) {
+	limit := f.Limit
 	if limit <= 0 || limit > 1000 {
 		limit = 100
 	}
-	rows, err := d.conn.QueryContext(ctx,
-		`SELECT id, sent_at, provider, phone, message, success, error_msg
-		 FROM sms_log ORDER BY id DESC LIMIT ?`, limit)
+	var sb strings.Builder
+	sb.WriteString(`SELECT id, sent_at, provider, phone, message, success, error_msg FROM sms_log WHERE 1=1`)
+	args := []any{}
+	if f.Phone != "" {
+		sb.WriteString(` AND phone = ?`)
+		args = append(args, f.Phone)
+	}
+	if f.OnlyFailed {
+		sb.WriteString(` AND success = 0`)
+	}
+	sb.WriteString(` ORDER BY id DESC LIMIT ?`)
+	args = append(args, limit)
+	rows, err := d.conn.QueryContext(ctx, sb.String(), args...)
 	if err != nil {
 		return nil, err
 	}

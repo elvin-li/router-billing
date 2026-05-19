@@ -1,5 +1,28 @@
 # Changelog
 
+## v0.45 — /api/admin/sms/log filters
+
+v0.44 returned the last N rows undiscriminately. v0.45 adds two
+filters that make the endpoint actually useful for monitoring +
+support workflows:
+
+  GET /api/admin/sms/log?phone=13800...&only_failed=1
+
+- `phone=N`        exact match (support: "show me everything we
+                   tried to send this customer")
+- `only_failed=1`  success=0 rows only (monitoring: "alert when
+                   the failure rate spikes")
+
+Filters compose — `?phone=13800...&only_failed=1` returns FAIL
+rows for that phone only, which is exactly the support follow-up
+after a monitor fires.
+
+DB layer: `SearchSMSLogs(SMSLogFilter)` with optional Phone +
+OnlyFailed; the v0.43 `RecentSMSLogs(limit)` is now a thin
+shortcut over it so v0.44 callers keep working.
+
+3 race-clean tests covering each filter alone + the compose case.
+
 ## v0.44 — GET /api/admin/sms/log
 
 Programmatic access to the v0.43 sms_log table. Useful for monitoring
