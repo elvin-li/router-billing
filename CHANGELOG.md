@@ -1,5 +1,23 @@
 # Changelog
 
+## v0.92 — /admin/audit target cells become smart links
+
+Each audit target string is auto-linked based on its shape:
+
+  shape                              → target page
+  ─────────────────────────────────────────────────────────────
+  AA:BB:CC:DD:EE:FF (any MAC form)   → /admin/macs/detail
+  ORD-... / ord-...                  → /admin/orders/detail
+  11-digit starts-with-1 (CN mobile) → /admin/sms-log?phone=...
+  anything else                      → plain text
+
+New `auditTargetHref(target)` Go func + template func. Completes
+the audit-page→detail navigation web after v0.72 actor
+autocomplete + v0.86 action-frequency chips.
+
+2 test functions: 7-case shape-coverage table, end-to-end page
+render asserting both MAC + order target links appear in HTML.
+
 ## v0.91 — /admin/users/detail surfaces MAC notes + cross-links
 
 Completes the "notes everywhere" trio (after v0.88 list inline +

@@ -116,7 +116,10 @@
               <td style="color:var(--text-soft); white-space:nowrap;">{{formatTime .At}}</td>
               <td class="mono">{{.Actor}}</td>
               <td><span class="pill {{if eq .Action "pay"}}paid{{else if eq .Action "login"}}active{{else if eq .Action "revoke"}}blocked{{else if eq .Action "login_failed"}}failed{{else if eq .Action "login_suspended"}}blocked{{else}}pending{{end}}">{{.Action}}</span></td>
-              <td class="mono">{{.Target}}</td>
+              <td class="mono">
+                {{$href := auditTargetHref .Target}}
+                {{if $href}}<a href="{{$href}}" style="color:inherit;" title="跳转到详情页">{{.Target}}</a>{{else}}{{.Target}}{{end}}
+              </td>
               <td style="color:var(--text-soft);">{{.Detail}}</td>
             </tr>
             {{else}}

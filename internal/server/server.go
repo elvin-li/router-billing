@@ -8,11 +8,13 @@ import (
 	"log"
 	"net/http"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 
 	"router-billing/internal/config"
 	"router-billing/internal/db"
+	"router-billing/internal/models"
 	"router-billing/internal/notify"
 	"router-billing/internal/pay"
 	"router-billing/internal/service"
@@ -428,8 +430,49 @@ func (a *App) purgeLoop(ctx context.Context) {
 	}
 }
 
+// auditTargetHref returns the smart drill-down URL for an audit target
+// string, or "" if the target doesn't fit a known shape. v0.92.
+//
+// Shapes:
+//   - looks like a MAC (NormalizeMAC accepts it)            → /admin/macs/detail?mac=...
+//   - prefixes ORD- / order_no                              → /admin/orders/detail?order_no=...
+//   - all-digit user_id (rare in audit targets, but covered) → /admin/users/detail?id=...
+//   - phone (11-digit Chinese mobile)                       → /admin/sms-log?phone=...
+//   - anything else                                          → "" (template renders plain text)
+func auditTargetHref(target string) string {
+	target = strings.TrimSpace(target)
+	if target == "" {
+		return ""
+	}
+	// MAC?
+	if mac, ok := models.NormalizeMAC(target); ok {
+		return "/admin/macs/detail?mac=" + mac
+	}
+	// Order number — heuristic: starts with "ORD" or contains a dash.
+	// The system prefixes most order_nos with the gateway shorthand, but
+	// the admin UI lookup is on the full string regardless.
+	if strings.HasPrefix(target, "ORD") || strings.HasPrefix(target, "ord") {
+		return "/admin/orders/detail?order_no=" + target
+	}
+	// 11-digit Chinese mobile → SMS log filter.
+	if len(target) == 11 && target[0] == '1' {
+		allDigits := true
+		for _, c := range target {
+			if c < '0' || c > '9' {
+				allDigits = false
+				break
+			}
+		}
+		if allDigits {
+			return "/admin/sms-log?phone=" + target
+		}
+	}
+	return ""
+}
+
 func tplFuncs() template.FuncMap {
 	return template.FuncMap{
+		"auditTargetHref": auditTargetHref,
 		"formatYuan": func(cents int) string {
 			return fmt.Sprintf("%d.%02d", cents/100, cents%100)
 		},
