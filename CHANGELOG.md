@@ -1,5 +1,35 @@
 # Changelog
 
+## v0.59 — Dashboard: 过去 24 小时投递失败 panel
+
+New attention panel on /admin/dashboard surfacing recent SMS +
+webhook delivery failures. Operators previously had to navigate
+to /admin/sms-log or /admin/webhook-log to find these — now they
+see the count at a glance with one-click drill-down links to the
+respective log pages (the webhook link auto-filters to
+`?only_failed=1`).
+
+  过去 24 小时投递失败
+    3 条 SMS 发送失败     → /admin/sms-log
+    7 次 Webhook 投递失败 → /admin/webhook-log?only_failed=1
+
+The panel is hidden when both counters are zero.
+
+`AttentionCounts` grew two new fields — `SMSFailures24h` and
+`WebhookFailures24h` — backed by `success=0 AND sent_at >=
+datetime('now','-1 day')` queries. The 24h window is rolling
+(not midnight-based) so a failure at 18:00 yesterday still
+appears at 17:00 today.
+
+Deliberate non-change: these counters are NOT added to
+`Attention.Total()` (which drives the navbar red dot). That
+indicator stays focused on user-facing issues; observability
+gets its own visually-distinct (red border) attention panel.
+
+4 race-clean tests: panel renders with seeded failure rows,
+panel hidden when only success rows exist, 24h window excludes
+2-day-old failures, Total() excludes the new counters.
+
 ## v0.58 — 侧边栏关注事项徽章 (sidebar attention badges)
 
 The admin /admin/dashboard "需要关注" panel was the only place

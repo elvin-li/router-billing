@@ -69,6 +69,19 @@
     </div>
     {{end}}
 
+    {{if or .Attention.SMSFailures24h .Attention.WebhookFailures24h}}
+    <div class="attention" style="background:#fef3f2; border-left-color:#dc2626;">
+      <div class="attention-head">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><line x1="4.93" y1="4.93" x2="19.07" y2="19.07"/></svg>
+        <span>过去 24 小时投递失败</span>
+      </div>
+      <div class="attention-grid">
+        {{if .Attention.SMSFailures24h}}<a class="attention-item" href="/admin/sms-log"><strong>{{.Attention.SMSFailures24h}}</strong> 条 SMS 发送失败</a>{{end}}
+        {{if .Attention.WebhookFailures24h}}<a class="attention-item" href="/admin/webhook-log?only_failed=1"><strong>{{.Attention.WebhookFailures24h}}</strong> 次 Webhook 投递失败</a>{{end}}
+      </div>
+    </div>
+    {{end}}
+
     <h2 style="margin:18px 0 4px; font-size:15px;">今天</h2>
     <div class="dash-grid">
       <div class="dash-tile accent">

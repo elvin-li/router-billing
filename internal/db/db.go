@@ -1488,6 +1488,10 @@ type AttentionCounts struct {
 	StalePending   int // orders still pending after 10 min
 	SuspendedUsers int
 	FailedToday    int // orders with status='failed' created today
+	// v0.59 additions: observability tables. Non-zero means the operator
+	// should look at /admin/sms-log or /admin/webhook-log respectively.
+	SMSFailures24h     int // sms_log rows with success=0 in the last 24h
+	WebhookFailures24h int // webhook_deliveries rows with success=0 in the last 24h
 }
 
 func (d *DB) Attention(ctx context.Context) (AttentionCounts, error) {
@@ -1500,6 +1504,11 @@ func (d *DB) Attention(ctx context.Context) (AttentionCounts, error) {
 		{`SELECT COUNT(*) FROM orders WHERE status='pending' AND created_at < datetime('now','-10 minutes')`, &a.StalePending},
 		{`SELECT COUNT(*) FROM users WHERE suspended = 1`, &a.SuspendedUsers},
 		{`SELECT COUNT(*) FROM orders WHERE status='failed' AND date(created_at) = date('now')`, &a.FailedToday},
+		// v0.59: 24h failure windows on the observability tables. Use
+		// sent_at since CURRENT_TIMESTAMP is what the DEFAULT computes —
+		// matches what the rows actually carry.
+		{`SELECT COUNT(*) FROM sms_log WHERE success = 0 AND sent_at >= datetime('now','-1 day')`, &a.SMSFailures24h},
+		{`SELECT COUNT(*) FROM webhook_deliveries WHERE success = 0 AND sent_at >= datetime('now','-1 day')`, &a.WebhookFailures24h},
 	}
 	for _, q := range queries {
 		if err := d.conn.QueryRowContext(ctx, q.q).Scan(q.out); err != nil {
@@ -1510,6 +1519,9 @@ func (d *DB) Attention(ctx context.Context) (AttentionCounts, error) {
 }
 
 // Total returns the sum of all attention counts (for the badge in the navbar).
+// v0.59 NOTE: deliberately leaves the SMS/Webhook failure counters out of
+// the total — they're observability noise that shouldn't drive the
+// nav-bar red dot. The dashboard renders them as their own dedicated chips.
 func (a AttentionCounts) Total() int {
 	return a.ExpiringSoon + a.StalePending + a.SuspendedUsers + a.FailedToday
 }
