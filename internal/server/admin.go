@@ -210,8 +210,16 @@ func (a *App) requireAdmin(h http.HandlerFunc) http.HandlerFunc {
 }
 
 // adminCtx assembles common data passed to every admin template:
-// Version, Page (for sidebar highlight), and flash messages from ?ok=/?err=.
+// Version, Page (for sidebar highlight), flash messages from ?ok=/?err=,
+// and (v0.58) the small "attention" counters used as sidebar badges so
+// admins can spot work-needed pages without clicking through.
 func (a *App) adminCtx(r *http.Request, page string, extra map[string]any) map[string]any {
+	// Sidebar attention badges. Best-effort — if the DB query errors, the
+	// badge silently disappears rather than 500-ing the page. The counts
+	// are already cheap (handled by Attention()) so this isn't a perf hit
+	// per render.
+	att, _ := a.DB.Attention(r.Context())
+
 	out := map[string]any{
 		"Version": a.Version,
 		"Page":    page,
@@ -221,6 +229,11 @@ func (a *App) adminCtx(r *http.Request, page string, extra map[string]any) map[s
 		"OK":        r.URL.Query().Get("ok"),
 		"Err":       errLabel(r.URL.Query().Get("err")),
 		"CSRFToken": csrfFromContext(r.Context()),
+		// Sidebar badge counts. Templates use {{if .SidebarBadge_X}}
+		// {{.SidebarBadge_X}}{{end}} to conditionally render the chip.
+		"SidebarBadge_Macs":   att.ExpiringSoon,
+		"SidebarBadge_Orders": att.StalePending + att.FailedToday,
+		"SidebarBadge_Users":  att.SuspendedUsers,
 	}
 	for k, v := range extra {
 		out[k] = v

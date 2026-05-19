@@ -1,5 +1,37 @@
 # Changelog
 
+## v0.58 — 侧边栏关注事项徽章 (sidebar attention badges)
+
+The admin /admin/dashboard "需要关注" panel was the only place
+ops saw the four-counter Attention() roll-up (expiring MACs,
+stale-pending orders, suspended users, failed-today orders).
+Now those counts also render as small amber chips next to the
+corresponding sidebar entries, so an admin notices "3 expiring
+MACs" without first navigating to the dashboard.
+
+  侧边栏:
+  ┌────────────────────────┐
+  │ MAC 管理      [3] ◄── 即将过期 (≤7 天)
+  │ 用户          [1] ◄── 已停用账户
+  │ 订单          [5] ◄── 滞留 pending + 今日 failed
+  └────────────────────────┘
+
+Implemented in `adminCtx()` — every admin template now gets
+`SidebarBadge_Macs / _Users / _Orders` keys (zero values
+suppress the chip via `{{if .SidebarBadge_X}}`).
+
+Re-uses the existing `db.Attention()` query (cheap, single
+batched round-trip) so the badge add-on is a no-op for any
+admin page render. Failure to compute attention silently
+drops the badges rather than 500-ing.
+
+CSS: `.sidebar-badge` — amber chip, right-aligned within the
+nav row, brightens slightly on hover.
+
+2 race-clean tests: badges appear when fixtures hit each
+attention category (expiring MAC + stale pending + suspended
+user) AND badges are absent on a clean DB.
+
 ## v0.57 — /api/admin/users filter by suspended + totp
 
 Pre-v0.57 the user-list endpoint had only `q` (phone substring).

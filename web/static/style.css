@@ -571,6 +571,22 @@ body.admin {
   color: #fff;
   font-weight: 600;
 }
+
+/* Sidebar attention badge (v0.58). Right-aligned chip next to a nav entry
+   when there are work-needed items. Auto margin pushes it to the right
+   of the flex row. Color encodes urgency — amber for soft attention. */
+.admin-nav a .sidebar-badge {
+  margin-left: auto;
+  min-width: 18px;
+  padding: 1px 6px;
+  border-radius: 999px;
+  font-size: 11px;
+  font-weight: 700;
+  text-align: center;
+  background: #f59e0b;
+  color: #0f172a;
+}
+.admin-nav a:hover .sidebar-badge { background: #fbbf24; }
 .admin-bottom {
   margin-top: auto;
   padding-top: 14px;

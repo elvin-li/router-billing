@@ -26,6 +26,7 @@
         <rect x="2" y="3" width="20" height="14" rx="2"/><line x1="8" y1="21" x2="16" y2="21"/><line x1="12" y1="17" x2="12" y2="21"/>
       </svg>
       <span>MAC 管理</span>
+      {{if .SidebarBadge_Macs}}<span class="sidebar-badge" title="即将过期 (7 天内)">{{.SidebarBadge_Macs}}</span>{{end}}
     </a>
     <a href="/admin/devices" class="{{if eq .Page "devices"}}active{{end}}">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
@@ -39,12 +40,14 @@
         <path d="M22 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/>
       </svg>
       <span>用户</span>
+      {{if .SidebarBadge_Users}}<span class="sidebar-badge" title="已停用账户">{{.SidebarBadge_Users}}</span>{{end}}
     </a>
     <a href="/admin/orders"  class="{{if eq .Page "orders"}}active{{end}}">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
         <path d="M9 11l3 3L22 4"/><path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11"/>
       </svg>
       <span>订单</span>
+      {{if .SidebarBadge_Orders}}<span class="sidebar-badge" title="待处理 (滞留 pending + 今日 failed)">{{.SidebarBadge_Orders}}</span>{{end}}
     </a>
     <a href="/admin/vouchers" class="{{if eq .Page "vouchers"}}active{{end}}">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
