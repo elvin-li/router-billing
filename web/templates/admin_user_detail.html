@@ -78,8 +78,11 @@
           <tbody>
             {{range .MACs}}
             <tr>
-              <td class="mono">{{.Mac}}</td>
-              <td>{{.Label}}</td>
+              <td class="mono"><a href="/admin/macs/detail?mac={{.Mac}}" style="color:inherit; text-decoration:none;">{{.Mac}}</a></td>
+              <td>
+                {{.Label}}
+                {{if .Notes}}<div style="font-size:11px; color:var(--text-soft); margin-top:2px; max-width:240px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;" title="{{.Notes}}">📝 {{.Notes}}</div>{{end}}
+              </td>
               <td><span class="pill {{.Status}}">{{.Status}}</span></td>
               <td>{{formatTime .ExpiresAt}}</td>
             </tr>

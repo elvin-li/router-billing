@@ -1,5 +1,20 @@
 # Changelog
 
+## v0.91 — /admin/users/detail surfaces MAC notes + cross-links
+
+Completes the "notes everywhere" trio (after v0.88 list inline +
+v0.89 order detail). User detail page's MAC table now shows each
+device's notes inline so customer context is one-screen.
+
+Each MAC cell also links to /admin/macs/detail (parity with the
+order-detail MAC cell). Navigation hub:
+
+  user_detail ──┬─→ mac_detail (per-MAC)
+                └─→ order_detail (per-order) ──→ mac_detail
+
+2 race-clean tests: seeded notes + marker on user detail, MAC
+cell links to detail page (accepts `:` and `%3a` URL-escape).
+
 ## v0.89 — Order detail page surfaces MAC notes
 
 Pairs with v0.88's list-view notes inline. When support drills
