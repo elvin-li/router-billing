@@ -1,5 +1,61 @@
 # Changelog
 
+## v0.23 — 每日运营日报短信
+
+Adds a daily-summary SMS to the configured admin phone — completes
+the proactive-SMS surface alongside expiry reminders + login
+alerts.
+
+### `sms.admin_digest_hour` — opt-in daily digest
+
+```yaml
+sms:
+  admin_digest_hour: 9                   # 1..24 UTC; 0 = off
+  admin_login_alert_phone: "13800138000" # reused from v0.17
+```
+
+Once per day at the configured UTC hour, the background loop fires
+a fire-and-forget SMS to the admin phone with:
+
+  【router-billing 日报】昨日营收 ¥X.YZ（N 单）· 未来 3 天 M 个 MAC 到期 · 今日 K 单失败
+
+Sections after 营收 only appear when their count is non-zero so the
+SMS stays compact on quiet days.
+
+Skips silently when any of: digest_hour=0, no SMS provider, empty/
+invalid admin_login_alert_phone — same defensive pattern as the
+expiry-reminder loop.
+
+### `/admin/sms-log` 立即发送日报 button
+
+Manual trigger of the same code path — useful to verify the
+digest content + provider reachability without waiting for the
+daily cron. Errors map to specific flash codes:
+sms_disabled / digest_no_phone / sms_failed.
+
+### DB helper `AdminDigestStats`
+
+Four count queries via QueryRowContext — yesterday's revenue +
+paid orders, today's failed orders, MACs expiring within 3 days.
+Uses the `start of day` datetime pattern the rest of the time-
+window code adopted in v0.16 (modernc.org/sqlite quirk avoidance).
+
+### Tests
+- AdminDigestStats aggregation (seeded yesterday/two-days-ago/
+  today/expiring-tomorrow rows; assert each field).
+- sendAdminDigest end-to-end (Console captures the body, audit row
+  written).
+- formatAdminDigestBody pure-function (4 body shapes including
+  ¥0.50 cent-padding).
+- Loop short-circuits when digest_hour=0.
+- Loop short-circuits when SMS provider missing.
+- /admin/sms-log/digest button: success path, no-SMS error,
+  no-phone error.
+
+### Stats
+- 17 packages tested
+- 370 test functions (was 362 in v0.22)
+
 ## v0.22 — 用户偏好 + 30 天面板 + 严格密码策略
 
 Three additive bits — small but each enables a real customer
