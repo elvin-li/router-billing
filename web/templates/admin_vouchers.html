@@ -23,6 +23,9 @@
     </div>
 
     {{template "flash" .}}
+    {{if eq .OK "import"}}
+    <div class="flash ok">充值码导入完成 ✓ 成功 {{index .Query0 "added"}} · 失败 {{index .Query0 "failed"}}</div>
+    {{end}}
 
     <div class="stats-row" style="grid-template-columns: repeat(auto-fit,minmax(140px,1fr));">
       <div class="stat"><div class="stat-icon brand"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="2" y="6" width="20" height="12" rx="2"/></svg></div><div class="stat-text"><span class="stat-label">本视图总数</span><span class="stat-value">{{.Counts.total}}</span></div></div>
@@ -61,6 +64,27 @@
           <button class="btn primary" type="submit">生成</button>
         </div>
       </form>
+    </section>
+
+    <section class="admin-card">
+      <details>
+        <summary style="cursor:pointer; font-weight:600; color:var(--text-soft);">导入已有充值码（CSV）</summary>
+        <form method="post" action="/admin/vouchers/import" class="form-grid" style="margin-top:14px;">
+          {{template "csrf" .}}
+          <div class="field" style="grid-column: 1 / -1;">
+            <label>粘贴格式 <code>code,days[,label[,batch[,expires_at]]]</code> · 空行 / # 注释跳过</label>
+            <textarea name="bulk" rows="6"
+                      style="font-family:ui-monospace,monospace; padding:9px 11px; border:1px solid var(--border); border-radius:8px; font-size:13px; width:100%;"
+                      placeholder="ABCD1111ABCD,30,promo,batch-Z,2026-12-31T23:59:59Z&#10;EFGH2222EFGH,365&#10;# code 可以带 -，自动忽略大小写 / 短横"></textarea>
+          </div>
+          <div class="field-actions">
+            <button class="btn outline" type="submit">导入</button>
+          </div>
+        </form>
+        <p class="hint" style="font-size:12px; color:var(--text-soft); margin-top:8px;">
+          适用于从其他系统迁移、或线下已经印过码的场景。重复 code 会失败计数。每条导入会写入审计日志。
+        </p>
+      </details>
     </section>
 
     {{if .BatchStats}}

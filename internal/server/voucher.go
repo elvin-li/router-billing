@@ -51,12 +51,83 @@ func (a *App) handleAdminVouchers(w http.ResponseWriter, r *http.Request) {
 	// usable" reconciliation.
 	batchStats, _ := a.DB.VoucherBatchStats(r.Context())
 
+	// Pass through raw query params so the import-result flash can read
+	// added=/failed= counts.
+	rawQuery := map[string]string{}
+	for k := range r.URL.Query() {
+		rawQuery[k] = r.URL.Query().Get(k)
+	}
 	a.render(w, "admin_vouchers.html", a.adminCtx(r, "vouchers", map[string]any{
 		"Vouchers":   list,
 		"Batch":      batch,
 		"Counts":     map[string]int{"total": total, "redeemed": redeemed, "revoked": revoked, "expired": expired, "unused": total - redeemed - revoked - expired},
 		"BatchStats": batchStats,
+		"Query0":     rawQuery,
 	}))
+}
+
+// POST /admin/vouchers/import (form-encoded `bulk` textarea)
+//
+// Comma-separated CSV-ish import for codes that were printed offline.
+// Each line: `code,days[,label[,batch[,expires_at_RFC3339]]]`. Skips
+// blank lines and `# ...` comments. Codes go through voucher.Canon so
+// users can paste dashed forms.
+//
+// Returns to /admin/vouchers with added=N failed=M reasons in the flash.
+// Each created voucher is audited individually so the existing per-row
+// trail still works.
+func (a *App) handleAdminVouchersImport(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Redirect(w, r, "/admin/vouchers", http.StatusSeeOther)
+		return
+	}
+	if err := r.ParseForm(); err != nil {
+		http.Error(w, "form", http.StatusBadRequest)
+		return
+	}
+	bulk := r.PostForm.Get("bulk")
+	var added, failed int
+	for _, raw := range strings.Split(bulk, "\n") {
+		line := strings.TrimSpace(raw)
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		parts := strings.Split(line, ",")
+		code := voucher.Canon(parts[0])
+		if code == "" || len(code) < 6 {
+			failed++
+			continue
+		}
+		days := 30
+		if len(parts) >= 2 {
+			if n, err := strconv.Atoi(strings.TrimSpace(parts[1])); err == nil && n > 0 {
+				days = n
+			}
+		}
+		label := ""
+		if len(parts) >= 3 {
+			label = strings.TrimSpace(parts[2])
+		}
+		batch := ""
+		if len(parts) >= 4 {
+			batch = strings.TrimSpace(parts[3])
+		}
+		var expires *time.Time
+		if len(parts) >= 5 {
+			if t, err := time.Parse(time.RFC3339, strings.TrimSpace(parts[4])); err == nil {
+				expires = &t
+			}
+		}
+		if _, err := a.DB.CreateVoucher(r.Context(), code, days, label, batch, expires); err != nil {
+			log.Printf("voucher import %s: %v", code, err)
+			failed++
+			continue
+		}
+		a.DB.Audit(r.Context(), "admin", "voucher_imported", code,
+			"days="+strconv.Itoa(days)+" batch="+batch+" ip="+clientIP(r))
+		added++
+	}
+	http.Redirect(w, r, fmt.Sprintf("/admin/vouchers?ok=import&added=%d&failed=%d", added, failed), http.StatusSeeOther)
 }
 
 func (a *App) handleAdminVouchersGenerate(w http.ResponseWriter, r *http.Request) {

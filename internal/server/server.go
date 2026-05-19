@@ -249,6 +249,7 @@ func (a *App) Routes() http.Handler {
 	})
 	mux.HandleFunc("/admin/vouchers", a.requireAdmin(a.handleAdminVouchers))
 	mux.HandleFunc("/admin/vouchers/generate", a.requireAdmin(a.handleAdminVouchersGenerate))
+	mux.HandleFunc("/admin/vouchers/import", a.requireAdmin(a.handleAdminVouchersImport))
 	mux.HandleFunc("/admin/vouchers/revoke", a.requireAdmin(a.handleAdminVouchersRevoke))
 	mux.HandleFunc("/admin/vouchers/export.csv", a.requireAdmin(a.handleAdminVouchersExport))
 	mux.HandleFunc("/admin/vouchers/print", a.requireAdmin(a.handleAdminVouchersPrint))
