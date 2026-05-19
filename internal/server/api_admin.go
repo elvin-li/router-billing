@@ -867,6 +867,59 @@ func (a *App) handleAPIUserGrant(w http.ResponseWriter, r *http.Request, actor s
 	})
 }
 
+// apiSMSLogEntry mirrors db.SMSLogEntry but with JSON-friendly field
+// names + an ISO timestamp. Plaintext SMS messages are sensitive (they
+// can contain temp passwords / reset codes / TOTP-recovery hints), so the
+// message field is returned as-is — same trust model as the persistent
+// DB which already holds it.
+type apiSMSLogEntry struct {
+	ID       int64     `json:"id"`
+	SentAt   time.Time `json:"sent_at"`
+	Provider string    `json:"provider"`
+	Phone    string    `json:"phone"`
+	Message  string    `json:"message"`
+	Success  bool      `json:"success"`
+	ErrorMsg string    `json:"error_msg,omitempty"`
+}
+
+// GET /api/admin/sms/log?limit=N   Bearer <any-token>
+//
+// Programmatic access to the v0.43 sms_log table. Useful for monitoring
+// scripts that want to alert on a streak of FAIL rows (e.g. Aliyun creds
+// rotated and ops forgot to update them) without scraping the /admin
+// HTML page.
+//
+//	-> 200 { "logs": [ {id, sent_at, provider, phone, message,
+//	                   success, error_msg}, ... ], "count": N }
+//
+// limit defaults to 100, max 1000. Newest rows first.
+func (a *App) handleAPISMSLog(w http.ResponseWriter, r *http.Request, _ string) {
+	if r.Method != http.MethodGet {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "GET only"})
+		return
+	}
+	limit := 100
+	if s := r.URL.Query().Get("limit"); s != "" {
+		if n, err := strconv.Atoi(s); err == nil && n > 0 && n <= 1000 {
+			limit = n
+		}
+	}
+	logs, err := a.DB.RecentSMSLogs(r.Context(), limit)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+	out := make([]apiSMSLogEntry, 0, len(logs))
+	for _, l := range logs {
+		out = append(out, apiSMSLogEntry{
+			ID: l.ID, SentAt: l.SentAt, Provider: l.Provider,
+			Phone: l.Phone, Message: l.Message, Success: l.Success,
+			ErrorMsg: l.ErrorMsg,
+		})
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"logs": out, "count": len(out)})
+}
+
 // POST /api/admin/maintenance/expire-now  Bearer <write-token>
 //
 // Programmatic mirror of v0.35's UI button. Runs ExpireDueMACs +

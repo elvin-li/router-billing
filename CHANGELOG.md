@@ -1,5 +1,30 @@
 # Changelog
 
+## v0.44 — GET /api/admin/sms/log
+
+Programmatic access to the v0.43 sms_log table. Useful for monitoring
+scripts that want to alert on a streak of FAIL rows (e.g. Aliyun
+creds rotated and ops forgot to update them) without scraping the
+admin HTML.
+
+  GET /api/admin/sms/log?limit=N   Bearer <any-token>
+  -> 200 { "logs": [ {id, sent_at, provider, phone, message,
+                     success, error_msg}, ... ], "count": N }
+
+limit defaults to 100, capped at 1000. Newest rows first. Readable
+by any token (read or write); the message contents are already in
+the DB so the read scope matches the existing /api/admin/audit
+endpoint's posture.
+
+Common pattern: a cron polling `?limit=50` and counting `success=false`
+rows fires an alert when the failure rate spikes. Pairs nicely with
+the existing `/api/admin/health` for "is the system breathing?" plus
+"is SMS delivery actually working?"
+
+5 race-clean tests: 3-row fixture confirms newest-first ordering,
+limit=5 cap enforced, readonly token accepted, POST returns 405,
+FAIL rows include error_msg.
+
 ## v0.43 — DB-backed SMS log (sms_log table)
 
 Pre-v0.43, SMS delivery state was either:
