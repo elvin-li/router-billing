@@ -131,7 +131,12 @@ func NewApp(cfg *config.Config, dbx *db.DB, svc *service.MACService) (*App, erro
 	}
 
 	tplGlob := filepath.Join(cfg.WebRoot, "templates", "*.html")
-	tpl, err := template.New("").Funcs(tplFuncs()).ParseGlob(tplGlob)
+	// missingkey=zero: when a template references {{.X}} and X isn't in the
+	// map (we pass map[string]any to many handlers via adminCtx), render the
+	// zero value ("" / 0 / nil) instead of the literal string "<no value>".
+	// Struct-field misses are unaffected — those have always been hard
+	// errors, which is what surfaced the v0.96 dashboard plan-sales bug.
+	tpl, err := template.New("").Option("missingkey=zero").Funcs(tplFuncs()).ParseGlob(tplGlob)
 	if err != nil {
 		return nil, fmt.Errorf("parse templates %s: %w", tplGlob, err)
 	}
