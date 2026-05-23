@@ -168,13 +168,30 @@ func (a *App) handlePayQR(w http.ResponseWriter, r *http.Request) {
 
 // --- helpers ---
 
+// render executes the named template into a bytes.Buffer first, then copies
+// the buffer to w only on success. This matters because ExecuteTemplate may
+// emit some bytes before erroring out (e.g. on a typo'd struct field
+// halfway through a table). With a direct ResponseWriter the user got
+//
+//	HTTP 200 + "<table>...<td>month</td><td>internal\n"
+//
+// — partial HTML, an implicit 200 from the first Write, and the failed
+// http.Error(500) silently downgraded to a Write of "internal\n" (plus
+// "superfluous WriteHeader" log spam). Buffering means template errors
+// always produce a clean 500 with no leaked partial output.
+//
+// Headers are set after Execute succeeds so that on error the user gets
+// the text/plain content-type that http.Error provides.
 func (a *App) render(w http.ResponseWriter, name string, data any) {
-	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	w.Header().Set("Cache-Control", "no-store")
-	if err := a.tpl.ExecuteTemplate(w, name, data); err != nil {
+	var buf bytes.Buffer
+	if err := a.tpl.ExecuteTemplate(&buf, name, data); err != nil {
 		log.Printf("render %s: %v", name, err)
 		http.Error(w, "internal", http.StatusInternalServerError)
+		return
 	}
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	w.Header().Set("Cache-Control", "no-store")
+	_, _ = w.Write(buf.Bytes())
 }
 
 func writeJSON(w http.ResponseWriter, code int, body any) {
