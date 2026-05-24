@@ -138,6 +138,12 @@ func (a *App) handlePaySuccess(w http.ResponseWriter, r *http.Request) {
 }
 
 // /api/pay/qr?order_no=... — returns the QR as PNG so the browser <img> can show it.
+//
+// The QR payload comes from the order row, NOT from the URL — pre-v0.97
+// we accepted ?payload=... directly which made this endpoint an open QR
+// encoder for anyone holding any valid order_no (e.g. stamp a phishing
+// URL into a QR served from our domain). Now we read o.QRPayload, which
+// was stored at /api/pay/create time.
 func (a *App) handlePayQR(w http.ResponseWriter, r *http.Request) {
 	orderNo := r.URL.Query().Get("order_no")
 	if orderNo == "" {
@@ -149,12 +155,16 @@ func (a *App) handlePayQR(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "order not found", http.StatusNotFound)
 		return
 	}
-	payload := r.URL.Query().Get("payload")
-	if payload == "" {
-		http.Error(w, "missing payload", http.StatusBadRequest)
+	// Mid-upgrade safety net: a pending order created by an old binary
+	// won't have qr_payload populated. The /api/pay/create response in
+	// new-server clients carries the QR payload directly so the page can
+	// render client-side; this fallback path 404s cleanly rather than
+	// echoing a URL-supplied string.
+	if o.QRPayload == "" {
+		http.Error(w, "qr unavailable for this order", http.StatusNotFound)
 		return
 	}
-	code, err := qr.Encode(payload, qr.M)
+	code, err := qr.Encode(o.QRPayload, qr.M)
 	if err != nil {
 		http.Error(w, "qr encode: "+err.Error(), http.StatusInternalServerError)
 		return

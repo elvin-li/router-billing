@@ -7,7 +7,6 @@ import (
 	"io"
 	"log"
 	"net/http"
-	"net/url"
 	"strings"
 	"time"
 
@@ -138,10 +137,21 @@ func (a *App) handlePayCreate(w http.ResponseWriter, r *http.Request) {
 		qrPayload = res.QRCode
 	}
 
+	// Persist the upstream QR string on the order. /api/pay/qr reads from
+	// here; passing payload via URL query was the old shape and let any
+	// holder of a valid order_no render arbitrary QR content on our
+	// domain (open QR-encoder, phishing-aid). v0.97 closes that.
+	if err := a.DB.SetOrderQRPayload(r.Context(), orderNo, qrPayload); err != nil {
+		log.Printf("save qr_payload %s: %v", orderNo, err)
+		// Non-fatal — the QR JSON below still has the payload for the
+		// browser to render client-side; only the /api/pay/qr image
+		// fallback would 404.
+	}
+
 	writeJSON(w, http.StatusOK, payCreateResp{
 		OrderNo: orderNo,
 		QRCode:  qrPayload,
-		QRPNG:   fmt.Sprintf("/api/pay/qr?order_no=%s&payload=%s", orderNo, url.QueryEscape(qrPayload)),
+		QRPNG:   "/api/pay/qr?order_no=" + orderNo,
 		Amount:  fmt.Sprintf("%d.%02d", plan.PriceCents/100, plan.PriceCents%100),
 		Plan:    req.Plan,
 		Days:    plan.Days,
