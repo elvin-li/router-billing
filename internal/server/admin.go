@@ -375,7 +375,29 @@ func (a *App) handleAdminDevices(w http.ResponseWriter, r *http.Request) {
 	// 4) Per-MAC nftables counters (bytes/packets through forward chain).
 	counters, _ := a.MACSvc.FW.Counters(r.Context())
 
-	// Merge: every sighted MAC + every online MAC.
+	// Merge: every sighted MAC + every online MAC. Billing rows are fetched
+	// in ONE batched query up front instead of a per-device point lookup
+	// (this page can easily list 100+ devices on a busy network).
+	allMACs := make([]string, 0, len(sightings)+len(entries))
+	inList := map[string]bool{}
+	for _, s := range sightings {
+		if !inList[s.MAC] {
+			inList[s.MAC] = true
+			allMACs = append(allMACs, s.MAC)
+		}
+	}
+	for _, e := range entries {
+		if !inList[e.MAC] {
+			inList[e.MAC] = true
+			allMACs = append(allMACs, e.MAC)
+		}
+	}
+	known, err := a.DB.GetMACsIn(r.Context(), allMACs)
+	if err != nil {
+		log.Printf("devices: batch mac lookup: %v", err)
+		known = nil
+	}
+
 	seen := map[string]bool{}
 	devices := make([]deviceView, 0, len(sightings)+len(entries))
 
@@ -391,7 +413,7 @@ func (a *App) handleAdminDevices(w http.ResponseWriter, r *http.Request) {
 				dv.IP = onlineIP
 			}
 		}
-		if m, _ := a.DB.GetMAC(r.Context(), mac); m != nil {
+		if m := known[mac]; m != nil {
 			dv.Known = true
 			dv.Label = m.Label
 			dv.ExpiresAt = m.ExpiresAt

@@ -119,7 +119,8 @@ func hashTokenColumn(d *sql.DB, table string, version int) error {
 		return err
 	}
 	for _, t := range tokens {
-		if _, err := tx.Exec(`UPDATE `+table+` SET token = ? WHERE token = ?`, HashToken(t), t); err != nil {
+		if _, err := tx.Exec(`UPDATE `+table+` SET token = ? WHERE token = ?`, //nolint:gosec // G202: table is a compile-time constant
+			HashToken(t), t); err != nil {
 			return err
 		}
 	}
