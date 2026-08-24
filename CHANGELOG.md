@@ -1,5 +1,66 @@
 # Changelog
 
+## v0.97 — Security + correctness hardening sweep
+
+Security:
+
+- X-Forwarded-For is now IGNORED unless the TCP peer matches the new
+  `security.trusted_proxies` list (IPs/CIDRs). Pre-v0.97 any client
+  could spoof the header to rotate around every per-IP rate limit
+  (login / register / pay-create / redeem / password-reset) and stuff
+  fake IPs into the audit log. Deploys behind nginx/Caddy must add
+  their proxy address to keep real-client-IP behavior; direct deploys
+  need no change. Trusted chains resolve via the rightmost-untrusted
+  rule.
+- Fixed an open redirect: `/user/login` and `/user/login/2fa` accepted
+  `next=//evil.com` (protocol-relative) and the 2FA path accepted full
+  URLs. Both now sanitize through `safeNextPath` (same-site absolute
+  paths only).
+- `/metrics` bearer token now compares constant-time, matching the API
+  tokens.
+
+Correctness:
+
+- `nft` set Sync (boot resync / admin resync / refund kick) is now ONE
+  atomic `nft -f -` transaction. Previously flush + repopulate were two
+  invocations: every sync had a window where the whole paid set was
+  empty, and a failed repopulate knocked every paying customer offline
+  until the next sync.
+- Firewall reconcile now also runs on every scheduler tick (default
+  hourly), self-healing nft-set drift from transient failures. Resync
+  became schedule-aware: MACs whose time-of-day window is closed are no
+  longer re-granted by a resync.
+- /api/pay/create validates the provider BEFORE inserting the order, and
+  marks the order failed when the upstream precreate errors — no more
+  orphan pending orders feeding the poller and the stale-pending
+  attention counter for 30 minutes.
+- finalizeOrder detaches from request cancellation so a client
+  disconnect can no longer strand a paid order without its MAC grant;
+  grant failures after the paid transition now land a `pay_grant_failed`
+  audit row instead of vanishing.
+- ExpireDueMACs runs SELECT + UPDATE in one transaction — the returned
+  list now exactly matches the rows flipped.
+
+Performance / UI:
+
+- New indexes: orders(status, paid_at), sessions(expires_at),
+  audit_log(action, target, at) — cover the dashboard revenue roll-ups,
+  session purges, and the expiry-reminder dedup subquery.
+- /admin/users computes per-user MAC counts with one GROUP BY instead of
+  loading every MAC row; /admin/macs caps the unfiltered list at 500
+  rows (stats card still shows true totals); /pay/success finds the
+  receipt with a targeted query instead of scanning the newest 50
+  orders (which silently lost the link on busy installs).
+- /admin/audit now linkifies real order numbers (the `B` +
+  timestamp + hex shape newOrderNo generates) — refund/cancel audit rows
+  were rendering as plain text because the linkifier only knew the
+  legacy `ORD` prefix.
+
+15 new race-clean tests across firewall atomicity, clientIP trust
+rules, open-redirect shapes, pay-create orphans, schedule-aware resync,
+scheduler reconcile, per-user counts, latest-paid lookup, and order-no
+linkification.
+
 ## v0.96 — Fix: dashboard plan-sales table was silently empty
 
 Pre-v0.96 the /admin/dashboard "最近 30 天按套餐" table referenced

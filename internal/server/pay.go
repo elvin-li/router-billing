@@ -331,6 +331,13 @@ func (a *App) handleNotifyAlipay(w http.ResponseWriter, r *http.Request) {
 
 // finalizeOrder marks the order paid and grants the MAC. Idempotent.
 func (a *App) finalizeOrder(ctx context.Context, orderNo, tradeNo string) error {
+	// Detach from request cancellation: this is called from webhook /
+	// status / long-poll handlers, and a client disconnect between
+	// MarkOrderPaid and GrantFromOrder would leave a paid order whose
+	// MAC never got its time — and the PSP retry would then no-op on
+	// the already-paid row. Values (trace info) are preserved.
+	ctx = context.WithoutCancel(ctx)
+
 	a.pollMu.Lock()
 	defer a.pollMu.Unlock()
 
