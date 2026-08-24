@@ -12,6 +12,7 @@ import (
 	"golang.org/x/crypto/bcrypt"
 	"rsc.io/qr"
 
+	"router-billing/internal/db"
 	"router-billing/internal/totp"
 )
 
@@ -179,9 +180,10 @@ func (a *App) handleUser2FA(w http.ResponseWriter, r *http.Request) {
 		ExpiresInD int
 	}
 	var devices []deviceView
+	// Device rows store token hashes; hash the cookie value to match.
 	currentToken := ""
-	if c, err := r.Cookie(userTrustedCookie); err == nil {
-		currentToken = c.Value
+	if c, err := r.Cookie(userTrustedCookie); err == nil && c.Value != "" {
+		currentToken = db.HashToken(c.Value)
 	}
 	if user.TOTPSecret != "" {
 		codes, _ := a.DB.ListBackupCodes(r.Context(), uid)

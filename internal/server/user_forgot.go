@@ -203,8 +203,11 @@ func (a *App) handleUserForgotPasswordVerify(w http.ResponseWriter, r *http.Requ
 		return
 	}
 	if user == nil || user.Suspended {
-		// Uniform response — also matches the silent-success branch above.
-		a.renderForgot(w, r, 2, phone, "bad_code")
+		// Same error code AND same bcrypt cost as the "registered phone, no
+		// active reset" branch below — otherwise the response (content or
+		// timing) tells an attacker which phone numbers have accounts.
+		_ = bcrypt.CompareHashAndPassword(dummyBcryptHash, []byte(code))
+		a.renderForgot(w, r, 2, phone, "expired")
 		return
 	}
 	row, err := a.DB.GetActivePasswordReset(r.Context(), user.ID)
@@ -214,6 +217,7 @@ func (a *App) handleUserForgotPasswordVerify(w http.ResponseWriter, r *http.Requ
 		return
 	}
 	if row == nil {
+		_ = bcrypt.CompareHashAndPassword(dummyBcryptHash, []byte(code))
 		a.renderForgot(w, r, 2, phone, "expired")
 		return
 	}

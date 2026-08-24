@@ -167,7 +167,16 @@ func (a *App) handleUserLogin(w http.ResponseWriter, r *http.Request) {
 		http.Redirect(w, r, "/user/login?err=internal", http.StatusSeeOther)
 		return
 	}
-	if user == nil || bcrypt.CompareHashAndPassword([]byte(user.PasswordHash), []byte(password)) != nil {
+	if user == nil {
+		// Burn a bcrypt compare anyway so "phone not registered" and "wrong
+		// password" take the same time — otherwise response latency leaks
+		// which phone numbers have accounts.
+		_ = bcrypt.CompareHashAndPassword(dummyBcryptHash, []byte(password))
+		a.DB.Audit(r.Context(), "user:"+phone, "login_failed", "", a.clientIP(r))
+		http.Redirect(w, r, "/user/login?err=bad_credentials", http.StatusSeeOther)
+		return
+	}
+	if bcrypt.CompareHashAndPassword([]byte(user.PasswordHash), []byte(password)) != nil {
 		a.DB.Audit(r.Context(), "user:"+phone, "login_failed", "", a.clientIP(r))
 		http.Redirect(w, r, "/user/login?err=bad_credentials", http.StatusSeeOther)
 		return
@@ -853,6 +862,13 @@ func ipInNets(ipStr string, nets []*net.IPNet) bool {
 	}
 	return false
 }
+
+// dummyBcryptHash is a fixed, valid bcrypt digest of a throwaway string.
+// It never grants access — we only verify candidate passwords against it
+// when the target account does NOT exist, so "unknown phone" and "wrong
+// password" cost the same bcrypt work and response timing can't be used to
+// enumerate registered numbers.
+var dummyBcryptHash = []byte("$2a$10$B6XmfqFqB/6JVfLTZ3kNk.CEBHWqU..ixe.d0xGOn1011xg6D8B0K")
 
 // --- rate limiter ---
 

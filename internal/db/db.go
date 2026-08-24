@@ -1155,22 +1155,26 @@ func (d *DB) DeleteUser(ctx context.Context, id int64) error {
 func (d *DB) CreateTrustedDevice(ctx context.Context, userID int64, token, label string, ttl time.Duration) (*models.TrustedDevice, error) {
 	now := time.Now().UTC()
 	exp := now.Add(ttl)
+	// Stored hashed, same rationale as sessions: a leaked DB dump must not
+	// yield working "skip 2FA" cookies.
+	hashed := HashToken(token)
 	res, err := d.conn.ExecContext(ctx,
 		`INSERT INTO user_trusted_devices (user_id, token, label, expires_at, last_seen, created_at)
 		 VALUES (?, ?, ?, ?, ?, ?)`,
-		userID, token, label, exp, now, now)
+		userID, hashed, label, exp, now, now)
 	if err != nil {
 		return nil, err
 	}
 	id, _ := res.LastInsertId()
 	return &models.TrustedDevice{
-		ID: id, UserID: userID, Token: token, Label: label,
+		ID: id, UserID: userID, Token: hashed, Label: label,
 		ExpiresAt: exp, LastSeen: now, CreatedAt: now,
 	}, nil
 }
 
-// GetTrustedDevice looks up by raw token, returning nil if missing/expired.
-// On hit it also bumps last_seen so the /user/2fa page shows fresh data.
+// GetTrustedDevice looks up by raw token (cookie value), returning nil if
+// missing/expired. On hit it also bumps last_seen so the /user/2fa page
+// shows fresh data.
 func (d *DB) GetTrustedDevice(ctx context.Context, token string) (*models.TrustedDevice, error) {
 	if token == "" {
 		return nil, nil
@@ -1178,7 +1182,7 @@ func (d *DB) GetTrustedDevice(ctx context.Context, token string) (*models.Truste
 	row := d.conn.QueryRowContext(ctx,
 		`SELECT id, user_id, token, label, expires_at, last_seen, created_at
 		 FROM user_trusted_devices WHERE token = ? AND expires_at > ?`,
-		token, time.Now().UTC())
+		HashToken(token), time.Now().UTC())
 	var t models.TrustedDevice
 	err := row.Scan(&t.ID, &t.UserID, &t.Token, &t.Label, &t.ExpiresAt, &t.LastSeen, &t.CreatedAt)
 	if errors.Is(err, sql.ErrNoRows) {

@@ -122,6 +122,19 @@ func TestMigrationHashesLegacyPlaintextTokens(t *testing.T) {
 		raw, time.Now().UTC().Add(time.Hour)); err != nil {
 		t.Fatal(err)
 	}
+	// And a plaintext trusted-device row (also pre-hashing).
+	u, err := d.CreateUser(ctx, "13800160000", "h")
+	if err != nil {
+		t.Fatal(err)
+	}
+	rawDev := "legacy-trusted-device-token"
+	now := time.Now().UTC()
+	if _, err := d.conn.ExecContext(ctx,
+		`INSERT INTO user_trusted_devices (user_id, token, label, expires_at, last_seen, created_at)
+		 VALUES (?, ?, 'old browser', ?, ?, ?)`,
+		u.ID, rawDev, now.Add(24*time.Hour), now, now); err != nil {
+		t.Fatal(err)
+	}
 	if _, err := d.conn.ExecContext(ctx, `PRAGMA user_version = 0`); err != nil {
 		t.Fatal(err)
 	}
@@ -148,12 +161,25 @@ func TestMigrationHashesLegacyPlaintextTokens(t *testing.T) {
 		t.Fatalf("legacy cookie must survive migration; got %v, %v", s, err)
 	}
 
+	// Trusted-device cookie survives too, and the row is now hashed.
+	dev, err := d.GetTrustedDevice(ctx, rawDev)
+	if err != nil || dev == nil {
+		t.Fatalf("legacy trusted-device cookie must survive migration; got %v, %v", dev, err)
+	}
+	var storedDev string
+	if err := d.conn.QueryRowContext(ctx, `SELECT token FROM user_trusted_devices`).Scan(&storedDev); err != nil {
+		t.Fatal(err)
+	}
+	if storedDev != HashToken(rawDev) {
+		t.Fatalf("legacy trusted-device token not hashed: %q", storedDev)
+	}
+
 	var version int
 	if err := d.conn.QueryRowContext(ctx, `PRAGMA user_version`).Scan(&version); err != nil {
 		t.Fatal(err)
 	}
-	if version < schemaVersionSessionHashes {
-		t.Fatalf("user_version = %d, want >= %d", version, schemaVersionSessionHashes)
+	if version < schemaVersionTrustedDeviceHashes {
+		t.Fatalf("user_version = %d, want >= %d", version, schemaVersionTrustedDeviceHashes)
 	}
 
 	// Idempotence: a second migration pass must not double-hash. Re-opening

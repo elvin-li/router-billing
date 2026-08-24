@@ -53,31 +53,49 @@ func runMigrations(d *sql.DB) error {
 	return nil
 }
 
-// schemaVersionSessionHashes marks the one-off migration that rewrote
-// sessions.token from raw cookie values to SHA-256 hashes (v0.97). Tracked
-// via PRAGMA user_version because raw tokens and hashes are both 64-char hex
-// — indistinguishable by format.
-const schemaVersionSessionHashes = 1
+// Schema versions tracked via PRAGMA user_version. Needed for the token-
+// hashing migrations because raw tokens and SHA-256 hashes are both 64-char
+// hex — indistinguishable by format.
+const (
+	// v0.97: sessions.token rewritten from raw cookie values to SHA-256.
+	schemaVersionSessionHashes = 1
+	// v0.97: user_trusted_devices.token likewise rewritten to SHA-256.
+	schemaVersionTrustedDeviceHashes = 2
+)
 
-// migrateSessionTokensToHashes rewrites every stored session token to its
-// SHA-256 hash, in one transaction, exactly once. Cookies on client devices
-// hold the raw token and keep working: lookups hash the cookie value before
-// comparing, so live sessions survive the upgrade with no forced re-login.
+// migrateSessionTokensToHashes rewrites stored session and trusted-device
+// tokens to their SHA-256 hashes, in one transaction per table, exactly
+// once. Cookies on client devices hold the raw token and keep working:
+// lookups hash the cookie value before comparing, so live sessions and
+// trusted devices survive the upgrade with no forced re-login.
 func migrateSessionTokensToHashes(d *sql.DB) error {
 	var version int
 	if err := d.QueryRow(`PRAGMA user_version`).Scan(&version); err != nil {
 		return err
 	}
-	if version >= schemaVersionSessionHashes {
-		return nil
+	if version < schemaVersionSessionHashes {
+		if err := hashTokenColumn(d, "sessions", schemaVersionSessionHashes); err != nil {
+			return err
+		}
 	}
+	if version < schemaVersionTrustedDeviceHashes {
+		if err := hashTokenColumn(d, "user_trusted_devices", schemaVersionTrustedDeviceHashes); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// hashTokenColumn rewrites every value in <table>.token to HashToken(value)
+// and bumps PRAGMA user_version to `version`, all in one transaction.
+func hashTokenColumn(d *sql.DB, table string, version int) error {
 	tx, err := d.Begin()
 	if err != nil {
 		return err
 	}
 	defer func() { _ = tx.Rollback() }()
 
-	rows, err := tx.Query(`SELECT token FROM sessions`)
+	rows, err := tx.Query(`SELECT token FROM ` + table) //nolint:gosec // table is a compile-time constant
 	if err != nil {
 		return err
 	}
@@ -95,12 +113,12 @@ func migrateSessionTokensToHashes(d *sql.DB) error {
 		return err
 	}
 	for _, t := range tokens {
-		if _, err := tx.Exec(`UPDATE sessions SET token = ? WHERE token = ?`, HashToken(t), t); err != nil {
+		if _, err := tx.Exec(`UPDATE `+table+` SET token = ? WHERE token = ?`, HashToken(t), t); err != nil {
 			return err
 		}
 	}
 	// PRAGMA doesn't support placeholders; the value is a trusted constant.
-	if _, err := tx.Exec(fmt.Sprintf("PRAGMA user_version = %d", schemaVersionSessionHashes)); err != nil {
+	if _, err := tx.Exec(fmt.Sprintf("PRAGMA user_version = %d", version)); err != nil {
 		return err
 	}
 	return tx.Commit()
