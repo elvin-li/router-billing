@@ -48,6 +48,10 @@ CREATE INDEX IF NOT EXISTS idx_orders_mac     ON orders(mac);
 CREATE INDEX IF NOT EXISTS idx_orders_status  ON orders(status);
 CREATE INDEX IF NOT EXISTS idx_orders_created ON orders(created_at);
 CREATE INDEX IF NOT EXISTS idx_orders_user    ON orders(user_id);
+-- Composite for the revenue roll-ups (dashboard / digest / plan sales):
+-- they all filter status='paid' AND a paid_at range, which neither the
+-- lone status index nor created_at can serve without a scan.
+CREATE INDEX IF NOT EXISTS idx_orders_status_paid_at ON orders(status, paid_at);
 
 CREATE TABLE IF NOT EXISTS sessions (
     token       TEXT PRIMARY KEY,
@@ -57,6 +61,8 @@ CREATE TABLE IF NOT EXISTS sessions (
     expires_at  DATETIME NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_sessions_kind ON sessions(kind);
+-- Every session lookup / purge / count filters on expires_at.
+CREATE INDEX IF NOT EXISTS idx_sessions_expires ON sessions(expires_at);
 
 -- Live device tracking — populated by sightings.Tracker.
 -- Used by the admin /devices page to suggest unsubscribed MACs.
@@ -168,6 +174,9 @@ CREATE TABLE IF NOT EXISTS audit_log (
     detail      TEXT NOT NULL DEFAULT ''
 );
 CREATE INDEX IF NOT EXISTS idx_audit_at ON audit_log(at);
+-- Serves the expiry-reminder dedup subquery (action + target + at) and the
+-- action-filtered /admin/audit views without scanning the whole log.
+CREATE INDEX IF NOT EXISTS idx_audit_action_target ON audit_log(action, target, at);
 
 -- SMS log — every send-through-App.SendSMS records one row regardless of
 -- outcome. Persistent (survives restarts) and provider-agnostic, unlike

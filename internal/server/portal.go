@@ -106,7 +106,15 @@ func (a *App) handleMe(w http.ResponseWriter, r *http.Request) {
 
 // /pay/success — shown after polling sees status=paid.
 func (a *App) handlePaySuccess(w http.ResponseWriter, r *http.Request) {
-	mac := r.URL.Query().Get("mac")
+	mac := ""
+	// Normalize the ?mac= override — DB rows store the canonical
+	// uppercase-colon form, so a lowercase query param would otherwise
+	// miss both the MAC row and the receipt lookup.
+	if q := r.URL.Query().Get("mac"); q != "" {
+		if norm, ok := models.NormalizeMAC(q); ok {
+			mac = norm
+		}
+	}
 	if mac == "" {
 		mac = a.detectMAC(r)
 	}
@@ -118,12 +126,8 @@ func (a *App) handlePaySuccess(w http.ResponseWriter, r *http.Request) {
 	// Find the most recent paid order for this MAC so we can offer a receipt link.
 	var receiptOrderNo string
 	if mac != "" {
-		orders, _ := a.DB.ListOrders(r.Context(), 50)
-		for _, o := range orders {
-			if o.Mac == mac && o.Status == models.OrderPaid {
-				receiptOrderNo = o.OrderNo
-				break
-			}
+		if o, _ := a.DB.LatestPaidOrderForMAC(r.Context(), mac); o != nil {
+			receiptOrderNo = o.OrderNo
 		}
 	}
 	a.render(w, "success.html", map[string]any{

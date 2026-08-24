@@ -488,6 +488,26 @@ func (d *DB) SearchOrdersFiltered(ctx context.Context, f OrderFilter) ([]models.
 	return d.queryOrders(ctx, sb.String(), args...)
 }
 
+// LatestPaidOrderForMAC returns the most recently paid order for a MAC,
+// or nil when the MAC never had one. Used by the /pay/success page to
+// offer a receipt link — a targeted indexed lookup instead of scanning
+// the newest N orders in Go (which silently missed the order once it
+// aged out of the scan window).
+func (d *DB) LatestPaidOrderForMAC(ctx context.Context, mac string) (*models.Order, error) {
+	row := d.conn.QueryRowContext(ctx,
+		`SELECT `+orderCols+` FROM orders
+		 WHERE mac = ? AND status = 'paid'
+		 ORDER BY paid_at DESC, id DESC LIMIT 1`, mac)
+	o, err := scanOrder(row)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	return o, nil
+}
+
 func (d *DB) ListOrdersForUser(ctx context.Context, userID int64, limit int) ([]models.Order, error) {
 	if limit <= 0 || limit > 500 {
 		limit = 50

@@ -464,8 +464,12 @@ func auditTargetHref(target string) string {
 	if mac, ok := models.NormalizeMAC(target); ok {
 		return "/admin/macs/detail?mac=" + mac
 	}
-	// Order number — starts with "ORD" or "ord".
-	if strings.HasPrefix(target, "ORD") || strings.HasPrefix(target, "ord") {
+	// Order number — either the legacy "ORD"/"ord" prefix or the real
+	// shape newOrderNo() emits: "B" + 14-digit UTC timestamp + 8 hex
+	// chars (e.g. B20260824190000a1b2c3d4). The refund/cancel audit rows
+	// use these as targets, so without this branch they rendered as
+	// plain text.
+	if strings.HasPrefix(target, "ORD") || strings.HasPrefix(target, "ord") || looksLikeOrderNo(target) {
 		return "/admin/orders/detail?order_no=" + target
 	}
 	// All-digit shapes: 11-digit starts-with-1 → phone; 1-9 digits → user_id.
@@ -485,6 +489,25 @@ func auditTargetHref(target string) string {
 		}
 	}
 	return ""
+}
+
+// looksLikeOrderNo reports whether s matches the exact shape newOrderNo()
+// generates: 'B' + 14 digits (yyyymmddhhmmss) + 8 lowercase hex chars.
+func looksLikeOrderNo(s string) bool {
+	if len(s) != 23 || s[0] != 'B' {
+		return false
+	}
+	for _, c := range s[1:15] {
+		if c < '0' || c > '9' {
+			return false
+		}
+	}
+	for _, c := range s[15:] {
+		if (c < '0' || c > '9') && (c < 'a' || c > 'f') {
+			return false
+		}
+	}
+	return true
 }
 
 func tplFuncs() template.FuncMap {
