@@ -227,6 +227,48 @@ func (d *DB) GetMAC(ctx context.Context, mac string) (*models.MAC, error) {
 	return m, nil
 }
 
+// GetMACsIn returns the subset of `macs` that exist as billing rows, keyed
+// by MAC. One IN query (chunked to stay under SQLite's parameter limit)
+// instead of a point lookup per element — used by the admin devices page,
+// which merges ARP + sightings and previously issued one GetMAC per device.
+func (d *DB) GetMACsIn(ctx context.Context, macs []string) (map[string]*models.MAC, error) {
+	out := make(map[string]*models.MAC, len(macs))
+	const chunk = 500
+	for start := 0; start < len(macs); start += chunk {
+		end := start + chunk
+		if end > len(macs) {
+			end = len(macs)
+		}
+		part := macs[start:end]
+		args := make([]any, len(part))
+		for i, m := range part {
+			args[i] = m
+		}
+		// Only compile-time constants plus a repeated "?" placeholder are
+		// concatenated; every value binds through args.
+		q := `SELECT ` + macCols + ` FROM macs WHERE mac IN (?` + //nolint:gosec // G202: placeholders only
+			strings.Repeat(",?", len(part)-1) + `)`
+		rows, err := d.conn.QueryContext(ctx, q, args...)
+		if err != nil {
+			return nil, err
+		}
+		for rows.Next() {
+			m, err := scanMAC(rows)
+			if err != nil {
+				rows.Close()
+				return nil, err
+			}
+			out[m.Mac] = m
+		}
+		if err := rows.Err(); err != nil {
+			rows.Close()
+			return nil, err
+		}
+		rows.Close()
+	}
+	return out, nil
+}
+
 // UpsertMAC adds new MAC or extends existing one's expiry. Returns the post-state.
 // If existing MAC is still active, new expiry = current_expiry + days.
 // Otherwise new expiry = now + days. userID nil keeps the existing owner (or null).

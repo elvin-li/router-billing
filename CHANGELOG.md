@@ -61,6 +61,38 @@ rules, open-redirect shapes, pay-create orphans, schedule-aware resync,
 scheduler reconcile, per-user counts, latest-paid lookup, and order-no
 linkification.
 
+Round 2 (same release):
+
+Security:
+
+- Session tokens and trusted-device ("remember this browser") tokens
+  are now stored as SHA-256 hashes. A copied DB file or backup no
+  longer yields replayable login cookies or 2FA-bypass cookies. The
+  upgrade migrates existing rows in place (tracked via
+  `PRAGMA user_version`) — nobody is logged out; cookies on devices
+  keep working. The /admin/sessions revoke form now round-trips the
+  hash instead of embedding every live session's raw cookie value in
+  the page HTML (which let anyone who could read the page hijack any
+  listed session).
+- Account enumeration closed on two fronts: `/user/login` burns the
+  same bcrypt work whether the phone exists or not (response timing
+  used to reveal registered numbers), and `/user/forgot-password`
+  verify returns the same "code expired" answer for unknown phones as
+  for known phones with no active reset (it used to answer
+  bad_code / expired respectively — a direct registered-or-not oracle).
+
+Correctness / performance:
+
+- Webhook worker no longer goes deaf during retry backoff. Previously a
+  down endpoint made the single worker sleep through up to ~5.5 min of
+  backoff per event without reading the 64-slot queue, silently
+  dropping everything sent meanwhile. The worker now keeps absorbing
+  events into a bounded in-order buffer (256 + 64 slots of headroom)
+  while it waits; delivery order is unchanged.
+- /admin/devices fetches billing rows for all listed devices in one
+  batched query instead of one DB lookup per device (100+ on a busy
+  network).
+
 ## v0.96 — Fix: dashboard plan-sales table was silently empty
 
 Pre-v0.96 the /admin/dashboard "最近 30 天按套餐" table referenced

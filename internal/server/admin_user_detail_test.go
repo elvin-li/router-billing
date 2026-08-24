@@ -44,7 +44,7 @@ func TestAdminUserDetailRendersFullProfile(t *testing.T) {
 		"ORD-DETAIL-1",      // order
 		// session token hash prefix (page shows first 8 chars of the hash)
 		db.HashToken("tok-detail-1")[:8],
-		"10.0.0.99",         // IP from audit
+		"10.0.0.99", // IP from audit
 		"最近 30 条审计",
 		"活动会话",
 		"MAC (",
