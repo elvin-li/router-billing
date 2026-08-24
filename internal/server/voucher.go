@@ -337,7 +337,7 @@ func (a *App) handleRedeem(w http.ResponseWriter, r *http.Request) {
 	codeRaw := r.PostForm.Get("code")
 	code := voucher.Canon(codeRaw)
 	if err := voucher.Validate(code); err != nil {
-		http.Redirect(w, r, "/redeem?code="+codeRaw+"&err="+httpEsc(err.Error()), http.StatusSeeOther)
+		http.Redirect(w, r, "/redeem?code="+httpEsc(codeRaw)+"&err="+httpEsc(err.Error()), http.StatusSeeOther)
 		return
 	}
 	macInput := r.PostForm.Get("mac")
@@ -346,7 +346,7 @@ func (a *App) handleRedeem(w http.ResponseWriter, r *http.Request) {
 	}
 	mac, ok := models.NormalizeMAC(macInput)
 	if !ok {
-		http.Redirect(w, r, "/redeem?code="+codeRaw+"&err="+httpEsc("无法识别 MAC，请填写"), http.StatusSeeOther)
+		http.Redirect(w, r, "/redeem?code="+httpEsc(codeRaw)+"&err="+httpEsc("无法识别 MAC，请填写"), http.StatusSeeOther)
 		return
 	}
 
@@ -358,14 +358,14 @@ func (a *App) handleRedeem(w http.ResponseWriter, r *http.Request) {
 
 	v, err := a.DB.RedeemVoucher(r.Context(), code, mac, userID)
 	if err != nil {
-		http.Redirect(w, r, "/redeem?code="+codeRaw+"&err="+httpEsc(redeemErrLabel(err)), http.StatusSeeOther)
+		http.Redirect(w, r, "/redeem?code="+httpEsc(codeRaw)+"&err="+httpEsc(redeemErrLabel(err)), http.StatusSeeOther)
 		return
 	}
 	// Apply the time to the MAC.
 	m, err := a.MACSvc.Extend(r.Context(), mac, "voucher:"+v.Batch, v.Days, userID)
 	if err != nil {
 		log.Printf("redeem extend %s: %v", mac, err)
-		http.Redirect(w, r, "/redeem?code="+codeRaw+"&err=授权失败请联系管理员", http.StatusSeeOther)
+		http.Redirect(w, r, "/redeem?code="+httpEsc(codeRaw)+"&err="+httpEsc("授权失败请联系管理员"), http.StatusSeeOther)
 		return
 	}
 	actor := "user-anon"

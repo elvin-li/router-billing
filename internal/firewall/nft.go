@@ -175,16 +175,16 @@ func (m *Manager) RemoveWalledGardenIPs(ctx context.Context, setName string, ips
 }
 
 // Sync rebuilds the set atomically from the given list of MACs.
+//
+// flush + repopulate are submitted as ONE `nft -f -` batch, which the
+// kernel applies as a single transaction. Two separate invocations (the
+// pre-v0.97 behavior) had a window where the set was empty — every paid
+// device briefly fell back to the portal redirect — and a failure of the
+// second command left the set empty until the next reconcile, knocking
+// every paying customer offline.
 func (m *Manager) Sync(ctx context.Context, macs []string) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	if err := m.run(ctx, "flush", "set", m.Family, m.Table, m.Set); err != nil {
-		return fmt.Errorf("flush set: %w", err)
-	}
-	if len(macs) == 0 {
-		return nil
-	}
-	// nft accepts comma-separated elements in one shot.
 	parts := make([]string, 0, len(macs))
 	for _, mac := range macs {
 		if !validMAC(mac) {
@@ -193,12 +193,14 @@ func (m *Manager) Sync(ctx context.Context, macs []string) error {
 		}
 		parts = append(parts, mac)
 	}
-	if len(parts) == 0 {
-		return nil
+	var script strings.Builder
+	fmt.Fprintf(&script, "flush set %s %s %s\n", m.Family, m.Table, m.Set)
+	if len(parts) > 0 {
+		fmt.Fprintf(&script, "add element %s %s %s { %s }\n",
+			m.Family, m.Table, m.Set, strings.Join(parts, ", "))
 	}
-	arg := "{ " + strings.Join(parts, ", ") + " }"
-	if err := m.run(ctx, "add", "element", m.Family, m.Table, m.Set, arg); err != nil {
-		return fmt.Errorf("populate set: %w", err)
+	if err := m.runScript(ctx, script.String()); err != nil {
+		return fmt.Errorf("sync set: %w", err)
 	}
 	log.Printf("firewall: synced %d MACs into %s/%s/%s", len(parts), m.Family, m.Table, m.Set)
 	return nil
@@ -330,6 +332,25 @@ func (m *Manager) run(ctx context.Context, args ...string) error {
 	cmd.Stderr = &stderr
 	if err := cmd.Run(); err != nil {
 		return fmt.Errorf("nft %s: %w (%s)", strings.Join(args, " "), err, strings.TrimSpace(stderr.String()))
+	}
+	return nil
+}
+
+// runScript feeds a multi-command script to `nft -f -`, which nftables
+// applies as one atomic transaction — either every command lands or none.
+func (m *Manager) runScript(ctx context.Context, script string) error {
+	if m.dryRun {
+		log.Printf("firewall(dry-run): nft -f - <<EOF\n%sEOF", script)
+		return nil
+	}
+	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, m.NftBin, "-f", "-") //nolint:gosec // see run()
+	cmd.Stdin = strings.NewReader(script)
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+	if err := cmd.Run(); err != nil {
+		return fmt.Errorf("nft -f -: %w (%s)", err, strings.TrimSpace(stderr.String()))
 	}
 	return nil
 }
