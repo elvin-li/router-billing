@@ -100,3 +100,13 @@ scheduler:
 # webhook:
 #   url: "https://shopkeeper.example/router-billing/hook"
 #   secret: "a-long-random-shared-secret"
+
+# 安全加固（可选）
+# security:
+#   # 反向代理白名单：仅当 TCP 对端命中此列表时才信任 X-Forwarded-For。
+#   # 默认为空 = 忽略 XFF（防止伪造头绕过按 IP 限流 / 污染审计日志的来源 IP）。
+#   # 部署在 nginx/Caddy 之后时填写代理地址（IP 或 CIDR）。
+#   trusted_proxies: ["127.0.0.1"]
+#   # password_strength: strict     # 用户密码策略：留空=仅长度；strict=常见弱密码拦截+字母数字
+#   # auto_cancel_stale_order_hours: 24  # 自动取消超时未支付订单
+

@@ -100,7 +100,7 @@ func (a *App) requireUser(h http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		uid := a.currentUserID(r)
 		if uid == 0 {
-			http.Redirect(w, r, "/user/login?next="+r.URL.RequestURI(), http.StatusSeeOther)
+			http.Redirect(w, r, "/user/login?next="+url.QueryEscape(r.URL.RequestURI()), http.StatusSeeOther)
 			return
 		}
 		if !verifyCSRF(r) {
@@ -142,7 +142,7 @@ func (a *App) handleUserLogin(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "method", http.StatusMethodNotAllowed)
 		return
 	}
-	if !a.loginLimiter.allow(clientIP(r)) {
+	if !a.loginLimiter.allow(a.clientIP(r)) {
 		http.Redirect(w, r, "/user/login?err=rate_limited", http.StatusSeeOther)
 		return
 	}
@@ -168,20 +168,17 @@ func (a *App) handleUserLogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if user == nil || bcrypt.CompareHashAndPassword([]byte(user.PasswordHash), []byte(password)) != nil {
-		a.DB.Audit(r.Context(), "user:"+phone, "login_failed", "", clientIP(r))
+		a.DB.Audit(r.Context(), "user:"+phone, "login_failed", "", a.clientIP(r))
 		http.Redirect(w, r, "/user/login?err=bad_credentials", http.StatusSeeOther)
 		return
 	}
 	if user.Suspended {
-		a.DB.Audit(r.Context(), "user:"+phone, "login_suspended", "", clientIP(r))
+		a.DB.Audit(r.Context(), "user:"+phone, "login_suspended", "", a.clientIP(r))
 		http.Redirect(w, r, "/user/login?err=suspended", http.StatusSeeOther)
 		return
 	}
 
-	next := r.PostForm.Get("next")
-	if !strings.HasPrefix(next, "/") {
-		next = "/user/me"
-	}
+	next := safeNextPath(r.PostForm.Get("next"), "/user/me")
 
 	// If 2FA is enrolled, hold the session in pending state until the user
 	// submits a valid TOTP code. Same shape as the admin 2FA flow (see
@@ -194,7 +191,7 @@ func (a *App) handleUserLogin(w http.ResponseWriter, r *http.Request) {
 	if user.TOTPSecret != "" {
 		if a.consumeTrustedDeviceCookie(w, r, user.ID) {
 			a.startUserSession(w, r, user)
-			a.DB.Audit(r.Context(), "user:"+user.Phone, "login", "", "via=trusted_device ip="+clientIP(r))
+			a.DB.Audit(r.Context(), "user:"+user.Phone, "login", "", "via=trusted_device ip="+a.clientIP(r))
 			http.Redirect(w, r, next, http.StatusSeeOther)
 			return
 		}
@@ -218,7 +215,7 @@ func (a *App) handleUserLogin(w http.ResponseWriter, r *http.Request) {
 	}
 
 	a.startUserSession(w, r, user)
-	a.DB.Audit(r.Context(), "user:"+user.Phone, "login", "", clientIP(r))
+	a.DB.Audit(r.Context(), "user:"+user.Phone, "login", "", a.clientIP(r))
 	http.Redirect(w, r, next, http.StatusSeeOther)
 }
 
@@ -241,7 +238,7 @@ func (a *App) handleUserRegister(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "method", http.StatusMethodNotAllowed)
 		return
 	}
-	if !a.registerLimiter.allow(clientIP(r)) {
+	if !a.registerLimiter.allow(a.clientIP(r)) {
 		http.Redirect(w, r, "/user/register?err=rate_limited", http.StatusSeeOther)
 		return
 	}
@@ -275,7 +272,7 @@ func (a *App) handleUserRegister(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	a.startUserSession(w, r, user)
-	a.DB.Audit(r.Context(), "user:"+phone, "register", "", clientIP(r))
+	a.DB.Audit(r.Context(), "user:"+phone, "register", "", a.clientIP(r))
 	http.Redirect(w, r, "/user/me?ok=registered", http.StatusSeeOther)
 }
 
@@ -604,7 +601,7 @@ func (a *App) handleUserNotificationPrefs(w http.ResponseWriter, r *http.Request
 	if on {
 		action = "notify_expiry_on"
 	}
-	a.DB.Audit(r.Context(), "user:"+user.Phone, action, "", "ip="+clientIP(r))
+	a.DB.Audit(r.Context(), "user:"+user.Phone, action, "", "ip="+a.clientIP(r))
 	http.Redirect(w, r, "/user/me?ok=prefs", http.StatusSeeOther)
 }
 
@@ -667,7 +664,7 @@ func (a *App) handleUserAccountExport(w http.ResponseWriter, r *http.Request) {
 	if err := enc.Encode(export); err != nil {
 		log.Printf("user account export %d: %v", uid, err)
 	}
-	a.DB.Audit(r.Context(), "user:"+user.Phone, "account_export", "", "ip="+clientIP(r))
+	a.DB.Audit(r.Context(), "user:"+user.Phone, "account_export", "", "ip="+a.clientIP(r))
 }
 
 // POST /user/account/delete  {password}
@@ -700,7 +697,7 @@ func (a *App) handleUserAccountDelete(w http.ResponseWriter, r *http.Request) {
 	pw := r.PostForm.Get("password")
 	if bcrypt.CompareHashAndPassword([]byte(user.PasswordHash), []byte(pw)) != nil {
 		a.DB.Audit(r.Context(), "user:"+user.Phone, "account_delete_failed", "",
-			"reason=bad_password ip="+clientIP(r))
+			"reason=bad_password ip="+a.clientIP(r))
 		http.Redirect(w, r, "/user/me?err=bad_credentials", http.StatusSeeOther)
 		return
 	}
@@ -710,7 +707,7 @@ func (a *App) handleUserAccountDelete(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	a.DB.Audit(r.Context(), "user:"+user.Phone, "account_self_deleted", "",
-		"ip="+clientIP(r))
+		"ip="+a.clientIP(r))
 	// Wipe the cookie on the calling browser.
 	http.SetCookie(w, &http.Cookie{
 		Name: userCookieName, Value: "", Path: "/", MaxAge: -1, HttpOnly: true,
@@ -746,7 +743,7 @@ func (a *App) handleUserSignOutOthers(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	a.DB.Audit(r.Context(), "user:"+user.Phone, "sessions_revoked_others", "",
-		"killed="+strconv.Itoa(int(n))+" ip="+clientIP(r))
+		"killed="+strconv.Itoa(int(n))+" ip="+a.clientIP(r))
 	http.Redirect(w, r, "/user/me?ok=signed_out_others", http.StatusSeeOther)
 }
 
@@ -787,18 +784,74 @@ func (a *App) handleUserPassword(w http.ResponseWriter, r *http.Request) {
 
 // --- small bits ---
 
-func clientIP(r *http.Request) string {
-	if h := r.Header.Get("X-Forwarded-For"); h != "" {
-		if i := strings.Index(h, ","); i >= 0 {
-			return strings.TrimSpace(h[:i])
-		}
-		return strings.TrimSpace(h)
+// safeNextPath sanitizes a user-supplied post-login redirect target.
+// Only same-site absolute paths are allowed. "//evil.com" (protocol-
+// relative), "/\evil.com" (browser backslash normalization) and full
+// URLs all fall back to `fallback` — otherwise the login/2FA flow is an
+// open redirect a phisher can chain onto our trusted domain.
+func safeNextPath(next, fallback string) string {
+	if next == "" || !strings.HasPrefix(next, "/") {
+		return fallback
 	}
+	if strings.HasPrefix(next, "//") || strings.HasPrefix(next, "/\\") {
+		return fallback
+	}
+	return next
+}
+
+// clientIP derives the caller's IP for rate-limit keys and audit rows.
+//
+// SECURITY: X-Forwarded-For is attacker-controlled unless the direct TCP
+// peer is a reverse proxy we operate. It is only honored when the peer
+// address matches config security.trusted_proxies; otherwise the header
+// is ignored entirely — a spoofed XFF would let one host rotate around
+// every per-IP rate limit (login, register, pay-create) and stuff fake
+// IPs into the audit log.
+//
+// When trusted, the chain is walked right-to-left and the first hop that
+// is NOT itself a trusted proxy wins (standard rightmost-untrusted rule,
+// robust against clients prepending junk).
+func (a *App) clientIP(r *http.Request) string {
+	peer := remoteHost(r)
+	if len(a.trustedProxies) == 0 || !ipInNets(peer, a.trustedProxies) {
+		return peer
+	}
+	xff := r.Header.Get("X-Forwarded-For")
+	if xff == "" {
+		return peer
+	}
+	hops := strings.Split(xff, ",")
+	for i := len(hops) - 1; i >= 0; i-- {
+		hop := strings.TrimSpace(hops[i])
+		if hop == "" {
+			continue
+		}
+		if !ipInNets(hop, a.trustedProxies) {
+			return hop
+		}
+	}
+	return peer
+}
+
+func remoteHost(r *http.Request) string {
 	host, _, err := net.SplitHostPort(r.RemoteAddr)
 	if err != nil {
 		return r.RemoteAddr
 	}
 	return host
+}
+
+func ipInNets(ipStr string, nets []*net.IPNet) bool {
+	ip := net.ParseIP(ipStr)
+	if ip == nil {
+		return false
+	}
+	for _, n := range nets {
+		if n.Contains(ip) {
+			return true
+		}
+	}
+	return false
 }
 
 // --- rate limiter ---

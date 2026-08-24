@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"html/template"
 	"log"
+	"net"
 	"net/http"
 	"path/filepath"
 	"strings"
@@ -57,6 +58,10 @@ type App struct {
 
 	waitMu  sync.Mutex
 	waiters map[string][]chan struct{} // order_no → pending wait channels
+
+	// trustedProxies is parsed once from config security.trusted_proxies.
+	// clientIP only honors X-Forwarded-For when the TCP peer is in here.
+	trustedProxies []*net.IPNet
 }
 
 func NewApp(cfg *config.Config, dbx *db.DB, svc *service.MACService) (*App, error) {
@@ -84,6 +89,13 @@ func NewApp(cfg *config.Config, dbx *db.DB, svc *service.MACService) (*App, erro
 
 		waiters: map[string][]chan struct{}{},
 	}
+
+	// Validated at config load already; re-parse here to wire the value in.
+	proxies, err := cfg.Security.TrustedProxyNets()
+	if err != nil {
+		return nil, fmt.Errorf("trusted proxies: %w", err)
+	}
+	app.trustedProxies = proxies
 
 	// Wire the v0.49 webhook delivery logger: every Notifier attempt
 	// (initial + each retry) lands a row in webhook_deliveries so

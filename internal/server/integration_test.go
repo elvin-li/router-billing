@@ -617,6 +617,14 @@ func TestSecureCookieSetWhenBehindTLS(t *testing.T) {
 func TestAdminLoginRateLimitByUsername(t *testing.T) {
 	app := setupTestApp(t)
 	app.adminLoginByUser = newRateLimiter(3, time.Hour)
+	// Trust the httptest peer (192.0.2.1) as a reverse proxy so the
+	// X-Forwarded-For rotation below is honored — otherwise clientIP
+	// ignores the header entirely (see security.trusted_proxies).
+	nets, err := (config.Security{TrustedProxies: []string{"192.0.2.0/24"}}).TrustedProxyNets()
+	if err != nil {
+		t.Fatal(err)
+	}
+	app.trustedProxies = nets
 	h := app.Routes()
 
 	// 3 attempts with wrong password but the SAME username are allowed
