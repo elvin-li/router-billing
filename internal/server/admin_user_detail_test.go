@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"router-billing/internal/db"
 	"router-billing/internal/models"
 )
 
@@ -41,7 +42,8 @@ func TestAdminUserDetailRendersFullProfile(t *testing.T) {
 		"13800140000",       // phone
 		"AA:BB:CC:DD:EE:F0", // MAC
 		"ORD-DETAIL-1",      // order
-		"tok-deta",          // session token prefix (slice 0:8 = "tok-deta")
+		// session token hash prefix (page shows first 8 chars of the hash)
+		db.HashToken("tok-detail-1")[:8],
 		"10.0.0.99",         // IP from audit
 		"最近 30 条审计",
 		"活动会话",
@@ -152,8 +154,8 @@ func TestListSessionsForUserOnlyReturnsLiveUserSessions(t *testing.T) {
 	if err := app.DB.CreateSession(ctx, "tok-stale", "user", u.Phone, &u.ID, time.Hour); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := app.DB.Exec(ctx, `UPDATE sessions SET expires_at = ? WHERE token = 'tok-stale'`,
-		time.Now().UTC().Add(-time.Hour)); err != nil {
+	if _, err := app.DB.Exec(ctx, `UPDATE sessions SET expires_at = ? WHERE token = ?`,
+		time.Now().UTC().Add(-time.Hour), db.HashToken("tok-stale")); err != nil {
 		t.Fatal(err)
 	}
 	// 1 admin session that happens to also have a user_id (shouldn't surface).
@@ -168,7 +170,7 @@ func TestListSessionsForUserOnlyReturnsLiveUserSessions(t *testing.T) {
 	if len(sessions) != 1 {
 		t.Fatalf("expected 1 live user session; got %d (%+v)", len(sessions), sessions)
 	}
-	if sessions[0].Token != "tok-live" {
+	if sessions[0].Token != db.HashToken("tok-live") {
 		t.Errorf("wrong session returned: %s", sessions[0].Token)
 	}
 }

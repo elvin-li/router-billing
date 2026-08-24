@@ -2,8 +2,10 @@ package db
 
 import (
 	"context"
+	"crypto/sha256"
 	"database/sql"
 	_ "embed"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"os"
@@ -825,6 +827,15 @@ func (d *DB) CancelStalePendingOrders(ctx context.Context, olderThan time.Durati
 
 // ---------- Sessions ----------
 
+// HashToken maps a raw session token (the cookie value) to the value stored
+// in sessions.token. Tokens are stored as SHA-256 digests so a leaked DB
+// file or backup cannot be replayed as live cookies. The raw token only ever
+// lives in the client's cookie.
+func HashToken(raw string) string {
+	sum := sha256.Sum256([]byte(raw))
+	return hex.EncodeToString(sum[:])
+}
+
 func (d *DB) CreateSession(ctx context.Context, token, kind, subject string, userID *int64, ttl time.Duration) error {
 	var uid sql.NullInt64
 	if userID != nil {
@@ -832,7 +843,7 @@ func (d *DB) CreateSession(ctx context.Context, token, kind, subject string, use
 	}
 	_, err := d.conn.ExecContext(ctx,
 		`INSERT INTO sessions (token, kind, subject, user_id, expires_at) VALUES (?, ?, ?, ?, ?)`,
-		token, kind, subject, uid, time.Now().UTC().Add(ttl))
+		HashToken(token), kind, subject, uid, time.Now().UTC().Add(ttl))
 	return err
 }
 
@@ -842,9 +853,10 @@ type SessionRow struct {
 	UserID  *int64
 }
 
+// GetSession looks up a session by its raw token (cookie value).
 func (d *DB) GetSession(ctx context.Context, token string) (*SessionRow, error) {
 	row := d.conn.QueryRowContext(ctx,
-		`SELECT kind, subject, user_id FROM sessions WHERE token = ? AND expires_at > CURRENT_TIMESTAMP`, token)
+		`SELECT kind, subject, user_id FROM sessions WHERE token = ? AND expires_at > CURRENT_TIMESTAMP`, HashToken(token))
 	var s SessionRow
 	var uid sql.NullInt64
 	err := row.Scan(&s.Kind, &s.Subject, &uid)
@@ -861,8 +873,19 @@ func (d *DB) GetSession(ctx context.Context, token string) (*SessionRow, error) 
 	return &s, nil
 }
 
+// DeleteSession removes a session by its raw token (cookie value). For
+// revoking a row picked from a session list (which only exposes the stored
+// hash), use DeleteSessionByHash instead.
 func (d *DB) DeleteSession(ctx context.Context, token string) error {
-	_, err := d.conn.ExecContext(ctx, `DELETE FROM sessions WHERE token = ?`, token)
+	_, err := d.conn.ExecContext(ctx, `DELETE FROM sessions WHERE token = ?`, HashToken(token))
+	return err
+}
+
+// DeleteSessionByHash removes a session by its stored token hash — the value
+// surfaced by ListActiveSessions / ListSessionsForUser. Used by the admin
+// sessions page, whose revoke form round-trips the hash, never a raw token.
+func (d *DB) DeleteSessionByHash(ctx context.Context, tokenHash string) error {
+	_, err := d.conn.ExecContext(ctx, `DELETE FROM sessions WHERE token = ?`, tokenHash)
 	return err
 }
 
@@ -881,7 +904,7 @@ func (d *DB) DeleteSessionsByUserID(ctx context.Context, userID int64) (int64, e
 
 // SessionRecord is one row of the live-sessions list used by /admin/sessions.
 type SessionRecord struct {
-	Token     string // server-side primary key — shown truncated in UI
+	Token     string // SHA-256 hash of the cookie token — safe to show truncated in UI
 	Kind      string // "admin" | "user"
 	Subject   string // username for admin, phone for user
 	UserID    *int64 // present for kind=user
@@ -950,12 +973,12 @@ func (d *DB) ListSessionsForUser(ctx context.Context, userID int64) ([]SessionRe
 	return out, rows.Err()
 }
 
-// DeleteAllAdminSessionsExcept logs out every admin session except `keep`.
-// Useful for "I lost my laptop" — keep current cookie alive, kill the rest.
-// Returns the number of sessions deleted.
+// DeleteAllAdminSessionsExcept logs out every admin session except `keep`
+// (a raw cookie token). Useful for "I lost my laptop" — keep current cookie
+// alive, kill the rest. Returns the number of sessions deleted.
 func (d *DB) DeleteAllAdminSessionsExcept(ctx context.Context, keep string) (int64, error) {
 	res, err := d.conn.ExecContext(ctx,
-		`DELETE FROM sessions WHERE kind = 'admin' AND token != ?`, keep)
+		`DELETE FROM sessions WHERE kind = 'admin' AND token != ?`, HashToken(keep))
 	if err != nil {
 		return 0, err
 	}
@@ -977,12 +1000,12 @@ func (d *DB) DeleteAllUserSessions(ctx context.Context) (int64, error) {
 }
 
 // DeleteUserSessionsExcept is the user equivalent — logs out every session
-// belonging to userID except `keep`, used by "sign me out of all other
-// devices". Returns the number of sessions deleted.
+// belonging to userID except `keep` (a raw cookie token), used by "sign me
+// out of all other devices". Returns the number of sessions deleted.
 func (d *DB) DeleteUserSessionsExcept(ctx context.Context, userID int64, keep string) (int64, error) {
 	res, err := d.conn.ExecContext(ctx,
 		`DELETE FROM sessions WHERE kind = 'user' AND user_id = ? AND token != ?`,
-		userID, keep)
+		userID, HashToken(keep))
 	if err != nil {
 		return 0, err
 	}

@@ -52,7 +52,64 @@ func runMigrations(d *sql.DB) error {
 			return fmt.Errorf("backfill sessions.subject: %w", err)
 		}
 	}
+
+	if err := migrateSessionTokensToHashes(d); err != nil {
+		return fmt.Errorf("hash session tokens: %w", err)
+	}
 	return nil
+}
+
+// schemaVersionSessionHashes marks the one-off migration that rewrote
+// sessions.token from raw cookie values to SHA-256 hashes (v0.97). Tracked
+// via PRAGMA user_version because raw tokens and hashes are both 64-char hex
+// — indistinguishable by format.
+const schemaVersionSessionHashes = 1
+
+// migrateSessionTokensToHashes rewrites every stored session token to its
+// SHA-256 hash, in one transaction, exactly once. Cookies on client devices
+// hold the raw token and keep working: lookups hash the cookie value before
+// comparing, so live sessions survive the upgrade with no forced re-login.
+func migrateSessionTokensToHashes(d *sql.DB) error {
+	var version int
+	if err := d.QueryRow(`PRAGMA user_version`).Scan(&version); err != nil {
+		return err
+	}
+	if version >= schemaVersionSessionHashes {
+		return nil
+	}
+	tx, err := d.Begin()
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	rows, err := tx.Query(`SELECT token FROM sessions`)
+	if err != nil {
+		return err
+	}
+	var tokens []string
+	for rows.Next() {
+		var t string
+		if err := rows.Scan(&t); err != nil {
+			rows.Close()
+			return err
+		}
+		tokens = append(tokens, t)
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	for _, t := range tokens {
+		if _, err := tx.Exec(`UPDATE sessions SET token = ? WHERE token = ?`, HashToken(t), t); err != nil {
+			return err
+		}
+	}
+	// PRAGMA doesn't support placeholders; the value is a trusted constant.
+	if _, err := tx.Exec(fmt.Sprintf("PRAGMA user_version = %d", schemaVersionSessionHashes)); err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
 func columnExists(d *sql.DB, table, column string) bool {
