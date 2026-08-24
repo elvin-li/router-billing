@@ -204,6 +204,28 @@ func (d *DB) queryMACs(ctx context.Context, q string, args ...any) ([]models.MAC
 	return out, rows.Err()
 }
 
+// CountMACsByUser returns user_id → number of MAC rows owned. One GROUP BY
+// instead of shipping every MAC row to Go just to count (the /admin/users
+// page did exactly that).
+func (d *DB) CountMACsByUser(ctx context.Context) (map[int64]int, error) {
+	rows, err := d.conn.QueryContext(ctx,
+		`SELECT user_id, COUNT(*) FROM macs WHERE user_id IS NOT NULL GROUP BY user_id`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := map[int64]int{}
+	for rows.Next() {
+		var uid int64
+		var n int
+		if err := rows.Scan(&uid, &n); err != nil {
+			return nil, err
+		}
+		out[uid] = n
+	}
+	return out, rows.Err()
+}
+
 func (d *DB) GetMAC(ctx context.Context, mac string) (*models.MAC, error) {
 	row := d.conn.QueryRowContext(ctx, `SELECT `+macCols+` FROM macs WHERE mac = ?`, mac)
 	m, err := scanMAC(row)
