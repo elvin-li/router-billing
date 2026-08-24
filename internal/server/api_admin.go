@@ -186,17 +186,13 @@ func (a *App) handleAPIMACList(w http.ResponseWriter, r *http.Request, _ string)
 			return
 		}
 	} else {
-		// No filters — limit the unfiltered list too, since the legacy
-		// no-cap behavior could ship 10k+ rows on busy installs.
-		all, lerr := a.DB.ListMACs(r.Context())
-		if lerr != nil {
-			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": lerr.Error()})
+		// No filters — SearchMACs with an empty query applies the LIMIT
+		// in SQL instead of shipping every row to Go and truncating.
+		macs, err = a.DB.SearchMACs(r.Context(), "", "", limit)
+		if err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 			return
 		}
-		if len(all) > limit {
-			all = all[:limit]
-		}
-		macs = all
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"macs": macs, "count": len(macs)})
 }

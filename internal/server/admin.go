@@ -271,13 +271,11 @@ func errLabel(code string) string {
 func (a *App) handleAdminMACs(w http.ResponseWriter, r *http.Request) {
 	q := strings.TrimSpace(r.URL.Query().Get("q"))
 	status := strings.TrimSpace(r.URL.Query().Get("status"))
-	var macs []models.MAC
-	var err error
-	if q == "" && status == "" {
-		macs, err = a.DB.ListMACs(r.Context())
-	} else {
-		macs, err = a.DB.SearchMACs(r.Context(), q, status, 500)
-	}
+	// Always go through SearchMACs so the unfiltered view gets the same
+	// 500-row cap as the filtered one — ListMACs returned EVERY row,
+	// which on a long-running install rendered a multi-megabyte page.
+	// The Stats card still shows the true total.
+	macs, err := a.DB.SearchMACs(r.Context(), q, status, 500)
 	if err != nil {
 		http.Error(w, "db", http.StatusInternalServerError)
 		return
@@ -546,12 +544,9 @@ func (a *App) handleAdminUsers(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "db", http.StatusInternalServerError)
 		return
 	}
-	macCount := map[int64]int{}
-	macs, _ := a.DB.ListMACs(r.Context())
-	for _, m := range macs {
-		if m.UserID != nil {
-			macCount[*m.UserID]++
-		}
+	macCount, _ := a.DB.CountMACsByUser(r.Context())
+	if macCount == nil {
+		macCount = map[int64]int{}
 	}
 	// Allow the template to read raw query params (e.g. flash data from
 	// reset-password redirects). Keeps the data shape simple.
