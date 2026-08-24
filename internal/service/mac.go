@@ -86,13 +86,27 @@ func (s *MACService) Replace(ctx context.Context, userID int64, oldMac, newMac, 
 }
 
 // Resync rebuilds the firewall set from active MACs in DB.
+//
+// MACs carrying a time-of-day schedule are only included while their
+// window is open — otherwise a resync (startup, admin-triggered, or the
+// periodic reconcile) would grant a schedule-blocked device access until
+// the next EnforceSchedules tick removed it again.
 func (s *MACService) Resync(ctx context.Context) error {
 	macs, err := s.DB.ListActiveMACs(ctx)
 	if err != nil {
 		return err
 	}
+	now := time.Now()
 	out := make([]string, 0, len(macs))
 	for _, m := range macs {
+		if m.ScheduleJSON != "" {
+			sched, err := models.ParseSchedule(m.ScheduleJSON)
+			if err == nil && !sched.Active(now) {
+				continue
+			}
+			// Parse errors fail open (include the MAC) — matching
+			// EnforceSchedules, which also skips unparseable schedules.
+		}
 		out = append(out, m.Mac)
 	}
 	return s.FW.Sync(ctx, out)

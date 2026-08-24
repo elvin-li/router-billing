@@ -333,8 +333,18 @@ func (d *DB) ReplaceMAC(ctx context.Context, userID int64, oldMac, newMac, label
 }
 
 // ExpireDueMACs marks expired MACs and returns the ones newly expired.
+// SELECT + UPDATE run in one transaction so the returned list is exactly
+// the set of rows the UPDATE flipped — a MAC crossing the expiry boundary
+// between the two statements can neither be missed by the caller's
+// firewall revoke nor flipped without being reported.
 func (d *DB) ExpireDueMACs(ctx context.Context) ([]string, error) {
-	rows, err := d.conn.QueryContext(ctx, `SELECT mac FROM macs WHERE status = 'active' AND expires_at <= CURRENT_TIMESTAMP`)
+	tx, err := d.conn.BeginTx(ctx, nil)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	rows, err := tx.QueryContext(ctx, `SELECT mac FROM macs WHERE status = 'active' AND expires_at <= CURRENT_TIMESTAMP`)
 	if err != nil {
 		return nil, err
 	}
@@ -347,12 +357,18 @@ func (d *DB) ExpireDueMACs(ctx context.Context) ([]string, error) {
 		}
 		expired = append(expired, m)
 	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return nil, err
+	}
 	rows.Close()
 	if len(expired) == 0 {
 		return nil, nil
 	}
-	_, err = d.conn.ExecContext(ctx, `UPDATE macs SET status = 'expired', updated_at = CURRENT_TIMESTAMP WHERE status = 'active' AND expires_at <= CURRENT_TIMESTAMP`)
-	return expired, err
+	if _, err := tx.ExecContext(ctx, `UPDATE macs SET status = 'expired', updated_at = CURRENT_TIMESTAMP WHERE status = 'active' AND expires_at <= CURRENT_TIMESTAMP`); err != nil {
+		return nil, err
+	}
+	return expired, tx.Commit()
 }
 
 // ---------- Orders ----------

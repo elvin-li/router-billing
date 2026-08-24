@@ -76,6 +76,27 @@ func (a *App) handlePayCreate(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// Validate the provider BEFORE inserting the order row — otherwise an
+	// unknown/disabled provider leaves an orphan `pending` order behind
+	// that the fallback poller keeps re-selecting for 30 minutes and that
+	// pollutes the admin stale-pending attention counter.
+	provider := strings.ToLower(req.Provider)
+	switch provider {
+	case "wechat":
+		if a.WeChat == nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "微信支付未启用"})
+			return
+		}
+	case "alipay":
+		if a.Alipay == nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "支付宝支付未启用"})
+			return
+		}
+	default:
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "未知支付方式"})
+		return
+	}
+
 	orderNo := newOrderNo()
 	order := &models.Order{
 		OrderNo:       orderNo,
@@ -84,7 +105,7 @@ func (a *App) handlePayCreate(w http.ResponseWriter, r *http.Request) {
 		Days:          plan.Days,
 		AmountCents:   plan.PriceCents,
 		Status:        models.OrderPending,
-		PaymentMethod: strings.ToLower(req.Provider),
+		PaymentMethod: provider,
 		UserID:        userID,
 	}
 	if err := a.DB.CreateOrder(r.Context(), order); err != nil {
@@ -96,34 +117,25 @@ func (a *App) handlePayCreate(w http.ResponseWriter, r *http.Request) {
 	subject := fmt.Sprintf("路由器上网-%s-%s", plan.Label, mac)
 	var qrPayload string
 
-	switch order.PaymentMethod {
+	switch provider {
 	case "wechat":
-		if a.WeChat == nil {
-			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "微信支付未启用"})
-			return
-		}
 		res, err := a.WeChat.Precreate(r.Context(), orderNo, subject, plan.PriceCents)
 		if err != nil {
 			log.Printf("wechat precreate: %v", err)
+			a.failOrderAfterPrecreate(r.Context(), orderNo)
 			writeJSON(w, http.StatusBadGateway, map[string]string{"error": "微信下单失败"})
 			return
 		}
 		qrPayload = res.QRCode
 	case "alipay":
-		if a.Alipay == nil {
-			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "支付宝支付未启用"})
-			return
-		}
 		res, err := a.Alipay.Precreate(r.Context(), orderNo, subject, plan.PriceCents)
 		if err != nil {
 			log.Printf("alipay precreate: %v", err)
+			a.failOrderAfterPrecreate(r.Context(), orderNo)
 			writeJSON(w, http.StatusBadGateway, map[string]string{"error": "支付宝下单失败"})
 			return
 		}
 		qrPayload = res.QRCode
-	default:
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "未知支付方式"})
-		return
 	}
 
 	writeJSON(w, http.StatusOK, payCreateResp{
@@ -134,6 +146,17 @@ func (a *App) handlePayCreate(w http.ResponseWriter, r *http.Request) {
 		Plan:    req.Plan,
 		Days:    plan.Days,
 	})
+}
+
+// failOrderAfterPrecreate retires an order whose upstream precreate call
+// failed — the user got an error and will retry with a fresh order, so
+// leaving this one `pending` only feeds the poller dead work. Best-effort:
+// a lost race with a payment (can't happen before the QR exists, but be
+// safe) leaves the order alone thanks to CancelPendingOrder's status guard.
+func (a *App) failOrderAfterPrecreate(ctx context.Context, orderNo string) {
+	if _, err := a.DB.CancelPendingOrder(ctx, orderNo); err != nil {
+		log.Printf("fail order %s after precreate error: %v", orderNo, err)
+	}
 }
 
 // GET /api/pay/status?order_no=...
@@ -189,15 +212,20 @@ func (a *App) queryOrder(ctx context.Context, o models.Order) {
 	switch o.PaymentMethod {
 	case "wechat":
 		if a.WeChat == nil {
+			// Provider disabled since the order was created. Mark queried
+			// anyway so the poller doesn't reselect the row every tick.
+			_ = a.DB.MarkOrderQueried(ctx, o.OrderNo)
 			return
 		}
 		notice, paid, err = a.WeChat.Query(ctx, o.OrderNo)
 	case "alipay":
 		if a.Alipay == nil {
+			_ = a.DB.MarkOrderQueried(ctx, o.OrderNo)
 			return
 		}
 		notice, paid, err = a.Alipay.Query(ctx, o.OrderNo)
 	default:
+		_ = a.DB.MarkOrderQueried(ctx, o.OrderNo)
 		return
 	}
 	_ = a.DB.MarkOrderQueried(ctx, o.OrderNo)
@@ -314,6 +342,12 @@ func (a *App) finalizeOrder(ctx context.Context, orderNo, tradeNo string) error 
 		return nil
 	}
 	if err := a.MACSvc.GrantFromOrder(ctx, order); err != nil {
+		// The order is already marked paid; a webhook/poller retry will
+		// see transitioned=false and silently no-op, so this failure
+		// would otherwise be invisible. Land an audit row the admin can
+		// see; the hourly firewall reconcile self-heals nft-set drift.
+		a.DB.Audit(ctx, "system", "pay_grant_failed", order.Mac,
+			fmt.Sprintf("order=%s err=%v", order.OrderNo, err))
 		return err
 	}
 	// Wake any browser long-polling /api/pay/wait for this order.

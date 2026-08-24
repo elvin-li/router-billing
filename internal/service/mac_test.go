@@ -268,6 +268,44 @@ func TestResyncMirrorsActiveMACs(t *testing.T) {
 	}
 }
 
+// Resync must exclude MACs whose time-of-day schedule window is currently
+// closed — otherwise a resync (boot / admin / periodic reconcile) would
+// grant a schedule-blocked device access until the next EnforceSchedules
+// tick removed it again.
+func TestResyncRespectsSchedules(t *testing.T) {
+	svc, dbx, fw := newTestSvc(t)
+	ctx := context.Background()
+
+	_, _ = svc.Extend(ctx, "AA:BB:CC:DD:EE:FF", "always-on", 30, nil)
+	_, _ = svc.Extend(ctx, "11:22:33:44:55:66", "night-only", 30, nil)
+
+	// Build a schedule whose window is provably CLOSED right now: allow
+	// only a 1-minute slot starting 2 hours from now, today.
+	now := time.Now()
+	start := (now.Hour()*60 + now.Minute() + 120) % 1440
+	wd := int(now.Weekday())
+	if wd == 0 {
+		wd = 7
+	}
+	closed := models.MacSchedule{Days: []int{wd}, StartMin: start, EndMin: (start + 1) % 1440}
+	if closed.Active(now) {
+		t.Fatal("test setup: schedule should be closed now")
+	}
+	if err := dbx.SetMACSchedule(ctx, "11:22:33:44:55:66", closed.JSON()); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := svc.Resync(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if !fw.set["AA:BB:CC:DD:EE:FF"] {
+		t.Error("unscheduled MAC missing after Resync")
+	}
+	if fw.set["11:22:33:44:55:66"] {
+		t.Error("schedule-closed MAC must NOT be in fw set after Resync")
+	}
+}
+
 func TestExpireDueRemovesFromFirewall(t *testing.T) {
 	svc, _, fw := newTestSvc(t)
 	ctx := context.Background()
