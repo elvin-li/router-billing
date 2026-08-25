@@ -37,7 +37,11 @@ RUN apk add --no-cache nftables iproute2 ca-certificates tzdata && \
 
 WORKDIR /app
 COPY --from=build /out/router-billing /usr/local/bin/router-billing
-COPY web /app/web
+# Match config.example.yaml's web_root (and the .ipk layout) — templates
+# used to live at /app/web while the mounted example config pointed at
+# /usr/share/router-billing/web, so the server failed template parsing on
+# boot and `docker compose up` never actually worked.
+COPY web /usr/share/router-billing/web
 COPY config.example.yaml /app/config.example.yaml
 
 # Volumes for state.
@@ -46,6 +50,12 @@ RUN mkdir -p /var/lib/router-billing /etc/router-billing && \
 VOLUME ["/var/lib/router-billing", "/etc/router-billing"]
 
 EXPOSE 8080
+
+# /healthz is the unauthenticated liveness endpoint (200 when the DB pings).
+# busybox wget ships with alpine, so no extra package is needed. Port is the
+# dev default from config.example.yaml; override the CMD if you change listen.
+HEALTHCHECK --interval=30s --timeout=3s --start-period=10s --retries=3 \
+    CMD wget -q -O /dev/null http://127.0.0.1:8080/healthz || exit 1
 
 # nftables needs CAP_NET_ADMIN, so when actually exercising firewall ops
 # users must `docker run --cap-add=NET_ADMIN`. For test runs (no real fw)

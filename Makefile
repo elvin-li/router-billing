@@ -1,10 +1,12 @@
 APP        := router-billing
 BUILD_DIR  := build
-VERSION    := $(shell git rev-parse --short HEAD 2>/dev/null || echo dev)
+# ?= so release builds can stamp the real tag: `make ipk VERSION=0.108`.
+# Default stays the short commit hash for dev builds.
+VERSION    ?= $(shell git rev-parse --short HEAD 2>/dev/null || echo dev)
 LDFLAGS    := -s -w -X main.version=$(VERSION)
 GOFLAGS    := -trimpath -ldflags="$(LDFLAGS)"
 
-.PHONY: all deps arm64 armv7 local pack-arm64 clean fmt vet
+.PHONY: all deps arm64 armv7 local pack-arm64 ipk clean fmt vet
 
 all: arm64
 
@@ -57,6 +59,8 @@ ipk: arm64
 	           $(BUILD_DIR)/ipk/data/usr/share/router-billing/web/static \
 	           $(BUILD_DIR)/ipk/data/var/lib/router-billing
 	install -m 0755 $(BUILD_DIR)/$(APP)-arm64 $(BUILD_DIR)/ipk/data/usr/bin/$(APP)
+	# 0600: the live config holds admin credentials, pay keys and API
+	# tokens — it must not be world-readable on the router.
 	install -m 0600 config.example.yaml $(BUILD_DIR)/ipk/data/etc/router-billing/config.yaml
 	cp -r web/templates/. $(BUILD_DIR)/ipk/data/usr/share/router-billing/web/templates/
 	cp -r web/static/.    $(BUILD_DIR)/ipk/data/usr/share/router-billing/web/static/
@@ -67,13 +71,20 @@ ipk: arm64
 	# control tree
 	install -d $(BUILD_DIR)/ipk/control
 	install -m 0644 deploy/openwrt/ipk/control $(BUILD_DIR)/ipk/control/control
+	# Stamp the real version into the staged control file — the source
+	# control's hardcoded Version meant every .ipk installed as the same
+	# version and `opkg upgrade` never saw anything to do.
+	sed -i.bak 's/^Version:.*/Version: $(VERSION)/' $(BUILD_DIR)/ipk/control/control && rm -f $(BUILD_DIR)/ipk/control/control.bak
 	install -m 0755 deploy/openwrt/ipk/postinst $(BUILD_DIR)/ipk/control/postinst
 	install -m 0755 deploy/openwrt/ipk/prerm $(BUILD_DIR)/ipk/control/prerm
 	install -m 0644 deploy/openwrt/ipk/conffiles $(BUILD_DIR)/ipk/control/conffiles
-	# tarballs
-	cd $(BUILD_DIR)/ipk/data && tar -czf ../data.tar.gz --owner=0 --group=0 .
-	cd $(BUILD_DIR)/ipk/control && tar -czf ../control.tar.gz --owner=0 --group=0 .
+	# tarballs (GNU tar flags — on macOS use gnu-tar: `brew install gnu-tar`)
+	cd $(BUILD_DIR)/ipk/data && tar -czf ../data.tar.gz --numeric-owner --owner=0 --group=0 .
+	cd $(BUILD_DIR)/ipk/control && tar -czf ../control.tar.gz --numeric-owner --owner=0 --group=0 .
 	echo '2.0' > $(BUILD_DIR)/ipk/debian-binary
-	# Combine via ar (BSD ar on macOS / GNU ar on linux both work)
+	# Combine via ar. Remove any previous archive first: `ar -r` UPDATES an
+	# existing archive in place, so a stale .ipk could keep old member
+	# ordering — opkg requires debian-binary to be the FIRST member.
+	rm -f $(BUILD_DIR)/$(APP)_$(VERSION)_aarch64_generic.ipk
 	cd $(BUILD_DIR)/ipk && ar -rc ../$(APP)_$(VERSION)_aarch64_generic.ipk debian-binary control.tar.gz data.tar.gz
 	@echo "==> $(BUILD_DIR)/$(APP)_$(VERSION)_aarch64_generic.ipk ($$(ls -lh $(BUILD_DIR)/$(APP)_$(VERSION)_aarch64_generic.ipk | awk '{print $$5}'))"

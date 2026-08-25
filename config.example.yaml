@@ -14,6 +14,11 @@ portal_port: 8080
 
 # 管理员后台凭据。首次启动后请尽快修改。
 # 可只用 admin: 单个，或用 admins: 列表多账号
+# 校验规则（--check-config 会检查）：
+#   - 明文 password 至少 8 个字符（推荐用 password_hash 代替）
+#   - password_hash 必须是合法 bcrypt（--gen-password-hash 生成）
+#   - totp_secret 必须是合法 base32（--gen-totp-secret 生成）
+#   - password 和 password_hash 二选一，用户名不能重复
 admin:
   username: admin
   password: changeme
@@ -24,9 +29,16 @@ admin:
 #   - username: alice
 #     password_hash: "$2a$10$..."
 #   - username: bob
-#     password: plain-or-hashed-doesnt-matter
+#     password: use-hash-in-production
 
-# Prometheus /metrics 鉴权 token（留空 = 端点公开）
+# /api/admin/* 的 Bearer token（可选）。token 至少 16 个字符且不能重复。
+# api_tokens:
+#   - token: "long-random-string-at-least-16-chars"
+#     label: monitoring
+#     readonly: true          # 只允许 GET
+#     rate_limit_per_min: 60  # 0 = 不限流
+
+# Prometheus /metrics 鉴权 token（留空 = 端点公开；设置时至少 8 个字符）
 # metrics_token: "long-random-string"
 
 # SSID 信息，仅给 /admin/ssid-cards 打印海报用，不影响实际网络。
@@ -96,7 +108,8 @@ scheduler:
 #   interval: 24h
 
 # 出站 webhook（任何 payment/redeem/grant/revoke 都会 POST 到这个 URL）
-# 接收端可用 secret 做 HMAC-SHA256 验签：header X-Router-Billing-Signature: sha256=<hex>
+# 接收端用 secret 做 HMAC-SHA256 验签：header X-Router-Billing-Signature: sha256=<hex>
+# 配置了 url 就必须配 secret（没有签名的 webhook 接收端无法验证真伪）。
 # webhook:
 #   url: "https://shopkeeper.example/router-billing/hook"
 #   secret: "a-long-random-shared-secret"

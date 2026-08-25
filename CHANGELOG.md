@@ -293,6 +293,87 @@ renders the admin shell. New regression tests cover the schedule
 firewall eligibility, logout semantics, login error surfacing, the
 sighting recency pill, and export filenames/case-insensitivity.
 
+## v0.108 — Config strictness, packaging fixes, CI stops trusting itself
+
+Platform pass over config validation, the Docker dev path, the .ipk
+packaging, and the CI checks that were quietly green while things were
+broken. Extends v0.104's strict `--check-config` — every item below
+fails at load time instead of misbehaving at runtime.
+
+A. Config validation holes closed (all previously passed --check-config):
+
+- `security.password_strength` typos (e.g. "strong") silently meant
+  lax — a hidden security downgrade. Now only ""/lax/strict validate.
+- Empty `api_tokens[].token` entries were silently ignored at runtime
+  (operator believes a token exists; every request 401s). Tokens now
+  must be ≥16 chars, unique, non-empty; rate_limit_per_min ≥ 0.
+- `password_hash` wasn't checked to be bcrypt — pasting a sha256 hex
+  (or the plaintext) locked the admin out with no diagnostic. Same for
+  non-base32 `totp_secret`: Verify() always false = permanent 2FA
+  lockout discovered at the login prompt. Both are validated at load.
+- Plaintext admin passwords must be ≥8 chars (bcrypt hashes are
+  exempt; `changeme` in the example config remains exactly at the
+  floor). Setting both password AND password_hash is now an error, as
+  are duplicate admin usernames across admin:/admins[].
+- `listen`/`portal_port`/`portal_host` were never validated — a
+  missing colon in listen passed --check-config and died at bind.
+- Negative durations (scheduler/backup/walled-garden intervals) were
+  silently replaced by hardcoded fallbacks deep in each goroutine.
+- `firewall.backend` typos passed --check-config, then log.Fatal'd at
+  boot. Validation mirrors firewall.NewBackend's accepted names.
+- `sms.provider` typos and incomplete aliyun credentials degraded to
+  "SMS disabled" with only a log line — password-reset texts just
+  never arrived in prod. Now rejected, along with out-of-range
+  expiry_reminder_days / admin_digest_hour.
+- `webhook.url` must be an absolute http(s) URL and requires a
+  secret — unsigned webhooks can't be verified by the receiver, so
+  anyone finding the endpoint could forge payment events.
+- Walled-garden domain entries that are URLs ("https://x/path") never
+  resolve; the resolver retried the bogus lookup forever while
+  payment hosts stayed unreachable. Bare domains enforced.
+- Security knob ranges (admin_session_hours, user_session_days,
+  audit_log_keep, auto_cancel_stale_order_hours, hsts_max_age_seconds)
+  are rejected when out of documented range instead of being silently
+  clamped to something the operator didn't ask for.
+
+B. Docker dev path was entirely broken and CI was green: the image put
+web assets at /app/web while the compose-mounted config.example.yaml
+points web_root at /usr/share/router-billing/web — template parsing
+fatal'd on boot, so `docker compose up` never worked. Assets moved to
+the config's path (matching the .ipk layout). Added a /healthz-based
+HEALTHCHECK to the image, and cap_drop ALL + no-new-privileges +
+healthcheck to docker-compose (image already ran non-root as `rb`).
+
+C. .ipk packaging: the control file's hardcoded `Version: 0.6` was
+shipped in every build — `opkg upgrade` never saw a newer version.
+The Makefile now stamps VERSION into the staged control, and
+release.yml passes the tag (v0.108 → 0.108) so the binary's
+--version, the ipk filename and the control field all agree. Also:
+`ipk` added to .PHONY; the old archive is removed before `ar -rc`
+(ar UPDATES an existing archive, risking stale member order —
+debian-binary must be first for opkg); tar uses --numeric-owner; and
+/etc/router-billing/config.yaml ships 0600 instead of world-readable
+0644 (it holds admin credentials, pay keys and API tokens).
+
+D. CI false greens: build-arm64 would happily upload an x86-64 binary
+if GOARCH regressed (now `file`-checked for aarch64); `make ipk`
+exiting 0 said nothing about installability (structure, member order,
+control fields, version/filename agreement and config perms are now
+verified); and the Docker image was never built at all (new job:
+build, assert non-root uid, --check-config in-container, and boot to
+a healthy /healthz with all capabilities dropped).
+
+E. `--gen-password-hash` echoed the password to the terminal despite
+its "no echo if TTY" comment — it now uses term.ReadPassword on TTYs
+(piped stdin still works) and enforces the same 8-char floor as the
+config validator.
+
+Tests: config_test.go grows a Load()-based rejection table covering
+every new validation rule, acceptance tests for hardened configs and
+password_strength case-variants, and a test pinning
+config.example.yaml itself as valid so the example can't drift from
+strict --check-config even if the workflow step is reshuffled.
+
 ## v0.106 — Payment hardening: refund-replay resurrection, amount cross-check, lost grants
 
 Money/security pass over the payment finalize path.

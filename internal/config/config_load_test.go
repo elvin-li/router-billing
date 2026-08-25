@@ -18,7 +18,7 @@ func writeCfg(t *testing.T, yaml string) string {
 	return p
 }
 
-func TestLoadMinimalAppliesDefaults(t *testing.T) {
+func TestLoadMinimalDefaultsExhaustive(t *testing.T) {
 	p := writeCfg(t, `
 admin:
   username: root
