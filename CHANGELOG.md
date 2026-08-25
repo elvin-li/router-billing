@@ -132,6 +132,46 @@ Performance:
 firewall-failure paths), reset-password flash flow + store semantics,
 attention cache TTL.
 
+Round 4 (same release):
+
+Security:
+
+- Payment finalization now verifies the provider-reported paid amount
+  against the order total before granting time. WeChat/Alipay
+  signatures prove who sent a notification, not that the amount matches
+  what we charged — a partial payment or upstream bug could previously
+  grant a full plan. Mismatches refuse the grant and land a
+  `pay_amount_mismatch` audit row. Amount parsing is integer-only (no
+  float rounding).
+- `/api/pay/qr` no longer encodes a URL-supplied `payload` parameter.
+  Anyone holding a valid order number could render arbitrary QR images
+  served from the router's origin (phishing aid, payment-QR swap). The
+  upstream PSP QR string is now stored on the order row (`qr_payload`)
+  and is the only thing the endpoint will render. (Folds in stale PR #2.)
+
+Correctness / ops:
+
+- render() now buffers template output: a template error mid-render
+  used to leak a broken half-page with HTTP 200; it's now a clean 500
+  and the templates parse with `missingkey=zero`. (Folds in stale PR #1.)
+- Backups are now taken with `VACUUM INTO` — SQLite copies inside a
+  read transaction, so both the daily rotator's snapshot and the
+  /admin/backup download are consistent even if a payment lands
+  mid-copy. The old checkpoint+file-copy remains as fallback. Backup
+  files are fsynced before the atomic rename so a router power cut
+  can't leave a complete-looking, zero-filled backup.
+
+Performance:
+
+- Voucher bulk import runs in one transaction — one fsync instead of
+  one per row; a 1000-row import drops from seconds to instant. UNIQUE
+  collisions still fail per-row without losing the rest of the batch.
+  (Folds in stale PR #2.)
+
+New tests: amount-mismatch refusal / matching-amount grant /
+unknown-amount skip, yuanToCents table, live-DB snapshot consistency,
+plus the folded PRs' payqr + bulk-import + buffered-render suites.
+
 ## v0.96 — Fix: dashboard plan-sales table was silently empty
 
 Pre-v0.96 the /admin/dashboard "最近 30 天按套餐" table referenced
