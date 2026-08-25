@@ -1,5 +1,43 @@
 # Changelog
 
+## v0.114 — 合并收尾 + 全库复audit：VACUUM 快照 fsync、导出文件名注入
+
+v0.113 合并落地后的收尾轮：先把 PR #14 (merge-audit-hardening)
+的 12 个提交全部合入（其 merge-base 即本分支 HEAD，语义无冲
+突，全量测试 + race 通过）；再对 PR #1/#2/#3 与全部 22 条
+origin/cursor/* 分支做最后一遍逐提交内容级比对，确认除下述一
+项外全部已有等价实现；最后对 web 处理器、支付回调、2FA/信任设
+备、防火墙、walled garden、后台任务、DB 事务层做整轮复查。
+
+A. (LOW→MEDIUM, 备份耐久性；PR #3 漏网移植) 备份轮转器的
+`VACUUM INTO` 路径在 rename 发布快照前不做 fsync。SQLite 写
+VACUUM INTO 目标时不保证落盘（synchronous 不作用于目标库），
+在路由器常见的延迟分配文件系统（ext4/f2fs）上，rename 之后断
+电可能留下一个顶着合法快照名的零长度/半截「备份」——恰好是
+v0.108 给 checkpoint+copy 回退路径加 fsync 时修的同一类问题，
+主路径漏掉了。现在 VACUUM INTO 产物同样先 `fsync` 再
+rename，失败则删除临时文件报错（下一轮重拍）。
+
+B. (LOW, 头注入面) `/admin/vouchers/export.csv` 把自由文本的
+`?batch=`/`?status=` 原样拼进 `Content-Disposition` 的
+quoted-string 文件名。net/http 会中和 CR/LF，但双引号原样通
+过：名为 `x";evil="1` 的批次可以逃出引号、向响应头走私附加参
+数，且跨浏览器 RFC 6266 解析行为不一致。其余导出端点在 v0.107
+已统一为常量文件名，唯独 voucher 导出为自描述保留了批次名——
+现在过 `filenameSafe`（仅留 ASCII 字母数字与 `._-`，60 字符封
+顶）。过滤本身仍按原始批次值匹配，导出内容不变。回归测试断言
+头里恰好一对引号、无参数走私、行数据完整。
+
+其余复查确认无缺陷（不改动）：支付金额核验/finalize 防取消/
+退款互斥、session 与 trusted-device 哈希迁移的调用方全部传原
+始 cookie 值、panic 按钮 keep 语义、2FA 登录/确认/关闭的重放
+高水位与尝试上限、webhook 重入队 worker、walled garden 公网
+IP 过滤与部分 DNS 失败缓存、nft 原子事务与 5s 超时、
+purge/expiry/reminder 各 loop 的关机与去重语义、schedule 跨午
+夜窗口、Alipay RSA2 验签 + app_id 校验、WeChat 平台证书验签 +
+AES-GCM + mchid/appid 校验。顺带把 PR #14 带进来的迁移注释中
+过时的「v0.97」版本号改正为实际发布版本 v0.113。
+
 ## v0.113 — 合并遗漏修复 + 新一轮审计：voucher 授予竞态、撕裂备份下载、SSID QR 泄漏
 
 两部分工作。第一部分把仍在未合并分支上的真实修复移植进来
