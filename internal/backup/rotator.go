@@ -91,6 +91,18 @@ func (r *Rotator) snapshot(ctx context.Context, dst string) error {
 		// Backups carry password hashes + payment data: clamp to 0600
 		// like the primary DB (VACUUM INTO creates with the umask).
 		_ = os.Chmod(tmp, 0o600)
+		// fsync before the rename publishes the file under its final
+		// name. VACUUM INTO writes the target with synchronous=OFF (it
+		// relies on the caller to make the result durable), so on the
+		// delayed-allocation filesystems routers use (ext4, f2fs) a
+		// power cut after the rename could leave a zero-length or
+		// partial "backup" wearing a valid snapshot name — the copyFile
+		// fallback below has fsynced for exactly this reason since
+		// v0.108.
+		if err := syncFile(tmp); err != nil {
+			_ = os.Remove(tmp)
+			return fmt.Errorf("fsync snapshot: %w", err)
+		}
 		return os.Rename(tmp, dst)
 	}
 	// A canceled context (shutdown mid-snapshot) is not a reason to fall
@@ -164,6 +176,20 @@ func (r *Rotator) prune() {
 			}
 		}
 	}
+}
+
+// syncFile fsyncs an already-written file by path (used for the VACUUM
+// INTO output, which SQLite hands us without any durability guarantee).
+func syncFile(path string) error {
+	f, err := os.OpenFile(path, os.O_RDWR, 0)
+	if err != nil {
+		return err
+	}
+	if err := f.Sync(); err != nil {
+		f.Close()
+		return err
+	}
+	return f.Close()
 }
 
 func copyFile(src, dst string) error {
