@@ -278,7 +278,11 @@ func (a *App) Routes() http.Handler {
 	mux.HandleFunc("/api/admin/sessions", a.requireAPITokenRead(a.handleAPISessions))
 	mux.HandleFunc("/api/admin/audit/distinct", a.requireAPITokenRead(a.handleAPIAuditDistinct))
 	mux.HandleFunc("/api/admin/audit/totals", a.requireAPITokenRead(a.handleAPIAuditTotals))
-	mux.HandleFunc("/api/admin/backup", a.requireAPITokenRead(a.handleAPIBackup))
+	// Backup is privileged: the raw DB file carries session tokens,
+	// password hashes, TOTP secrets, and full voucher codes — all of
+	// which the JSON read endpoints deliberately strip. Read-only
+	// tokens are rejected even though the method is GET.
+	mux.HandleFunc("/api/admin/backup", a.requireAPITokenPrivileged(a.handleAPIBackup))
 	mux.HandleFunc("/api/admin/macs", a.requireAPITokenRead(a.handleAPIMACList))
 	mux.HandleFunc("/api/admin/macs/get", a.requireAPITokenRead(a.handleAPIMACGet))
 	mux.HandleFunc("/api/admin/users", a.requireAPITokenRead(a.handleAPIUserList))
