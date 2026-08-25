@@ -1225,6 +1225,13 @@ func (a *App) handleAdminMACNotes(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *App) handleAdminResync(w http.ResponseWriter, r *http.Request) {
+	// POST-only: verifyCSRF skips non-POST requests, so accepting GET here
+	// meant a cross-site <img src=/admin/resync> could trigger a firewall
+	// rebuild with the admin's SameSite=Lax cookie riding along.
+	if r.Method != http.MethodPost {
+		http.Error(w, "method", http.StatusMethodNotAllowed)
+		return
+	}
 	if err := a.MACSvc.Resync(r.Context()); err != nil {
 		log.Printf("admin resync: %v", err)
 		a.DB.Audit(r.Context(), "admin", "firewall_resync_failed", "", "err="+err.Error()+" ip="+clientIP(r))

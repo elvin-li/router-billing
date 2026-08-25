@@ -1,5 +1,38 @@
 # Changelog
 
+## v0.99 — Security: open redirect at login/2FA, GET-mutable resync, metrics token timing
+
+Three related hardening fixes, each with regression tests:
+
+1. Open redirect at user login. The POST /user/login `next`
+   parameter was only checked with HasPrefix(next, "/") —
+   "//evil.com" (protocol-relative) and "/\evil.com" (backslash
+   normalization) bounced the freshly authenticated user to an
+   attacker-chosen external domain. The 2FA login handler
+   (/user/login/2fa) trusted its query-string `next` with NO
+   validation at all. Both now go through safeNextPath(): single
+   leading slash, no second slash/backslash, no CR/LF; anything
+   else falls back to /user/me. The login form GET no longer
+   echoes a hostile next into the hidden field, and requireUser
+   now query-escapes the RequestURI it embeds in ?next= (a
+   ?a=b&c=d original URL previously leaked its params out of the
+   next value).
+
+2. /admin/resync accepted GET. verifyCSRF only guards POST, and
+   the session cookie is SameSite=Lax — so a cross-site
+   <img src="/admin/resync"> or top-level navigation triggered a
+   firewall rebuild using the admin's ambient cookie. The sidebar
+   button already POSTs with a CSRF token; the handler is now
+   POST-only (405 otherwise).
+
+3. /metrics compared the bearer token with plain string == —
+   remote timing could confirm the token byte-by-byte. Now
+   subtle.ConstantTimeCompare, same as the API-token path.
+
+12 race-clean test cases: safeNextPath shape table, hostile-next
+login + 2FA integration (Location must stay /user/me), form echo,
+resync GET→405 + no audit row + POST-still-works.
+
 ## v0.98 — Fix: pay-create no longer leaves orphaned pending orders
 
 Pre-v0.98 `/api/pay/create` inserted the pending order row BEFORE
