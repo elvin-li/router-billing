@@ -1,5 +1,30 @@
 # Changelog
 
+## v0.102 — render() buffers output; missingkey=zero; all-pages smoke test
+
+render() previously executed templates straight into the
+ResponseWriter. When ExecuteTemplate emits some bytes and *then*
+errors (e.g. a typo'd struct field halfway through a table — the
+exact shape of the v0.96 dashboard bug), the user got HTTP 200 +
+half a page + "internal\n" appended, because the implicit
+WriteHeader from the first Write beat http.Error's 500. Now the
+template renders into a bytes.Buffer first and only a fully
+successful render is written; errors produce a clean 500.
+(Incorporates the standalone fix/render-buffer-and-missingkey-zero
+branch.)
+
+Template option missingkey=zero: naked {{.MissingKey}} on the
+map[string]any contexts most handlers pass now renders "" instead
+of the literal string "<no value>".
+
+New all-pages smoke test: seeds every table a template ranges over
+(MACs active+expired, orders pending+paid, vouchers incl. expired,
+sessions, trusted devices, sightings, sms/webhook logs, audit rows
+of each actor shape) and renders all 26 admin pages + 6 user/public
+pages, asserting 200 and zero "<no value>" occurrences. Combined
+with buffered render, any future template↔handler field drift fails
+CI instead of silently shipping.
+
 ## v0.101 — DB: LIKE wildcard escaping + three missing indexes
 
 Search correctness: every user-facing search (admin MAC/label,
