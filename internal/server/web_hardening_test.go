@@ -21,7 +21,12 @@ package server
 //     Cache-Control: public.
 
 import (
+	"bytes"
 	"context"
+	"io"
+	"mime/multipart"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -132,3 +137,84 @@ func TestConfirmGuardsSurviveAsDataAttributes(t *testing.T) {
 	}
 }
 
+// bigMultipart builds a multipart body that carries a valid _csrf field
+// followed by `size` bytes of filler in field `field`.
+func bigMultipart(t *testing.T, csrf, field string, size int) (io.Reader, string) {
+	t.Helper()
+	var buf bytes.Buffer
+	mw := multipart.NewWriter(&buf)
+	if err := mw.WriteField("_csrf", csrf); err != nil {
+		t.Fatal(err)
+	}
+	fw, err := mw.CreateFormFile(field, "filler.bin")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := fw.Write(bytes.Repeat([]byte{'x'}, size)); err != nil {
+		t.Fatal(err)
+	}
+	mw.Close()
+	return &buf, mw.FormDataContentType()
+}
+
+func doRaw(t *testing.T, h http.Handler, method, path string, body io.Reader, contentType string, cookies map[string]string) *httptest.ResponseRecorder {
+	t.Helper()
+	req := httptest.NewRequest(method, path, body)
+	req.Header.Set("Content-Type", contentType)
+	for k, v := range cookies {
+		req.AddCookie(&http.Cookie{Name: k, Value: v})
+	}
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, req)
+	return rr
+}
+
+// TestOversizedMultipartRejectedOnUserEndpoint: before the middleware cap,
+// this request was fully parsed (2 MiB spooled by ParseMultipartForm inside
+// the CSRF check) and then processed normally (303). Now the cap trips the
+// parse, the CSRF token never surfaces, and the request dies with 403 —
+// nothing gets buffered to disk beyond the 1 MiB limit.
+func TestOversizedMultipartRejectedOnUserEndpoint(t *testing.T) {
+	app := setupTestApp(t)
+	h := app.Routes()
+	jar := registerAndLogin(t, h, "13800130271", "cap-test-pw")
+
+	body, ct := bigMultipart(t, jar[csrfCookieName], "filler", 2<<20)
+	rr := doRaw(t, h, "POST", "/user/password", body, ct, jar)
+	if rr.Code != http.StatusForbidden {
+		t.Fatalf("oversized multipart to /user/password: got %d, want 403", rr.Code)
+	}
+}
+
+// TestOversizedMultipartRejectedOnAdminEndpoint mirrors the user-side test
+// for an admin form endpoint that is NOT the restore upload.
+func TestOversizedMultipartRejectedOnAdminEndpoint(t *testing.T) {
+	app := setupTestApp(t)
+	h := app.Routes()
+	jar := loginAdmin(t, h)
+
+	body, ct := bigMultipart(t, jar[csrfCookieName], "filler", 2<<20)
+	rr := doRaw(t, h, "POST", "/admin/macs/import", body, ct, jar)
+	if rr.Code != http.StatusForbidden {
+		t.Fatalf("oversized multipart to /admin/macs/import: got %d, want 403", rr.Code)
+	}
+}
+
+// TestRestoreUploadExemptFromSmallBodyCap: the DB restore upload is the one
+// endpoint that legitimately takes a big body. A 2 MiB upload must sail past
+// the generic 1 MiB cap and reach the handler's own validation (which
+// rejects the junk payload as not-SQLite → 400, not 403/413).
+func TestRestoreUploadExemptFromSmallBodyCap(t *testing.T) {
+	app := setupTestApp(t)
+	h := app.Routes()
+	jar := loginAdmin(t, h)
+
+	body, ct := bigMultipart(t, jar[csrfCookieName], "backup", 2<<20)
+	rr := doRaw(t, h, "POST", "/admin/backup/restore", body, ct, jar)
+	if rr.Code != http.StatusBadRequest {
+		t.Fatalf("2MiB junk restore upload: got %d, want 400 (validation), not a size/CSRF rejection", rr.Code)
+	}
+	if !strings.Contains(rr.Body.String(), "SQLite") && !strings.Contains(rr.Body.String(), "magic") {
+		t.Errorf("restore rejection should come from SQLite validation; body=%q", rr.Body.String())
+	}
+}
