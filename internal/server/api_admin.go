@@ -20,6 +20,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"io"
 	"log"
 	"net/http"
 	"strconv"
@@ -1818,9 +1819,22 @@ func (a *App) handleAPIOrderCancelStale(w http.ResponseWriter, r *http.Request, 
 	var req struct {
 		OlderThanHours int `json:"older_than_hours"`
 	}
-	// Tolerate empty body: cleanup cron may POST nothing and rely on the
-	// 24h default.
-	_ = json.NewDecoder(r.Body).Decode(&req)
+	// Tolerate an EMPTY body (cleanup cron may POST nothing and rely on
+	// the 24h default) — but reject malformed JSON. Pre-v0.106 a decode
+	// error was silently discarded, so a caller that sent
+	// {"older_than_hours":"48"} (string, not int) got the 24h default and
+	// canceled a bigger, more aggressive window than requested.
+	body, err := io.ReadAll(io.LimitReader(r.Body, 1<<20))
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "read body: " + err.Error()})
+		return
+	}
+	if len(strings.TrimSpace(string(body))) > 0 {
+		if err := json.Unmarshal(body, &req); err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "bad json: " + err.Error()})
+			return
+		}
+	}
 	hours := req.OlderThanHours
 	if hours <= 0 {
 		hours = 24
