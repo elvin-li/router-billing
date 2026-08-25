@@ -1,5 +1,37 @@
 # Changelog
 
+## v0.104 — OpenWrt: firewall-billing.sh was a parse error on nftables 1.0.x
+
+Critical ops fix. The nftables filter chain was named `fwd`, which
+became a reserved keyword in nftables 1.0.x (OpenWrt 22.03+ / 23.05
+ship 1.0.2 / 1.0.8). On those routers the ENTIRE firewall script was
+a parse error — and both init.d and the ipk postinst wrapped the
+apply call in `|| true`, so the failure was completely silent: no
+portal redirect, no drop rule, every Paid_WiFi device online for
+free. Reproduced against nftables 1.0.9 (parse error), verified
+fixed (parses + rules land).
+
+Also fixed while in there:
+
+- apply is now actually idempotent. Rules declared inside a
+  `table { chain { ... } }` block get APPENDED on every apply, so
+  each service restart added 7 duplicate rules. Chains are now
+  declared empty, flushed, and re-added — verified the rule set is
+  identical (4 pre + 3 forward) after repeated applies, and that
+  mac_paid set elements survive re-apply (whitelist preserved).
+- Legacy `fwd` chain (from installs whose nft still parsed it) is
+  deleted on apply so traffic isn't evaluated by two hooks.
+- init.d start and ipk postinst no longer swallow apply failures
+  silently — still non-fatal, but they log to logread/stderr with
+  an explicit "billing rules missing" warning.
+- CI: `--check-config config.example.yaml` is now strict (the
+  `|| true` is gone). Verified: exits 0 on the example config, 2 on
+  parse/validation errors — the example config can no longer drift
+  out of validity unnoticed.
+- README architecture diagram + firewall.Manager doc comment updated
+  to the `forward` chain name. Go code never referenced the chain
+  (it only manages the mac_paid set) — no binary behavior change.
+
 ## v0.103 — Security: /api/pay/qr open QR encoder closed; 1000x voucher bulk import
 
 (Incorporates the standalone fix/payqr-and-bulk-vouchers branch.)
