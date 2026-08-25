@@ -141,6 +141,17 @@ func (d *DB) ListExpiringMACsWithoutRecentReminder(ctx context.Context, withinDa
 	return out, rows.Err()
 }
 
+// escapeLike escapes LIKE wildcards in user-supplied search text so a
+// query for a literal "%" or "_" doesn't silently become a
+// match-everything / match-any-char pattern. Every LIKE clause built
+// from user input must pair `escapeLike` with ` ESCAPE '\'`.
+func escapeLike(s string) string {
+	s = strings.ReplaceAll(s, `\`, `\\`)
+	s = strings.ReplaceAll(s, `%`, `\%`)
+	s = strings.ReplaceAll(s, `_`, `\_`)
+	return s
+}
+
 // SearchMACs returns MACs where MAC or label contains q (case-insensitive
 // LIKE). When q is empty, behaves like ListMACs. status (if non-empty)
 // restricts to that exact status. limit defaults to 200, capped at 1000.
@@ -153,8 +164,8 @@ func (d *DB) SearchMACs(ctx context.Context, q, status string, limit int) ([]mod
 	args := []any{}
 	if q != "" {
 		// SQLite LIKE is case-insensitive for ASCII by default.
-		sb.WriteString(` AND (mac LIKE ? OR label LIKE ?)`)
-		pat := "%" + q + "%"
+		sb.WriteString(` AND (mac LIKE ? ESCAPE '\' OR label LIKE ? ESCAPE '\')`)
+		pat := "%" + escapeLike(q) + "%"
 		args = append(args, pat, pat)
 	}
 	if status != "" {
@@ -446,8 +457,8 @@ func (d *DB) SearchOrdersFiltered(ctx context.Context, f OrderFilter) ([]models.
 	sb.WriteString(`SELECT ` + orderCols + ` FROM orders WHERE 1=1`)
 	args := []any{}
 	if f.Q != "" {
-		sb.WriteString(` AND (order_no LIKE ? OR mac LIKE ? OR trade_no LIKE ?)`)
-		pat := "%" + f.Q + "%"
+		sb.WriteString(` AND (order_no LIKE ? ESCAPE '\' OR mac LIKE ? ESCAPE '\' OR trade_no LIKE ? ESCAPE '\')`)
+		pat := "%" + escapeLike(f.Q) + "%"
 		args = append(args, pat, pat, pat)
 	}
 	if f.Status != "" {
@@ -1027,8 +1038,8 @@ func (d *DB) SearchUsers(ctx context.Context, q string, limit int) ([]models.Use
 			`SELECT `+userColumns+` FROM users ORDER BY created_at DESC LIMIT ?`, limit)
 	} else {
 		rows, err = d.conn.QueryContext(ctx,
-			`SELECT `+userColumns+` FROM users WHERE phone LIKE ? ORDER BY created_at DESC LIMIT ?`,
-			"%"+q+"%", limit)
+			`SELECT `+userColumns+` FROM users WHERE phone LIKE ? ESCAPE '\' ORDER BY created_at DESC LIMIT ?`,
+			"%"+escapeLike(q)+"%", limit)
 	}
 	if err != nil {
 		return nil, err
@@ -1985,20 +1996,20 @@ func (d *DB) SearchAudit(ctx context.Context, f AuditFilter) ([]AuditEntry, erro
 	sb.WriteString(`SELECT id, at, actor, action, target, detail FROM audit_log WHERE 1=1`)
 	args := []any{}
 	if f.Actor != "" {
-		sb.WriteString(` AND actor LIKE ?`)
-		args = append(args, "%"+f.Actor+"%")
+		sb.WriteString(` AND actor LIKE ? ESCAPE '\'`)
+		args = append(args, "%"+escapeLike(f.Actor)+"%")
 	}
 	if f.Action != "" {
 		sb.WriteString(` AND action = ?`)
 		args = append(args, f.Action)
 	}
 	if f.Target != "" {
-		sb.WriteString(` AND target LIKE ?`)
-		args = append(args, "%"+f.Target+"%")
+		sb.WriteString(` AND target LIKE ? ESCAPE '\'`)
+		args = append(args, "%"+escapeLike(f.Target)+"%")
 	}
 	if f.Q != "" {
-		sb.WriteString(` AND detail LIKE ?`)
-		args = append(args, "%"+f.Q+"%")
+		sb.WriteString(` AND detail LIKE ? ESCAPE '\'`)
+		args = append(args, "%"+escapeLike(f.Q)+"%")
 	}
 	if f.Since != "" {
 		sb.WriteString(` AND date(at) >= date(?)`)

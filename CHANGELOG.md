@@ -1,5 +1,30 @@
 # Changelog
 
+## v0.101 — DB: LIKE wildcard escaping + three missing indexes
+
+Search correctness: every user-facing search (admin MAC/label,
+orders, users-by-phone, audit actor/target/detail) built its LIKE
+pattern as "%"+q+"%" without escaping — so searching for a literal
+"%" matched every row and "a_b" also matched "axb". All six LIKE
+sites now escape \ % _ via escapeLike() and declare ESCAPE '\'.
+(Injection was never possible — patterns were always bound params —
+this is a correctness fix.)
+
+Router-class performance, all served by existing startup migration
+(schema.sql reapplies with IF NOT EXISTS on every boot):
+
+- orders(status, paid_at) — the dashboard runs ~13
+  "status='paid' AND paid_at >= ..." aggregates per page load;
+  previously each one scanned all paid rows.
+- sessions(expires_at) — the purge loop deletes by expiry every
+  few minutes.
+- audit_log(action) — /admin/audit's exact-match action filter and
+  the DISTINCT action dropdown; audit_log is the largest table on
+  long-running installs.
+
+5 race-clean tests: escapeLike unit table + literal-wildcard
+regression coverage on MACs / orders / users / audit searches.
+
 ## v0.100 — Fix: redeem/voucher redirects escape user & admin input
 
 Redirect URLs in the voucher paths concatenated raw input:
