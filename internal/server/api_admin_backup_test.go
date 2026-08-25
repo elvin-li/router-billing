@@ -59,13 +59,41 @@ func TestAPIBackupAuditRowMarksViaAPI(t *testing.T) {
 	}
 }
 
-func TestAPIBackupReadonlyAllowed(t *testing.T) {
+// Regression (v0.106): the backup used to be downloadable with a
+// readonly token, handing a monitoring token the raw DB file — plaintext
+// session tokens, password hashes, TOTP secrets, full voucher codes.
+func TestAPIBackupReadonlyForbidden(t *testing.T) {
 	app := setupTestApp(t)
 	app.Cfg.APITokens = []config.APIToken{{Token: "rb_ro", Label: "monitor", ReadOnly: true}}
 	h := app.Routes()
 	rr := apiReq(t, h, "GET", "/api/admin/backup", "rb_ro", "")
-	if rr.Code != 200 {
-		t.Errorf("readonly GET should be 200; got %d", rr.Code)
+	if rr.Code != 403 {
+		t.Fatalf("readonly GET should be 403; got %d", rr.Code)
+	}
+	if strings.HasPrefix(rr.Body.String(), "SQLite format 3") {
+		t.Error("readonly token must not receive DB bytes")
+	}
+	if !strings.Contains(rr.Body.String(), "read-only") {
+		t.Errorf("error should mention read-only; got %s", rr.Body.String())
+	}
+	// No backup audit row should exist for the denied attempt.
+	entries, _ := app.DB.ListAudit(context.Background(), 5)
+	for _, e := range entries {
+		if e.Action == "backup" {
+			t.Error("denied backup must not write a backup audit row")
+		}
+	}
+}
+
+// A privileged route must still 401 without any token — the ReadOnly
+// gate sits after authentication, not instead of it.
+func TestAPIBackupNoTokenUnauthorized(t *testing.T) {
+	app := setupTestApp(t)
+	app.Cfg.APITokens = []config.APIToken{{Token: "rb_w", Label: "ops"}}
+	h := app.Routes()
+	rr := apiReq(t, h, "GET", "/api/admin/backup", "", "")
+	if rr.Code != 401 {
+		t.Errorf("missing token should be 401; got %d", rr.Code)
 	}
 }
 

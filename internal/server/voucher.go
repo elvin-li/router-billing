@@ -337,10 +337,10 @@ func (a *App) handleAdminVouchersExport(w http.ResponseWriter, r *http.Request) 
 			voucher.Pretty(v.Code),
 			v.Code,
 			strconv.Itoa(v.Days),
-			v.Batch,
+			csvCell(v.Batch), // admin/API free text — formula-injection risk
 			expires,
 			status,
-			v.RedeemedByMac,
+			csvCell(v.RedeemedByMac),
 			v.CreatedAt.Format(time.RFC3339),
 		})
 	}

@@ -20,6 +20,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"io"
 	"log"
 	"net/http"
 	"strconv"
@@ -42,6 +43,27 @@ func (a *App) requireAPITokenWrite(h func(w http.ResponseWriter, r *http.Request
 			return
 		}
 		if r.Method != http.MethodGet && tok.ReadOnly {
+			writeJSON(w, http.StatusForbidden, map[string]string{"error": "token is read-only"})
+			return
+		}
+		h(w, r, "api:"+tokenLabel(tok))
+	}
+}
+
+// requireAPITokenPrivileged rejects read-only tokens on EVERY method,
+// including GET. Used for read paths whose payload is strictly more
+// sensitive than what a monitoring token should hold — today that is
+// /api/admin/backup, which streams the raw SQLite file (plaintext session
+// tokens, password hashes, TOTP secrets, full voucher codes). A read-only
+// token that can fetch the backup is effectively a full-scope token, so
+// the read/write distinction must gate it.
+func (a *App) requireAPITokenPrivileged(h func(w http.ResponseWriter, r *http.Request, actor string)) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		tok := a.matchBearerOrUnauthorized(w, r)
+		if tok == nil {
+			return
+		}
+		if tok.ReadOnly {
 			writeJSON(w, http.StatusForbidden, map[string]string{"error": "token is read-only"})
 			return
 		}
@@ -1487,9 +1509,17 @@ func (a *App) handleAPIUserGrant(w http.ResponseWriter, r *http.Request, actor s
 	}
 	out := make([]extendedMAC, 0, len(macs))
 	for i := range macs {
-		extended, err := a.MACSvc.Extend(r.Context(), macs[i].Mac, label, req.Days, &req.UserID)
+		// ExtendOwned (not Extend): the unconditional upsert would
+		// reassign user_id on a MAC transferred to a different user
+		// between the list above and this write. Ownership-guarded
+		// extend skips such rows instead of stealing them back.
+		extended, err := a.MACSvc.ExtendOwned(r.Context(), macs[i].Mac, label, req.Days, req.UserID)
 		if err != nil {
 			log.Printf("api user grant %d mac=%s: %v", req.UserID, macs[i].Mac, err)
+			continue
+		}
+		if extended == nil {
+			log.Printf("api user grant %d mac=%s: skipped (ownership changed)", req.UserID, macs[i].Mac)
 			continue
 		}
 		a.DB.Audit(r.Context(), actor, "grant", macs[i].Mac,
@@ -1789,9 +1819,22 @@ func (a *App) handleAPIOrderCancelStale(w http.ResponseWriter, r *http.Request, 
 	var req struct {
 		OlderThanHours int `json:"older_than_hours"`
 	}
-	// Tolerate empty body: cleanup cron may POST nothing and rely on the
-	// 24h default.
-	_ = json.NewDecoder(r.Body).Decode(&req)
+	// Tolerate an EMPTY body (cleanup cron may POST nothing and rely on
+	// the 24h default) — but reject malformed JSON. Pre-v0.106 a decode
+	// error was silently discarded, so a caller that sent
+	// {"older_than_hours":"48"} (string, not int) got the 24h default and
+	// canceled a bigger, more aggressive window than requested.
+	body, err := io.ReadAll(io.LimitReader(r.Body, 1<<20))
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "read body: " + err.Error()})
+		return
+	}
+	if len(strings.TrimSpace(string(body))) > 0 {
+		if err := json.Unmarshal(body, &req); err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "bad json: " + err.Error()})
+			return
+		}
+	}
 	hours := req.OlderThanHours
 	if hours <= 0 {
 		hours = 24
@@ -2019,9 +2062,16 @@ func (a *App) handleAPIUserGrantByPhone(w http.ResponseWriter, r *http.Request, 
 	}
 	out := make([]extendedMAC, 0, len(macs))
 	for i := range macs {
-		extended, err := a.MACSvc.Extend(r.Context(), macs[i].Mac, label, req.Days, &user.ID)
+		// Ownership-guarded extend — see handleAPIUserGrant. A device
+		// transferred away between the list and this write is skipped
+		// rather than re-extended and reassigned to this user.
+		extended, err := a.MACSvc.ExtendOwned(r.Context(), macs[i].Mac, label, req.Days, user.ID)
 		if err != nil {
 			log.Printf("api user grant-by-phone %s mac=%s: %v", phone, macs[i].Mac, err)
+			continue
+		}
+		if extended == nil {
+			log.Printf("api user grant-by-phone %s mac=%s: skipped (ownership changed)", phone, macs[i].Mac)
 			continue
 		}
 		a.DB.Audit(r.Context(), actor, "grant", macs[i].Mac,

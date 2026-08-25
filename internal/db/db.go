@@ -267,6 +267,57 @@ func (d *DB) UpsertMAC(ctx context.Context, mac, label string, days int, userID 
 	return d.GetMAC(ctx, mac)
 }
 
+// ExtendMACOwned extends an existing MAC's expiry only while it is still
+// owned by ownerID. Returns (nil, nil) — "skip, don't fail" — when the row
+// is gone or ownership has changed since the caller listed it.
+//
+// This closes the TOCTOU in the user-grant fan-outs: those handlers list a
+// user's MACs and then extend each one, and the unconditional UpsertMAC
+// they previously used would both re-extend AND reassign user_id on a MAC
+// that had been transferred to a different user in between (e.g. via the
+// user-side replace/claim flow) — silently stealing another user's device.
+// The WHERE user_id = ? guard makes the ownership check and the update one
+// atomic statement.
+func (d *DB) ExtendMACOwned(ctx context.Context, mac, label string, days int, ownerID int64) (*models.MAC, error) {
+	tx, err := d.conn.BeginTx(ctx, nil)
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback()
+
+	existing, err := getMACTx(ctx, tx, mac)
+	if err != nil {
+		return nil, err
+	}
+	if existing == nil || existing.UserID == nil || *existing.UserID != ownerID {
+		return nil, nil
+	}
+	now := time.Now().UTC()
+	var newExpiry time.Time
+	if existing.ExpiresAt.After(now) && existing.Status == models.MACActive {
+		newExpiry = existing.ExpiresAt.AddDate(0, 0, days)
+	} else {
+		newExpiry = now.AddDate(0, 0, days)
+	}
+	newLabel := existing.Label
+	if label != "" {
+		newLabel = label
+	}
+	res, err := tx.ExecContext(ctx,
+		`UPDATE macs SET label = ?, status = 'active', expires_at = ?, updated_at = ? WHERE mac = ? AND user_id = ?`,
+		newLabel, newExpiry, now, mac, ownerID)
+	if err != nil {
+		return nil, err
+	}
+	if n, err := res.RowsAffected(); err != nil || n == 0 {
+		return nil, err
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, err
+	}
+	return d.GetMAC(ctx, mac)
+}
+
 func getMACTx(ctx context.Context, tx *sql.Tx, mac string) (*models.MAC, error) {
 	row := tx.QueryRowContext(ctx, `SELECT `+macCols+` FROM macs WHERE mac = ?`, mac)
 	m, err := scanMAC(row)
