@@ -4,8 +4,12 @@
 //
 // Mechanism: a separate nftables set `wg_paid` (type ipv4_addr) is matched
 // before the drop rule. We periodically resolve the configured domains and
-// keep the set in sync. Each element has a 24h timeout so dead IPs eventually
-// drain out.
+// atomically rebuild the set with the FULL result, refreshing every
+// element's 25h timeout. The kernel does not refresh a timed element's
+// expiry on re-add, so an add-only diff would let stable payment-server IPs
+// expire out of the set after 25h of uptime — permanently blocking unpaid
+// devices from the payment flow. The timeout still drains the set gracefully
+// if the resolver stops running.
 package walledgarden
 
 import (
@@ -15,12 +19,17 @@ import (
 	"strings"
 	"sync"
 	"time"
-
-	"router-billing/internal/firewall"
 )
 
+// FW is the slice of firewall.Manager the resolver needs; an interface so
+// tests can record what actually gets pushed to the kernel set.
+type FW interface {
+	EnsureWalledGardenSet(ctx context.Context, setName string) error
+	SyncWalledGardenIPs(ctx context.Context, setName string, ips []string) error
+}
+
 type Resolver struct {
-	FW              *firewall.Manager
+	FW              FW
 	SetName         string        // e.g. "wg_paid"
 	Domains         []string      // admin-supplied
 	RefreshInterval time.Duration // default 5 minutes
@@ -73,38 +82,29 @@ func (r *Resolver) refresh(ctx context.Context) {
 			}
 		}
 	}
+	// Total resolution failure (DNS outage): keep whatever the kernel set
+	// holds — the per-element timeout drains it if the outage persists.
 	if len(resolved) == 0 {
 		return
 	}
 
 	r.mu.Lock()
-	prev := r.lastIPs
 	r.lastIPs = resolved
 	r.mu.Unlock()
 
-	var add, remove []string
+	// Push the FULL list every cycle: SyncWalledGardenIPs rebuilds the set
+	// atomically, which is the only way to refresh element timeouts (the
+	// kernel ignores re-adds of live timed elements). Also self-heals after
+	// a failed previous push and prunes IPs that stopped resolving.
+	all := make([]string, 0, len(resolved))
 	for ip := range resolved {
-		if !prev[ip] {
-			add = append(add, ip)
-		}
+		all = append(all, ip)
 	}
-	for ip := range prev {
-		if !resolved[ip] {
-			remove = append(remove, ip)
-		}
+	if err := r.FW.SyncWalledGardenIPs(ctx, r.SetName, all); err != nil {
+		log.Printf("walledgarden: sync: %v", err)
+		return
 	}
-
-	if len(add) > 0 {
-		if err := r.FW.AddWalledGardenIPs(ctx, r.SetName, add); err != nil {
-			log.Printf("walledgarden: add: %v", err)
-		}
-	}
-	if len(remove) > 0 {
-		if err := r.FW.RemoveWalledGardenIPs(ctx, r.SetName, remove); err != nil {
-			log.Printf("walledgarden: remove: %v", err)
-		}
-	}
-	log.Printf("walledgarden: %d domains → %d IPs (+%d -%d)", len(r.Domains), len(resolved), len(add), len(remove))
+	log.Printf("walledgarden: %d domains → %d IPs (timeouts refreshed)", len(r.Domains), len(resolved))
 }
 
 func (r *Resolver) lookup(ctx context.Context, host string) ([]string, error) {
