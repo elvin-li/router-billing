@@ -22,7 +22,7 @@ func TestLoadMinimalDefaultsExhaustive(t *testing.T) {
 	p := writeCfg(t, `
 admin:
   username: root
-  password: secret
+  password: secret-pass-1
 `)
 	c, err := Load(p)
 	if err != nil {
@@ -98,7 +98,7 @@ admins:
 
 func TestLoadRejectsNonPositivePlan(t *testing.T) {
 	p := writeCfg(t, `
-admin: {username: root, password: pw}
+admin: {username: root, password: pw-longenough}
 plans:
   freebie: {label: free, days: 0, price_cents: 100}
 `)
@@ -106,7 +106,7 @@ plans:
 		t.Error("plan with days=0 must be rejected")
 	}
 	p = writeCfg(t, `
-admin: {username: root, password: pw}
+admin: {username: root, password: pw-longenough}
 plans:
   negative: {label: neg, days: 30, price_cents: -1}
 `)
@@ -117,7 +117,7 @@ plans:
 
 func TestLoadRejectsIncompleteWeChat(t *testing.T) {
 	p := writeCfg(t, `
-admin: {username: root, password: pw}
+admin: {username: root, password: pw-longenough}
 pay:
   wechat:
     enabled: true
@@ -130,7 +130,7 @@ pay:
 
 func TestLoadAlipayGatewayDefault(t *testing.T) {
 	p := writeCfg(t, `
-admin: {username: root, password: pw}
+admin: {username: root, password: pw-longenough}
 pay:
   alipay:
     enabled: true
@@ -150,7 +150,7 @@ pay:
 
 func TestLoadRejectsIncompleteAlipay(t *testing.T) {
 	p := writeCfg(t, `
-admin: {username: root, password: pw}
+admin: {username: root, password: pw-longenough}
 pay:
   alipay:
     enabled: true
@@ -266,7 +266,7 @@ func TestExpiryReminderWindowDays(t *testing.T) {
 
 func TestLoadRoundTripsPlans(t *testing.T) {
 	p := writeCfg(t, `
-admin: {username: root, password: pw}
+admin: {username: root, password: pw-longenough}
 plans:
   day: {label: 1 天, days: 1, price_cents: 10}
 `)
