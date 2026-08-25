@@ -135,8 +135,7 @@ func TestResolverSkipsIPv6(t *testing.T) {
 // domain would otherwise let UNPAID devices reach the router itself (or
 // other LAN hosts) before the drop rule.
 func TestResolverRejectsNonPublicDNSAnswers(t *testing.T) {
-	fw := firewall.New("inet", "billing", "mac_paid", "br-paid")
-	fw.SetDryRun(true)
+	fw := &recordingFW{}
 	r := &Resolver{
 		FW: fw, SetName: "wg_paid",
 		Domains: []string{"evil-cdn.example"},
@@ -166,8 +165,7 @@ func TestResolverRejectsNonPublicDNSAnswers(t *testing.T) {
 // admin intent (e.g. a LAN payment relay) — it bypasses the public-IP
 // filter that applies to DNS answers.
 func TestResolverKeepsLiteralIPEntries(t *testing.T) {
-	fw := firewall.New("inet", "billing", "mac_paid", "br-paid")
-	fw.SetDryRun(true)
+	fw := &recordingFW{}
 	lookups := 0
 	r := &Resolver{
 		FW: fw, SetName: "wg_paid",
@@ -184,8 +182,8 @@ func TestResolverKeepsLiteralIPEntries(t *testing.T) {
 	if !r.lastIPs["192.168.10.5"] || !r.lastIPs["203.0.113.7"] {
 		t.Errorf("literal IP entries missing: %+v", r.lastIPs)
 	}
-	if len(fw.syncs) != 1 || !equal(fw.syncs[0], []string{"127.0.0.1"}) {
-		t.Errorf("sync = %+v, want [[127.0.0.1]]", fw.syncs)
+	if len(fw.syncs) != 1 || !equal(fw.syncs[0], []string{"192.168.10.5", "203.0.113.7"}) {
+		t.Errorf("sync = %+v, want both literal IPs pushed", fw.syncs)
 	}
 }
 
