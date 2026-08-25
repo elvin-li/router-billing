@@ -52,21 +52,31 @@ func Code(secretB32 string, unixTime int64) (string, error) {
 // tolerance for clock skew between server and authenticator. Constant-time
 // comparison so an attacker can't time-side-channel the right code.
 func Verify(secretB32, code string, now time.Time) bool {
+	_, ok := MatchingStep(secretB32, code, now)
+	return ok
+}
+
+// MatchingStep is Verify but also reports WHICH timestep the code matched
+// (now/period + skew). Callers that enforce RFC 6238 §5.2 one-time use need
+// the step to record it — rejecting a second acceptance of the same code
+// must key on the step the code was generated for, not on wall-clock time,
+// or a skew=-1 acceptance could be replayed one step later.
+func MatchingStep(secretB32, code string, now time.Time) (int64, bool) {
 	if len(code) != digits {
-		return false
+		return 0, false
 	}
 	key, err := decodeSecret(secretB32)
 	if err != nil {
-		return false
+		return 0, false
 	}
 	t := now.Unix() / period
 	for skew := int64(-1); skew <= 1; skew++ {
 		want := hotp(key, t+skew)
 		if subtle.ConstantTimeCompare([]byte(want), []byte(code)) == 1 {
-			return true
+			return t + skew, true
 		}
 	}
-	return false
+	return 0, false
 }
 
 // ProvisioningURI returns an otpauth:// URL that, when encoded as a QR,

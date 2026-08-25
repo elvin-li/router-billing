@@ -58,6 +58,29 @@ func TestVerifyAllowsClockSkewWithinOneStep(t *testing.T) {
 	}
 }
 
+func TestMatchingStepReportsGeneratingStep(t *testing.T) {
+	secret, _ := GenerateSecret()
+	now := time.Date(2025, 6, 1, 8, 0, 15, 0, time.UTC)
+	step := now.Unix() / period
+
+	codeNow, _ := Code(secret, now.Unix())
+	got, ok := MatchingStep(secret, codeNow, now)
+	if !ok || got != step {
+		t.Errorf("now-code: got (%d,%v), want (%d,true)", got, ok, step)
+	}
+	// A previous-step code accepted via skew must report the PREVIOUS step —
+	// the one-time-use ledger keys on it, so reporting the current step
+	// would let the same code be replayed one step later.
+	codePrev, _ := Code(secret, now.Add(-30*time.Second).Unix())
+	got, ok = MatchingStep(secret, codePrev, now)
+	if !ok || got != step-1 {
+		t.Errorf("prev-code: got (%d,%v), want (%d,true)", got, ok, step-1)
+	}
+	if _, ok := MatchingStep(secret, "000000", now); ok {
+		t.Error("wrong code must not match any step")
+	}
+}
+
 func TestVerifyRejectsWrongCode(t *testing.T) {
 	secret, _ := GenerateSecret()
 	if Verify(secret, "000000", time.Now()) {

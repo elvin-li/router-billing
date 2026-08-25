@@ -20,6 +20,7 @@
     {{if .Error}}<div class="flash err">{{.Error}}</div>{{end}}
 
     <form method="post" action="/admin/login/2fa">
+      {{template "csrf" .}}
       <div class="field">
         <label>6 位验证码</label>
         <input name="code" type="text" inputmode="numeric" pattern="[0-9 -]*"
