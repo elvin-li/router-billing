@@ -1209,7 +1209,7 @@ func (a *App) handleAPIOrderRefund(w http.ResponseWriter, r *http.Request, actor
 	if len(reason) > 200 {
 		reason = reason[:200]
 	}
-	mac, err := a.DB.MarkOrderRefunded(r.Context(), orderNo, reason)
+	mac, err := a.refundOrder(r.Context(), orderNo, reason)
 	if err != nil {
 		log.Printf("api refund %s: %v", orderNo, err)
 		status := http.StatusInternalServerError

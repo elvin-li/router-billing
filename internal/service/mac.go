@@ -52,6 +52,28 @@ func (s *MACService) GrantFromOrder(ctx context.Context, o *models.Order) error 
 	return nil
 }
 
+// GrantFromVoucher is GrantFromOrder's sibling for voucher redemptions.
+// By the time it runs the voucher is already consumed, so it uses the same
+// error contract: an error means NOTHING durable happened (the caller may
+// safely un-redeem the voucher and let the user retry), while a
+// firewall-only failure after the DB committed is logged + resynced but
+// NOT surfaced — the DB is the source of truth and Extend's hard-fail
+// semantics would report failure for a grant that actually landed.
+func (s *MACService) GrantFromVoucher(ctx context.Context, mac, label string, days int, userID *int64) (*models.MAC, error) {
+	m, err := s.DB.UpsertMAC(ctx, mac, label, days, userID)
+	if err != nil {
+		return nil, fmt.Errorf("upsert mac: %w", err)
+	}
+	if err := s.FW.Add(ctx, m.Mac); err != nil {
+		log.Printf("warn: firewall add %s (voucher): %v — attempting resync", m.Mac, err)
+		if rerr := s.Resync(ctx); rerr != nil {
+			log.Printf("ERROR: firewall resync after failed add %s: %v (granted MAC offline until next resync)", m.Mac, rerr)
+		}
+	}
+	log.Printf("granted %s for %d days (until %s) from voucher", m.Mac, days, m.ExpiresAt.Format("2006-01-02"))
+	return m, nil
+}
+
 // Extend is the admin-manual version of GrantFromOrder.
 func (s *MACService) Extend(ctx context.Context, mac, label string, days int, userID *int64) (*models.MAC, error) {
 	m, err := s.DB.UpsertMAC(ctx, mac, label, days, userID)

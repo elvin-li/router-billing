@@ -1141,7 +1141,7 @@ func (a *App) handleAdminOrderRefund(w http.ResponseWriter, r *http.Request) {
 	if len(reason) > 200 {
 		reason = reason[:200]
 	}
-	mac, err := a.DB.MarkOrderRefunded(r.Context(), orderNo, reason)
+	mac, err := a.refundOrder(r.Context(), orderNo, reason)
 	if err != nil {
 		log.Printf("refund %s: %v", orderNo, err)
 		// Surface the error type so admins see "order is already refunded"
