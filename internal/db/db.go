@@ -552,6 +552,28 @@ func (d *DB) ListOrders(ctx context.Context, limit int) ([]models.Order, error) 
 	return d.queryOrders(ctx, `SELECT `+orderCols+` FROM orders ORDER BY created_at DESC LIMIT ?`, limit)
 }
 
+// LatestPaidOrderForMAC returns the most recently paid order for a MAC
+// with paid_at after `since`, or nil when there is none. Used by the
+// /pay/success page to offer a receipt link — a targeted indexed lookup
+// instead of scanning the newest N orders in Go (which silently missed
+// the order once it aged out of the scan window). The `since` cutoff is
+// the caller's anti-oracle recency window, applied in SQL so the page
+// never even reads older orders.
+func (d *DB) LatestPaidOrderForMAC(ctx context.Context, mac string, since time.Time) (*models.Order, error) {
+	row := d.conn.QueryRowContext(ctx,
+		`SELECT `+orderCols+` FROM orders
+		 WHERE mac = ? AND status = 'paid' AND paid_at > ?
+		 ORDER BY paid_at DESC, id DESC LIMIT 1`, mac, since.UTC())
+	o, err := scanOrder(row)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	return o, nil
+}
+
 // OrderFilter is the optional filter set passed to SearchOrdersFiltered.
 // Empty/zero fields are ignored.
 type OrderFilter struct {

@@ -127,17 +127,14 @@ func (a *App) handlePaySuccess(w http.ResponseWriter, r *http.Request) {
 		mac = detected
 	}
 	// Find the most recent *recently* paid order for this MAC so we can
-	// offer a receipt link.
+	// offer a receipt link. Targeted indexed lookup (idx_orders_status_paid)
+	// — the previous newest-50 scan both cost more and silently missed the
+	// order whenever 50+ orders landed since payment.
 	var receiptOrderNo string
 	if mac != "" {
 		cutoff := time.Now().Add(-30 * time.Minute)
-		orders, _ := a.DB.ListOrders(r.Context(), 50)
-		for _, o := range orders {
-			if o.Mac == mac && o.Status == models.OrderPaid &&
-				o.PaidAt != nil && o.PaidAt.After(cutoff) {
-				receiptOrderNo = o.OrderNo
-				break
-			}
+		if o, _ := a.DB.LatestPaidOrderForMAC(r.Context(), mac, cutoff); o != nil {
+			receiptOrderNo = o.OrderNo
 		}
 	}
 	var m *models.MAC
