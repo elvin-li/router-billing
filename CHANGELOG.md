@@ -1,5 +1,57 @@
 # Changelog
 
+## v0.109 — Background-job reliability follow-up: hung-webhook backstop, fsync'd backups
+
+Deep-review follow-up to v0.108, closing the residual gaps in the same
+background-job surface. No product features.
+
+A. (HIGH) The notify worker could still wedge forever on a single
+request: v0.108 fixed the backoff-sleep stall, but an endpoint that
+accepts the TCP connection and never responds held the single worker
+goroutine for as long as the HTTP client allowed — and a Notifier whose
+HTTPClient was swapped for one without a Timeout (http.DefaultClient
+has none) allowed forever. Every delivery attempt now runs under a hard
+per-attempt context deadline (`AttemptTimeout`, default 30s) that is
+independent of the client config, and a timed-out attempt still
+retries on its normal schedule. A nil HTTPClient no longer nil-panics
+per event (each was recovered but silently dropped) — it defaults to
+the standard 8s-timeout client. Response bodies are drained (bounded)
+before close so keep-alive connections are reused.
+
+B. Backup fallback copy is now fsync'd before the rename makes it
+visible under the final name. Without the flush, a power cut shortly
+after the rename could leave a zero-length or partial "backup" on
+filesystems with delayed allocation (ext4/f2fs — i.e. routers): named
+like a snapshot, unusable when restoring.
+
+C. A snapshot whose context is already canceled (shutdown mid-pass) no
+longer falls through to checkpoint+copy: the checkpoint also fails on
+the dead context, so the fallback duplicated the raw DB file WITHOUT a
+WAL checkpoint — exactly the torn/stale copy `VACUUM INTO` exists to
+prevent. It now aborts cleanly (removing its .tmp) and leaves the next
+scheduled pass to produce a real snapshot.
+
+D. An expiry-reminder pass stops early once its context is canceled
+instead of grinding through the remaining MACs: each leftover send
+failed on the dead context and wrote one `expiry_reminder_failed`
+audit row per MAC — restart-time noise that buried real delivery
+failures. Deferred MACs are picked up by the next hourly pass (the
+de-dup window only blocks MACs whose SMS actually went out).
+
+E. Admin-digest audit rows (`admin_digest_sent` / `admin_digest_failed`)
+now use context.WithoutCancel, and the manual /admin/sms-log/digest
+trigger detaches from the request context — parity with the v0.108
+expiry-reminder fix: an admin disconnecting between "SMS delivered"
+and "audit row written" silently lost the only record that the digest
+fired.
+
+Regression tests cover: a hung endpoint bounded by AttemptTimeout with
+a timeout-less client (fresh events keep flowing), nil-HTTPClient
+delivery, canceled-context snapshot aborting without a raw-copy
+fallback and without leaking .tmp, reminder pass stopping on cancel
+(no failure-audit spam, deferred MAC re-sent on the next healthy
+pass), and the digest audit row surviving a mid-send context cancel.
+
 ## v0.108 — Background-job reliability: webhook pipeline stall, SMS spam, torn backups
 
 Reliability pass over the background jobs (scheduler, notify worker,

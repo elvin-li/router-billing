@@ -59,6 +59,16 @@ func (a *App) sendExpiryReminders(ctx context.Context) (sent, skipped, errored i
 		return 0, 0, 0
 	}
 	for _, m := range macs {
+		// Stop the pass once ctx is dead (server shutdown mid-pass):
+		// every remaining send would fail on the canceled context and
+		// write one `expiry_reminder_failed` audit row per MAC — pure
+		// noise that buried real delivery failures on every restart.
+		// The next hourly pass picks these MACs up again (the de-dup
+		// window only blocks MACs that actually got their SMS).
+		if ctx.Err() != nil {
+			log.Printf("expiry reminder pass aborted (%v) with %d MACs left", ctx.Err(), len(macs)-sent-skipped-errored)
+			break
+		}
 		if m.UserID == nil {
 			skipped++
 			continue

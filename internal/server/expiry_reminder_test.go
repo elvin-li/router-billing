@@ -121,6 +121,46 @@ func TestExpiryReminderDedupSurvivesContextCancelMidPass(t *testing.T) {
 	}
 }
 
+func TestExpiryReminderPassStopsOnCanceledContext(t *testing.T) {
+	app := setupTestApp(t)
+	console := sms.NewConsole(50)
+
+	// Two eligible MACs. The context dies as a side effect of the FIRST
+	// send — the pass must stop instead of grinding through the rest
+	// (each remaining MAC would fail its send on the dead ctx and write
+	// an expiry_reminder_failed audit row: restart-time noise).
+	seedUserAndMACExpiring(t, app, "13800143030", "AA:BB:CC:DD:E1:30", 2)
+	seedUserAndMACExpiring(t, app, "13800143031", "AA:BB:CC:DD:E1:31", 2)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	app.SMS = &sms.Sender{P: &cancelingProvider{inner: console, cancel: cancel}}
+	sent, _, errored := app.sendExpiryReminders(ctx)
+	if sent != 1 {
+		t.Errorf("sent = %d, want 1 (the in-flight MAC completes)", sent)
+	}
+	if errored != 0 {
+		t.Errorf("errored = %d, want 0 — remaining MACs should be deferred, not failed", errored)
+	}
+	if n := len(console.Recent()); n != 1 {
+		t.Errorf("expected 1 SMS before the cancel stopped the pass; got %d", n)
+	}
+	entries, _ := app.DB.ListAudit(context.Background(), 50)
+	for _, e := range entries {
+		if e.Action == "expiry_reminder_failed" {
+			t.Errorf("canceled pass wrote a failure audit row: %+v", e)
+		}
+	}
+
+	// A later healthy pass picks up the deferred MAC (and only that one —
+	// the first is de-duped by its audit row).
+	app.SMS = &sms.Sender{P: console}
+	sent2, _, _ := app.sendExpiryReminders(context.Background())
+	if sent2 != 1 {
+		t.Errorf("follow-up pass sent = %d, want 1 (the deferred MAC)", sent2)
+	}
+}
+
 func TestExpiryReminderSkipsSuspendedUsers(t *testing.T) {
 	app := setupTestApp(t)
 	console := sms.NewConsole(50)
