@@ -1,5 +1,27 @@
 # Changelog
 
+## v0.100 — Fix: redeem/voucher redirects escape user & admin input
+
+Redirect URLs in the voucher paths concatenated raw input:
+
+- POST /redeem echoed the submitted code as-is in the bounce URL —
+  `X&ok=1` injected a fake success flag into /redeem, `X#frag`
+  truncated the query.
+- POST /admin/vouchers/generate embedded the admin-typed batch name
+  raw (`a&b c` → parameter injection + invalid space in Location).
+- POST /admin/vouchers/batch/revoke for the unbatched bucket
+  redirected with a literal `batch=(no batch)` — raw space and
+  parens in the Location header.
+
+Everything now goes through url.QueryEscape. The hand-rolled
+httpEsc() helper (which skipped non-ASCII, leaving raw Chinese
+error text to http.Redirect's implicit escaping) is deleted in
+favor of the stdlib. Flash messages decode identically — only the
+on-the-wire encoding is stricter.
+
+3 race-clean regression tests asserting the injected params do NOT
+appear and values round-trip through url.Parse exactly.
+
 ## v0.99 — Security: open redirect at login/2FA, GET-mutable resync, metrics token timing
 
 Three related hardening fixes, each with regression tests:

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"net/url"
 	"strconv"
 	"strings"
 	"time"
@@ -184,7 +185,7 @@ func (a *App) handleAdminVouchersGenerate(w http.ResponseWriter, r *http.Request
 	}
 	a.DB.Audit(r.Context(), "admin", "voucher_batch", batch,
 		fmt.Sprintf("count=%d days=%d", created, days))
-	http.Redirect(w, r, "/admin/vouchers?batch="+batch+"&ok=1", http.StatusSeeOther)
+	http.Redirect(w, r, "/admin/vouchers?batch="+url.QueryEscape(batch)+"&ok=1", http.StatusSeeOther)
 }
 
 func (a *App) handleAdminVouchersRevoke(w http.ResponseWriter, r *http.Request) {
@@ -240,7 +241,7 @@ func (a *App) handleAdminVoucherBatchRevoke(w http.ResponseWriter, r *http.Reque
 	a.DB.Audit(r.Context(), "admin", "voucher_batch_revoke", displayBatch,
 		fmt.Sprintf("count=%d ip=%s", n, clientIP(r)))
 	http.Redirect(w, r,
-		fmt.Sprintf("/admin/vouchers?ok=batch_revoke&revoked=%d&batch=%s", n, displayBatch),
+		fmt.Sprintf("/admin/vouchers?ok=batch_revoke&revoked=%d&batch=%s", n, url.QueryEscape(displayBatch)),
 		http.StatusSeeOther)
 }
 
@@ -327,17 +328,20 @@ func (a *App) handleRedeem(w http.ResponseWriter, r *http.Request) {
 	// Rate-limit by client IP. 10 tries / 10 minutes is generous for honest
 	// fat-finger typos and prohibitive for brute-forcing the 12-char alphabet.
 	if a.redeemLimiter != nil && !a.redeemLimiter.allow(clientIP(r)) {
-		http.Redirect(w, r, "/redeem?err="+httpEsc("尝试过于频繁，请 10 分钟后再试"), http.StatusSeeOther)
+		http.Redirect(w, r, "/redeem?err="+url.QueryEscape("尝试过于频繁，请 10 分钟后再试"), http.StatusSeeOther)
 		return
 	}
 	if err := r.ParseForm(); err != nil {
 		http.Error(w, "form", http.StatusBadRequest)
 		return
 	}
+	// codeRaw is raw user input — always query-escape it in redirects.
+	// Pre-v0.100 it was concatenated as-is, so "X&ok=1" or "X#f" could
+	// inject extra query params / truncate the redirect URL.
 	codeRaw := r.PostForm.Get("code")
 	code := voucher.Canon(codeRaw)
 	if err := voucher.Validate(code); err != nil {
-		http.Redirect(w, r, "/redeem?code="+codeRaw+"&err="+httpEsc(err.Error()), http.StatusSeeOther)
+		http.Redirect(w, r, "/redeem?code="+url.QueryEscape(codeRaw)+"&err="+url.QueryEscape(err.Error()), http.StatusSeeOther)
 		return
 	}
 	macInput := r.PostForm.Get("mac")
@@ -346,7 +350,7 @@ func (a *App) handleRedeem(w http.ResponseWriter, r *http.Request) {
 	}
 	mac, ok := models.NormalizeMAC(macInput)
 	if !ok {
-		http.Redirect(w, r, "/redeem?code="+codeRaw+"&err="+httpEsc("无法识别 MAC，请填写"), http.StatusSeeOther)
+		http.Redirect(w, r, "/redeem?code="+url.QueryEscape(codeRaw)+"&err="+url.QueryEscape("无法识别 MAC，请填写"), http.StatusSeeOther)
 		return
 	}
 
@@ -358,14 +362,14 @@ func (a *App) handleRedeem(w http.ResponseWriter, r *http.Request) {
 
 	v, err := a.DB.RedeemVoucher(r.Context(), code, mac, userID)
 	if err != nil {
-		http.Redirect(w, r, "/redeem?code="+codeRaw+"&err="+httpEsc(redeemErrLabel(err)), http.StatusSeeOther)
+		http.Redirect(w, r, "/redeem?code="+url.QueryEscape(codeRaw)+"&err="+url.QueryEscape(redeemErrLabel(err)), http.StatusSeeOther)
 		return
 	}
 	// Apply the time to the MAC.
 	m, err := a.MACSvc.Extend(r.Context(), mac, "voucher:"+v.Batch, v.Days, userID)
 	if err != nil {
 		log.Printf("redeem extend %s: %v", mac, err)
-		http.Redirect(w, r, "/redeem?code="+codeRaw+"&err=授权失败请联系管理员", http.StatusSeeOther)
+		http.Redirect(w, r, "/redeem?code="+url.QueryEscape(codeRaw)+"&err="+url.QueryEscape("授权失败请联系管理员"), http.StatusSeeOther)
 		return
 	}
 	actor := "user-anon"
@@ -404,18 +408,4 @@ func redeemErrLabel(err error) string {
 	default:
 		return err.Error()
 	}
-}
-
-// httpEsc is a tiny URL-encoder for our redirect query strings.
-func httpEsc(s string) string {
-	var b strings.Builder
-	for _, r := range s {
-		switch r {
-		case '&', '?', '#', '=', '+', '%', ' ':
-			b.WriteString(fmt.Sprintf("%%%02X", r))
-		default:
-			b.WriteRune(r)
-		}
-	}
-	return b.String()
 }
