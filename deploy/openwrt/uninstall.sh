@@ -13,6 +13,17 @@ log "停止服务"
 log "撤销 nftables 表"
 /usr/share/router-billing/firewall-billing.sh purge 2>/dev/null || true
 
+# uci-defaults 注册过一个 fw4 include 指向 firewall-billing.sh。文件马上要被
+# 删掉，include 留着的话之后每次 fw4 reload 都会引用一个不存在的脚本。
+# 倒序删（删除会让后面的下标前移）。
+log "移除 firewall include"
+for i in $(uci -q show firewall | \
+        sed -n "s|^firewall\.@include\[\([0-9]*\)\]\.path='/usr/share/router-billing/firewall-billing\.sh'\$|\1|p" | \
+        sort -rn); do
+    uci delete "firewall.@include[$i]" 2>/dev/null || true
+done
+uci commit firewall 2>/dev/null || true
+
 log "删除文件"
 rm -f /usr/bin/router-billing
 rm -f /etc/init.d/router-billing
