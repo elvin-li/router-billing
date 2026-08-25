@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"sort"
 	"time"
 
 	"router-billing/internal/arp"
@@ -160,5 +161,22 @@ func (a *App) buildDeviceList(ctx context.Context) []deviceJSON {
 	for _, e := range entries {
 		add(e.MAC, e.IP, hostnames[e.MAC], now)
 	}
+	// Same ranking the initial HTML render uses (sortDevices): unauthorized
+	// online first, then unauthorized offline, then authorized. Pre-v0.108
+	// SSE frames were emitted in raw sighting order, so five seconds after
+	// page load the sorted table silently reshuffled.
+	rank := func(d deviceJSON) int {
+		switch {
+		case !d.Active && d.Online:
+			return 0
+		case !d.Active && !d.Online:
+			return 1
+		case d.Active && d.Online:
+			return 2
+		default:
+			return 3
+		}
+	}
+	sort.SliceStable(out, func(i, j int) bool { return rank(out[i]) < rank(out[j]) })
 	return out
 }

@@ -235,6 +235,64 @@ snapshot integrity under a live DB (PRAGMA integrity_check), prune
 running despite snapshot failure, stale .tmp cleanup, boot-time purge
 pass, Aliyun zero-value Send and concurrent-Send race (-race).
 
+## v0.108 — Admin UI correctness: logout CSRF, schedule/firewall leak, stale badges, filtered exports
+
+Correctness pass over the admin templates and the handlers that feed
+them.
+
+A. (HIGH) Clearing a MAC's schedule — or saving one whose window is
+currently open — re-added the MAC to the paid nftables set
+unconditionally. A BLOCKED or EXPIRED device regained internet access
+until the next resync tick. Both the clear branch and the
+immediate-apply path (`applyOneSchedule`) now check eligibility
+(status=active AND not expired) first, and the apply path defensively
+removes ineligible MACs instead.
+
+B. (MED) `/admin/logout` was a GET link. SameSite=Lax cookies ride
+along on top-level cross-site GET navigations and on speculative link
+prefetches, so a hostile link — or an eager browser prefetcher walking
+the sidebar — could sign the admin out (session fixation setup /
+denial of service). Logout is now POST + CSRF; the sidebar renders a
+form styled like the old link, and GET bounces to the dashboard with
+the session intact.
+
+C. The 最近在线 pill on `/admin/macs/detail` showed 在线 whenever ANY
+sighting row existed, even one from weeks ago. It now applies the same
+10-minute recency window as `/admin/devices` and shows 离线 otherwise.
+
+D. `/admin/login?err=…` codes from the 2FA flow (`2fa_expired`,
+`2fa_locked`, `2fa_misconfigured`) were silently dropped on the GET
+render — an expired pending-2FA session bounced the admin to a blank
+form with no explanation. They now render as proper messages; unknown
+codes are not echoed. `errLabel` also gained real messages for the
+plan-validation codes (`bad_key`, `label_too_long`, `days_too_large`,
+`price_too_large`) plus `not_found` / `bad_mac` / `db`, which used to
+surface as raw code strings.
+
+E. Filters/links: the orders header's 已过滤 badge ignored the
+`user_id` filter; the `/admin/macs` attention links dropped the status
+filters their dashboard twins carry; `ok=audit_trim` had no flash on
+the audit page; order numbers on the user detail page weren't links.
+
+F. The SSE frames on `/admin/devices` were unsorted, so two seconds
+after page load the carefully ranked list (online-unknown first, then
+online-known, …) reshuffled into DB order. Frames now sort with the
+same ranking as the initial render.
+
+G. CSV exports: `orders.csv` / `audit.csv` are named
+`*-filtered.csv` when any filter is active, so a partial download
+isn't mistaken for the full dataset; the MAC export's in-memory search
+post-filter was case-SENSITIVE (`q=office` missed "Office-Printer")
+while the page itself uses case-insensitive LIKE — now lowercased on
+both sides.
+
+H. Tests: `pages_smoke_test.go` dropped the nonexistent `/admin/2fa`
+URL (it vacuously passed by rendering the portal catch-all), gained
+filtered-URL variants, and now asserts every admin page actually
+renders the admin shell. New regression tests cover the schedule
+firewall eligibility, logout semantics, login error surfacing, the
+sighting recency pill, and export filenames/case-insensitivity.
+
 ## v0.106 — Payment hardening: refund-replay resurrection, amount cross-check, lost grants
 
 Money/security pass over the payment finalize path.

@@ -12,7 +12,7 @@
   <main class="admin-main">
     <div class="admin-header">
       <div>
-        <h1>订单{{if or .Query .Status .Since .Until}} <span style="font-size:13px; color:var(--text-soft); font-weight:normal;">(已过滤 · {{len .Orders}} 条)</span>{{end}}</h1>
+        <h1>订单{{if or .Query .Status .Since .Until .UserID}} <span style="font-size:13px; color:var(--text-soft); font-weight:normal;">(已过滤 · {{len .Orders}} 条)</span>{{end}}</h1>
         <div class="crumbs">最近 200 条 · 包含支付中、已付、失败、已退款</div>
       </div>
       <div style="display:flex; gap:8px; align-items:center;">
