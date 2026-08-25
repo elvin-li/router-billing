@@ -22,6 +22,7 @@ if uci -q show wireless | grep -q "ssid='${PAID_SECURE_SSID}'"; then
     [ -n "${SECTION}" ] || { echo "找不到 ${PAID_SECURE_SSID} 的 wifi-iface 下标" >&2; exit 1; }
     uci set wireless.@wifi-iface[${SECTION}].encryption='psk2'
     uci set wireless.@wifi-iface[${SECTION}].key="${PAID_SECURE_KEY}"
+    uci set wireless.@wifi-iface[${SECTION}].isolate='1'
 else
     echo "新增 ${PAID_SECURE_SSID}"
     uci add wireless wifi-iface >/dev/null
@@ -32,6 +33,8 @@ else
     uci set wireless.@wifi-iface[-1].ifname='wl-paidsec'
     uci set wireless.@wifi-iface[-1].encryption='psk2'
     uci set wireless.@wifi-iface[-1].key="${PAID_SECURE_KEY}"
+    # 与 uci-defaults 保持一致：收费 SSID 上都是陌生人，开启客户端隔离。
+    uci set wireless.@wifi-iface[-1].isolate='1'
 fi
 
 uci commit wireless

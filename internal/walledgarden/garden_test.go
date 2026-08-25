@@ -86,6 +86,56 @@ func TestResolverSyncsFullListEveryCycle(t *testing.T) {
 	}
 }
 
+// Regression: sync is a full rebuild, so a domain whose lookup fails would
+// otherwise have its IPs flushed from the kernel set on that very cycle —
+// one flaky DNS answer and unpaid clients instantly lose that payment
+// provider. The resolver must stand in the domain's last successful answer
+// (up to 25h) instead.
+func TestResolverReusesCachedIPsOnPartialDNSFailure(t *testing.T) {
+	fw := &recordingFW{}
+	weixinUp := true
+	r := &Resolver{
+		FW: fw, SetName: "wg_paid",
+		Domains: []string{"weixin.qq.com", "alipay.com"},
+		Lookup: func(_ context.Context, host string) ([]string, error) {
+			switch host {
+			case "weixin.qq.com":
+				if !weixinUp {
+					return nil, context.DeadlineExceeded
+				}
+				return []string{"1.1.1.1"}, nil
+			case "alipay.com":
+				return []string{"3.3.3.3"}, nil
+			}
+			return nil, nil
+		},
+	}
+
+	r.refresh(context.Background())
+	if len(fw.syncs) != 1 || !equal(fw.syncs[0], []string{"1.1.1.1", "3.3.3.3"}) {
+		t.Fatalf("first sync = %+v, want [[1.1.1.1 3.3.3.3]]", fw.syncs)
+	}
+
+	// weixin's DNS starts failing; its cached IP must stay in the pushed list.
+	weixinUp = false
+	r.refresh(context.Background())
+	if len(fw.syncs) != 2 || !equal(fw.syncs[1], []string{"1.1.1.1", "3.3.3.3"}) {
+		t.Fatalf("partial-failure sync = %+v, want cached weixin IP kept", fw.syncs)
+	}
+
+	// Once the cached answer is older than cacheTTL the domain drains out —
+	// same schedule as a total outage — instead of pinning stale IPs forever.
+	r.mu.Lock()
+	c := r.cache["weixin.qq.com"]
+	c.at = time.Now().Add(-cacheTTL - time.Minute)
+	r.cache["weixin.qq.com"] = c
+	r.mu.Unlock()
+	r.refresh(context.Background())
+	if len(fw.syncs) != 3 || !equal(fw.syncs[2], []string{"3.3.3.3"}) {
+		t.Fatalf("expired-cache sync = %+v, want [[3.3.3.3]]", fw.syncs)
+	}
+}
+
 func TestResolverKeepsSetOnTotalDNSFailure(t *testing.T) {
 	fw := &recordingFW{}
 	r := &Resolver{
@@ -117,15 +167,21 @@ func TestResolverSkipsIPv6(t *testing.T) {
 		FW: fw, SetName: "wg_paid",
 		Domains: []string{"ipv6host"},
 		Lookup: func(_ context.Context, host string) ([]string, error) {
-			return []string{"::1", "8.8.8.8", "2001:db8::1"}, nil
+			// ::ffff:9.9.9.9 is an IPv4-mapped answer (some resolvers emit
+			// these): it must be normalized to dotted-quad, not discarded.
+			// 127.0.0.1 is IPv4 but non-public and must still be rejected.
+			return []string{"::1", "8.8.8.8", "127.0.0.1", "2001:db8::1", "::ffff:9.9.9.9"}, nil
 		},
 	}
 	r.refresh(context.Background())
 	if r.lastIPs["::1"] || r.lastIPs["2001:db8::1"] {
 		t.Errorf("IPv6 should be skipped: %+v", r.lastIPs)
 	}
-	if !r.lastIPs["8.8.8.8"] {
-		t.Errorf("public IPv4 should be kept: %+v", r.lastIPs)
+	if r.lastIPs["127.0.0.1"] {
+		t.Errorf("loopback IPv4 from DNS must not enter the garden: %+v", r.lastIPs)
+	}
+	if !r.lastIPs["8.8.8.8"] || !r.lastIPs["9.9.9.9"] {
+		t.Errorf("public IPv4 (incl. mapped) should be kept: %+v", r.lastIPs)
 	}
 }
 
