@@ -1,5 +1,80 @@
 # Changelog
 
+## v0.107 — Auth hardening: TOTP one-time use, backup-code race, XFF rate-limit bypass, admin-2FA CSRF, reset enumeration, SSE session leak, pay-success oracle
+
+Deep pass over login / 2FA / forgot-password / rate limiting, each fix
+with regression tests. Items 1–5 ported from the auth-2fa-csrf branch,
+6–7 from the portal-security branch (adapted to the trusted_proxies
+model), 8–9 are new.
+
+1. **TOTP codes are now one-time use** (RFC 6238 §5.2). A 6-digit code
+   used to stay valid for its whole ±1-step window (~90 s) — anyone
+   who saw the victim type it (shoulder-surf, phishing relay) could
+   immediately reuse it to open a second session, or to pass the
+   2FA-disable check. `totp.MatchingStep` reports the timestep a code
+   matched and the server keeps a per-secret high-water mark; a replay
+   is treated exactly like a wrong code. Applies to user login 2FA,
+   admin login 2FA, user 2FA disable — and (new, item 9) enrollment
+   confirm.
+
+2. **Backup-code double spend under concurrency.**
+   `MarkBackupCodeUsed` never reported whether the conditional UPDATE
+   actually landed, so two logins racing on the same code could both
+   read it as unused and both pass. It now returns a consumed flag and
+   `verifyAndConsumeBackupCode` requires it — exactly one racer wins.
+
+3. **X-Forwarded-For no longer defeats per-IP rate limits.**
+   `clientIP` trusted the FIRST XFF entry from anyone; a direct client
+   could stamp a fresh fake IP per request and walk through every
+   per-IP limiter (login, register, forgot-password issue/verify,
+   voucher redeem, pay-create) and forge the ip= recorded in audit
+   rows. The header is now resolved once in `realIPMiddleware` and
+   ignored unless the request arrives from `security.trusted_proxies`
+   (new config, single IPs or CIDRs, default empty = never trust); when
+   trusted we take the LAST entry — the one the proxy appended — never
+   client-supplied leading entries. Deployments behind nginx/Caddy
+   should list the proxy address to keep per-client keying.
+
+4. **/admin/login/2fa POST now CSRF-checked** like its user-side
+   counterpart (checked before the attempt counter, so a cross-site
+   form can't silently burn the 5-attempt budget and lock the admin
+   out of a pending login). Template carries the `_csrf` field.
+
+5. **Forgot-password verify no longer enumerates accounts.** Probing
+   `/user/forgot-password/verify` with a made-up code answered
+   验证码错误 for unregistered phones but 已过期 for registered ones —
+   a registration oracle that never sent an SMS. Both now answer
+   已过期, and neither path runs bcrypt so timing is uniform as well.
+   Related: `/user/login` now burns a dummy bcrypt comparison on
+   unknown phones so response timing doesn't reveal registration
+   either.
+
+6. **Admin SSE streams die with the session.**
+   `/admin/devices/stream` + `/admin/stats/stream` only checked the
+   admin session at connect time; a revoked/expired session kept
+   receiving live device data (MACs, IPs, hostnames, revenue) over the
+   open connection indefinitely. Both streams now re-validate the
+   session on every tick and heartbeat.
+
+7. **/pay/success is no longer a MAC → order-history oracle.** `?mac=`
+   is normalized through `NormalizeMAC` (previously passed raw into DB
+   lookups) and the receipt link + expiry row only render for orders
+   paid within the last 30 minutes, or for the requester's own detected
+   MAC. Previously anyone who knew a neighbor's MAC could fetch their
+   latest paid order number — and from it the full /receipt.
+
+8. **/user/2fa/disable attempts are rate-limited** (5 / 15 min per
+   user). The login-2FA gate caps at 5 wrong codes per pending token,
+   but disable had no cap at all — an attacker holding a stolen session
+   cookie plus the password could hammer the whole 10^6 code space and
+   switch 2FA off, exactly the compromise 2FA exists to survive.
+
+9. **The enrollment-confirm code is one-time too.** `/user/2fa/confirm`
+   verified the code without recording it in the replay ledger; since
+   the pending secret is promoted to the live secret verbatim, the same
+   code still passed login-2FA / disable for the rest of its window.
+   Confirm now consumes the matched timestep like every other verifier.
+
 ## v0.106 — Payment hardening: refund-replay resurrection, amount cross-check, lost grants
 
 Money/security pass over the payment finalize path.
