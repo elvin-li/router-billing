@@ -43,7 +43,7 @@
           {{if or .Query .Status .Since .Until .UserID}}导出筛选结果{{else}}导出 CSV{{end}}
         </a>
         <form method="post" action="/admin/orders/cancel-stale" style="display:inline; margin:0;"
-              onsubmit="return confirm('立即取消所有超过 24 小时的 pending 订单（置为 failed）？');">
+              data-confirm="立即取消所有超过 24 小时的 pending 订单（置为 failed）？">
           {{template "csrf" .}}
           <input type="hidden" name="hours" value="24">
           <button class="btn outline small" type="submit" style="width:auto;" title="清理超过 24h 仍未支付的 pending 订单">清理过期订单</button>
@@ -84,11 +84,12 @@
               <td class="row-actions">
                 {{if eq (printf "%s" .Status) "paid"}}
                   <a href="/receipt?order_no={{.OrderNo}}" target="_blank" class="btn outline tiny" style="width:auto;">收据</a>
-                  <button class="btn danger tiny" type="button" onclick="confirmRefund('{{.OrderNo}}', '{{.Mac}}', '{{.Days}}', '{{formatYuan .AmountCents}}')">退款</button>
+                  <button class="btn danger tiny js-refund-open" type="button"
+                          data-order-no="{{.OrderNo}}" data-mac="{{.Mac}}" data-days="{{.Days}}" data-amount="{{formatYuan .AmountCents}}">退款</button>
                 {{end}}
                 {{if eq (printf "%s" .Status) "pending"}}
                   <form method="post" action="/admin/orders/cancel" style="display:inline;"
-                        onsubmit="return confirm('取消订单 {{.OrderNo}}？此操作会将状态置为 failed，且不可逆转。');">
+                        data-confirm="取消订单 {{.OrderNo}}？此操作会将状态置为 failed，且不可逆转。">
                     {{template "csrf" $}}
                     <input type="hidden" name="order_no" value="{{.OrderNo}}">
                     <button class="btn outline tiny" type="submit" style="width:auto;">取消</button>
@@ -137,22 +138,16 @@
       <input name="reason" maxlength="200" placeholder="例如：客户投诉、重复支付">
     </div>
     <div style="display:flex; gap:10px; justify-content:flex-end; margin-top:14px;">
-      <button class="btn ghost" type="button" onclick="document.getElementById('refundDialog').close()">取消</button>
+      <button class="btn ghost" type="button" data-dialog-close="refundDialog">取消</button>
       <button class="btn danger" type="submit">确认退款</button>
     </div>
   </form>
 </dialog>
 
-<script>
-  function confirmRefund(orderNo, mac, days, amt) {
-    document.getElementById('refundOrderNo').textContent = orderNo;
-    document.getElementById('refundMac').textContent = mac;
-    document.getElementById('refundDays').textContent = days;
-    document.getElementById('refundAmt').textContent = amt;
-    document.getElementById('refundOrderNoInput').value = orderNo;
-    document.getElementById('refundConfirmInput').value = '';
-    document.getElementById('refundDialog').showModal();
-  }
-</script>
+{{/* Dialog wiring lives in admin-orders.js; confirm prompts run via ui.js
+     data-confirm — the CSP (script-src 'self') blocks inline <script>
+     blocks and on*= attributes. */}}
+<script src="/static/ui.js" defer></script>
+<script src="/static/admin-orders.js" defer></script>
 </body>
 </html>

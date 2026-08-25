@@ -15,7 +15,10 @@ import (
 //
 // CSP is intentionally permissive on 'unsafe-inline' for styles because some
 // templates use inline style="..." attributes for tiny tweaks. Scripts are
-// strictly self-only.
+// strictly self-only — which means templates must never use inline <script>
+// blocks or on*="" attributes (browsers refuse to run them under this
+// policy). All page behavior lives in /static/*.js keyed off data-*
+// attributes; TestTemplatesAreCSPCompatible enforces the invariant.
 //
 // HSTS only fires on TLS-detected requests (TLS != nil OR
 // X-Forwarded-Proto: https). Max-age + preload/includeSubDomains directives

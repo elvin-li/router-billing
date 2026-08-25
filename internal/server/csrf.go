@@ -24,10 +24,40 @@ type ctxKey int
 
 const csrfCtxKey ctxKey = 1
 
+// Request-body caps, enforced in csrfMiddleware BEFORE anything parses the
+// form. This matters because verifyCSRF reaches for r.FormValue, and for
+// multipart bodies that calls ParseMultipartForm — which buffers the WHOLE
+// body (spilling everything past 32 MiB to temp files) with no total-size
+// limit of its own. Handler-level http.MaxBytesReader wrappers (e.g. the
+// 256 MiB cap in handleAdminBackupRestore) were installed AFTER the CSRF
+// check had already consumed the body, so they never actually applied:
+// any client — even an unauthenticated one hitting /user/forgot-password —
+// could stream gigabytes of multipart at a form endpoint and fill the
+// router's tmpfs/flash.
+//
+// maxFormBodyBytes (1 MiB) is far above every legitimate form on the site
+// (the largest are the MAC/voucher import textareas, tens of KiB). The one
+// genuinely big-body endpoint — the DB restore upload — keeps the 256 MiB
+// it advertises, plus 1 MiB of multipart framing overhead.
+const (
+	maxFormBodyBytes    = 1 << 20
+	maxRestoreBodyBytes = 256<<20 + 1<<20
+	restoreUploadPath   = "/admin/backup/restore"
+)
+
 // csrfMiddleware ensures every request has an rb_csrf cookie and exposes its
-// value via context for the template helper.
+// value via context for the template helper. It also installs the request
+// body cap (see maxFormBodyBytes above) so no later form parse can read an
+// unbounded body.
 func csrfMiddleware(h http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Body != nil {
+			limit := int64(maxFormBodyBytes)
+			if r.URL.Path == restoreUploadPath {
+				limit = maxRestoreBodyBytes
+			}
+			r.Body = http.MaxBytesReader(w, r.Body, limit)
+		}
 		token := ""
 		if c, err := r.Cookie(csrfCookieName); err == nil && len(c.Value) >= 32 {
 			token = c.Value

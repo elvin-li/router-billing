@@ -66,20 +66,8 @@
     </p>
   </main>
 
-  <script>
-    // Auto-format the code input as 4-4-4 grouped, uppercase, alphabet-only.
-    const inp = document.getElementById('code-input');
-    if (inp) {
-      const alphabet = /[23456789ABCDEFGHJKMNPQRSTUVWXYZ]/g;
-      inp.addEventListener('input', () => {
-        let v = inp.value.toUpperCase().replace(/[^A-Z2-9]/g, '');
-        v = v.replace(/[01OIL]/g, '');
-        if (v.length > 12) v = v.slice(0, 12);
-        const parts = [];
-        for (let i = 0; i < v.length; i += 4) parts.push(v.slice(i, i + 4));
-        inp.value = parts.join('-');
-      });
-    }
-  </script>
+  {{/* Input formatting lives in redeem.js — the CSP (script-src 'self')
+       blocks inline <script> blocks. */}}
+  <script src="/static/redeem.js" defer></script>
 </body>
 </html>

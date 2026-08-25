@@ -127,7 +127,7 @@
     <section class="admin-card" style="border-left:4px solid var(--danger);">
       <h2 style="margin-top:0;">退款</h2>
       <form method="post" action="/admin/orders/refund"
-            onsubmit="return confirm('确认对 {{.Order.OrderNo}} 退款？此操作会回滚 MAC 到期时间。');">
+            data-confirm="确认对 {{.Order.OrderNo}} 退款？此操作会回滚 MAC 到期时间。">
         {{template "csrf" .}}
         <input type="hidden" name="order_no" value="{{.Order.OrderNo}}">
         <input type="hidden" name="confirm_order_no" value="{{.Order.OrderNo}}">
@@ -140,5 +140,8 @@
     {{end}}
   </main>
 </div>
+  {{/* Confirm/print handlers run via ui.js data-* attributes — the CSP
+       (script-src 'self') blocks inline on*= attributes. */}}
+  <script src="/static/ui.js" defer></script>
 </body>
 </html>

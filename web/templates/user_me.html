@@ -82,7 +82,7 @@
             <td>{{daysLeft .ExpiresAt}}</td>
             <td class="row-actions">
               {{if and (eq (printf "%s" .Status) "active") ($.DeviceMAC) (ne .Mac $.DeviceMAC)}}
-              <form method="post" action="/user/macs/replace" onsubmit="return confirm('把 {{.Mac}} 的剩余时长转给本设备 {{$.DeviceMAC}}？')">
+              <form method="post" action="/user/macs/replace" data-confirm="把 {{.Mac}} 的剩余时长转给本设备 {{$.DeviceMAC}}？">
                 {{template "csrf" $}}
                 <input type="hidden" name="old_mac" value="{{.Mac}}">
                 <button class="btn outline tiny" type="submit">转给本设备</button>
@@ -179,7 +179,7 @@
       <br>· 审计日志中此账号的历史记录仍会保留（合规需要）
     </p>
     <form method="post" action="/user/account/delete"
-          onsubmit="return confirm('真的要永久删除账号 {{.User.Phone}}？此操作不可撤销。')">
+          data-confirm="真的要永久删除账号 {{.User.Phone}}？此操作不可撤销。">
       {{template "csrf" .}}
       <div class="field">
         <label>请输入当前密码以确认</label>
@@ -200,7 +200,7 @@
       <a href="/user/2fa" class="btn outline" style="width:auto; display:inline-block;">管理二步验证</a>
       {{if .HasOtherActive}}
       <form method="post" action="/user/sessions/sign-out-others" style="display:inline-block; margin:0;"
-            onsubmit="return confirm('退出其他 {{minusOne .SessionCount}} 个登录的浏览器/设备？本浏览器不会被影响。')">
+            data-confirm="退出其他 {{minusOne .SessionCount}} 个登录的浏览器/设备？本浏览器不会被影响。">
         {{template "csrf" .}}
         <button class="btn outline" type="submit" style="width:auto;">
           退出其他 {{minusOne .SessionCount}} 个登录设备
@@ -232,5 +232,8 @@
   {{end}}
 
   <p class="portal-footer">router-billing v{{.Version}}</p>
+  {{/* Confirm/print handlers run via ui.js data-* attributes — the CSP
+       (script-src 'self') blocks inline on*= attributes. */}}
+  <script src="/static/ui.js" defer></script>
 </body>
 </html>

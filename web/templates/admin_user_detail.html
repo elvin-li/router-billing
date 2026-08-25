@@ -39,14 +39,14 @@
           </button>
         </form>
         <form method="post" action="/admin/users/reset-password" style="margin:0;"
-              onsubmit="return confirm('重置 {{.User.Phone}} 的密码？\n旧密码立即失效。')">
+              data-confirm="重置 {{.User.Phone}} 的密码？\n旧密码立即失效。">
           {{template "csrf" .}}
           <input type="hidden" name="id" value="{{.User.ID}}">
           <button class="btn outline small" type="submit" style="width:auto;">重置密码</button>
         </form>
         {{if .SMSAvailable}}
         <form method="post" action="/admin/users/reset-password" style="margin:0;"
-              onsubmit="return confirm('重置密码并通过 {{.SMSProvider}} 发短信给 {{.User.Phone}}？')">
+              data-confirm="重置密码并通过 {{.SMSProvider}} 发短信给 {{.User.Phone}}？">
           {{template "csrf" .}}
           <input type="hidden" name="id" value="{{.User.ID}}">
           <input type="hidden" name="via_sms" value="1">
@@ -55,14 +55,14 @@
         {{end}}
         {{if .User.TOTPSecret}}
         <form method="post" action="/admin/users/reset-2fa" style="margin:0;"
-              onsubmit="return confirm('重置 {{.User.Phone}} 的二步验证？\n本人下次登录将无需 6 位验证码。')">
+              data-confirm="重置 {{.User.Phone}} 的二步验证？\n本人下次登录将无需 6 位验证码。">
           {{template "csrf" .}}
           <input type="hidden" name="id" value="{{.User.ID}}">
           <button class="btn outline small" type="submit" style="width:auto;">重置 2FA</button>
         </form>
         {{end}}
         <form method="post" action="/admin/users/delete" style="margin:0;"
-              onsubmit="return confirm('彻底删除 {{.User.Phone}}？该用户的 MAC 仍保留但 owner 被清空。')">
+              data-confirm="彻底删除 {{.User.Phone}}？该用户的 MAC 仍保留但 owner 被清空。">
           {{template "csrf" .}}
           <input type="hidden" name="id" value="{{.User.ID}}">
           <button class="btn danger small" type="submit" style="width:auto;">删除账号</button>
@@ -203,5 +203,8 @@
     </section>
   </main>
 </div>
+  {{/* Confirm/print handlers run via ui.js data-* attributes — the CSP
+       (script-src 'self') blocks inline on*= attributes. */}}
+  <script src="/static/ui.js" defer></script>
 </body>
 </html>
