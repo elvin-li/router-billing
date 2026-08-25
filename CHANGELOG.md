@@ -93,6 +93,45 @@ Correctness / performance:
   batched query instead of one DB lookup per device (100+ on a busy
   network).
 
+Round 3 (same release):
+
+Security:
+
+- `/admin/resync` now requires POST. It mutated the firewall set on any
+  method, and the CSRF check only covers POST bodies — with
+  SameSite=Lax cookies riding along on top-level GET navigation, any
+  page an authed admin visited could trigger a resync via a plain link.
+- The temp password from `/admin/users/reset-password` no longer rides
+  the redirect URL (`?reset_pwd=...` persisted a live credential in
+  browser history and intermediary logs). It now travels via a one-shot
+  server-side flash token: displayed on exactly one page render, gone
+  on reload, expires after 2 minutes if never viewed.
+
+Correctness:
+
+- Voucher redemption and the MAC grant now commit in ONE SQLite
+  transaction (`db.RedeemVoucherGrant`). The old two-step flow
+  (RedeemVoucher then MACSvc.Extend) could burn the customer's code
+  with nothing delivered if the grant failed — unrecoverable without
+  admin surgery. A firewall add failure no longer fails the redemption
+  either: the DB is the source of truth, the hourly reconcile heals set
+  drift, and the failure lands a `redeem_fw_add_failed` audit row so
+  ops can spot affected customers.
+
+Performance:
+
+- The attention counters (6 COUNT queries) are cached for 3 seconds.
+  They used to fire on every admin page render (sidebar badges), a
+  second time on pages that display them (dashboard, /admin/macs,
+  /admin/health), and every 5s per connected SSE stats stream — all
+  through the single SQLite connection a low-end router runs.
+- /admin/devices sorting switched from insertion sort to
+  sort.SliceStable — O(n log n) on busy networks, same stable ranking.
+
+9 new tests: resync method guard, redeem atomicity (DB + service +
+firewall-failure paths), reset-password flash flow + store semantics,
+attention cache TTL.
+
 ## v0.96 — Fix: dashboard plan-sales table was silently empty
 
 Pre-v0.96 the /admin/dashboard "最近 30 天按套餐" table referenced
