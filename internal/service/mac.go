@@ -81,13 +81,21 @@ func (s *MACService) GrantFromOrder(ctx context.Context, o *models.Order) error 
 // NOT surfaced — the DB is the source of truth and Extend's hard-fail
 // semantics would report failure for a grant that actually landed.
 func (s *MACService) GrantFromVoucher(ctx context.Context, mac, label string, days int, userID *int64) (*models.MAC, error) {
+	// Same service-level lock as every other composite DB+firewall op —
+	// the v0.110 serialization pass covered GrantFromOrder but missed this
+	// sibling, so a redemption's FW.Add could land between a concurrent
+	// Resync's active-list read and its full set rebuild and be flushed
+	// straight back out of the kernel set (redeemed customer offline until
+	// the next reconcile).
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	m, err := s.DB.UpsertMAC(ctx, mac, label, days, userID)
 	if err != nil {
 		return nil, fmt.Errorf("upsert mac: %w", err)
 	}
 	if err := s.FW.Add(ctx, m.Mac); err != nil {
 		log.Printf("warn: firewall add %s (voucher): %v — attempting resync", m.Mac, err)
-		if rerr := s.Resync(ctx); rerr != nil {
+		if rerr := s.resyncLocked(ctx); rerr != nil {
 			log.Printf("ERROR: firewall resync after failed add %s: %v (granted MAC offline until next resync)", m.Mac, rerr)
 		}
 	}
