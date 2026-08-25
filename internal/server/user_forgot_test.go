@@ -313,6 +313,40 @@ func TestForgotPasswordVerifyMissingRowExpired(t *testing.T) {
 	}
 }
 
+func TestForgotPasswordVerifyDoesNotEnumerateAccounts(t *testing.T) {
+	// Probing /verify with a made-up code must answer identically for an
+	// unregistered phone and a registered phone that never requested a
+	// reset. Pre-v0.106 the former said 验证码错误 and the latter 已过期 —
+	// a free registration oracle that never even triggered an SMS.
+	app := setupTestApp(t)
+	withConsoleSMS(t, app)
+	h := app.Routes()
+
+	registerUserForReset(t, h, "13800138008", "real-user-pw")
+	jar, csrf := jarWithCSRF(t, h)
+
+	probe := func(phone string) string {
+		res, body := do(t, h, "POST", "/user/forgot-password/verify",
+			url.Values{"phone": {phone}, "code": {"123456"}, "new_password": {"whatever789"}, "_csrf": {csrf}}, jar)
+		if res.StatusCode != 200 {
+			t.Fatalf("probe %s: %d", phone, res.StatusCode)
+		}
+		return body
+	}
+
+	registered := probe("13800138008")   // exists, no reset pending
+	unregistered := probe("13800130000") // does not exist
+
+	for _, banner := range []string{"验证码已过期", "验证码错误"} {
+		if strings.Contains(registered, banner) != strings.Contains(unregistered, banner) {
+			t.Errorf("banner %q differs between registered and unregistered phone — enumeration oracle", banner)
+		}
+	}
+	if !strings.Contains(unregistered, "验证码已过期") {
+		t.Errorf("expected uniform expired banner; body=%s", truncate(unregistered, 300))
+	}
+}
+
 func TestForgotPasswordSuspendedUserSilent(t *testing.T) {
 	app := setupTestApp(t)
 	console := withConsoleSMS(t, app)
