@@ -534,6 +534,11 @@ func (c *Config) validatePay() error {
 			c.Pay.WeChat.PrivateKeyPath == "" || c.Pay.WeChat.NotifyURL == "" {
 			return fmt.Errorf("pay.wechat enabled but credentials incomplete")
 		}
+		// AES-256-GCM requires exactly 32 bytes; otherwise every callback
+		// fails at aes.NewCipher instead of at --check-config/startup.
+		if len(c.Pay.WeChat.APIv3Key) != 32 {
+			return fmt.Errorf("pay.wechat api_v3_key must be exactly 32 bytes (got %d)", len(c.Pay.WeChat.APIv3Key))
+		}
 	}
 	if c.Pay.Alipay.Enabled {
 		if c.Pay.Alipay.AppID == "" || c.Pay.Alipay.PrivateKeyPath == "" ||

@@ -12,6 +12,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"encoding/pem"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -160,6 +161,30 @@ func TestWeChatDecodeNotifyRejectsNonPaymentEvent(t *testing.T) {
 	body := craftWxNotifyEnvelopeEvent(t, apiV3, "MCH-X", "APP-Y", "REFUND.SUCCESS")
 	if _, err := w.DecodeNotify(body); err == nil {
 		t.Error("expected non-TRANSACTION.SUCCESS event_type to be rejected")
+	}
+}
+
+// A wrong-size nonce used to panic inside aead.Open (GCM panics rather than
+// erroring on bad nonce length), and the nonce is attacker-controlled body
+// input reachable before any signature check succeeds. Must return an error.
+func TestWeChatDecodeNotifyRejectsBadNonceLength(t *testing.T) {
+	privPath, _, _ := writePEMKey(t)
+	apiV3 := []byte("01234567890123456789012345678901")
+	w, _ := NewWeChat("MCH-X", "APP-Y", string(apiV3), "S", privPath, "http://x")
+
+	for _, nonce := range []string{"", "short", "way-too-long-nonce-value-here"} {
+		var env wxNotifyEnvelope
+		env.EventType = "TRANSACTION.SUCCESS"
+		env.Resource.Algorithm = "AEAD_AES_256_GCM"
+		env.Resource.Ciphertext = base64.StdEncoding.EncodeToString([]byte("junk"))
+		env.Resource.Nonce = nonce
+		env.Resource.AssociatedData = "transaction"
+		body, _ := json.Marshal(env)
+		if _, err := w.DecodeNotify(body); err == nil {
+			t.Errorf("nonce %q: expected error, got nil", nonce)
+		} else if !errors.Is(err, ErrInvalidPayload) {
+			t.Errorf("nonce %q: err = %v, want ErrInvalidPayload", nonce, err)
+		}
 	}
 }
 

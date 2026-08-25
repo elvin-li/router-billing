@@ -352,6 +352,9 @@ func (w *WeChat) refreshPlatformCerts(ctx context.Context) error {
 		if err != nil {
 			continue
 		}
+		if len(d.EncryptCertificate.Nonce) != aead.NonceSize() {
+			continue // wrong-size nonce would panic aead.Open
+		}
 		plain, err := aead.Open(nil, []byte(d.EncryptCertificate.Nonce), ct,
 			[]byte(d.EncryptCertificate.AssociatedData))
 		if err != nil {
@@ -405,6 +408,11 @@ func (w *WeChat) DecodeNotify(body []byte) (*PaidNotice, error) {
 	aead, err := cipher.NewGCM(block)
 	if err != nil {
 		return nil, err
+	}
+	// GCM Open panics (not errors) on a wrong-size nonce, and the nonce here is
+	// attacker-controlled input from the notification body. Reject early.
+	if len(env.Resource.Nonce) != aead.NonceSize() {
+		return nil, fmt.Errorf("%w: bad nonce length %d", ErrInvalidPayload, len(env.Resource.Nonce))
 	}
 	plain, err := aead.Open(nil, []byte(env.Resource.Nonce), ct, []byte(env.Resource.AssociatedData))
 	if err != nil {
