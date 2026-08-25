@@ -16,8 +16,10 @@ import (
 // The real pre-v0.96 footprint was:
 //
 //   - ExecuteTemplate errored out mid-render at the first .Count
+//
 //   - The unbuffered render() had already written headers + partial body
 //     to the wire, so the implicit WriteHeader(200) stuck
+//
 //   - http.Error's WriteHeader(500) was silently dropped, but its
 //     "internal\n" body got appended to the half-rendered table:
 //
