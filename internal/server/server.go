@@ -354,7 +354,7 @@ func (a *App) Routes() http.Handler {
 		http.ServeFile(w, r, filepath.Join(staticDir, "sw.js"))
 	})
 
-	return a.securityHeaders(csrfMiddleware(logMiddleware(mux)))
+	return a.securityHeaders(a.realIPMiddleware(csrfMiddleware(logMiddleware(mux))))
 }
 
 func (a *App) Run(ctx context.Context) error {

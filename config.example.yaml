@@ -100,3 +100,15 @@ scheduler:
 # webhook:
 #   url: "https://shopkeeper.example/router-billing/hook"
 #   secret: "a-long-random-shared-secret"
+
+# 安全加固（全部可选）
+# security:
+#   # 反向代理白名单（单 IP 或 CIDR）。只有请求直接来自这些地址时才信任
+#   # X-Forwarded-For 取真实客户端 IP（用于限流和审计日志）。不配置（默认）
+#   # 时该头一律忽略 —— 否则任何直连客户端都能伪造 IP 绕过按 IP 的限流。
+#   # 用 nginx/Caddy 反代时请把代理地址列进来。
+#   trusted_proxies:
+#     - 127.0.0.1
+#   # password_strength: strict      # 注册/改密/重置的密码策略（默认宽松）
+#   # admin_session_hours: 12        # 管理员会话时长（1..168）
+#   # user_session_days: 30          # 用户会话时长（1..365）

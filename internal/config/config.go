@@ -80,6 +80,16 @@ type Security struct {
 	// /api/admin/orders/cancel-stale; this saves operators having to
 	// wire up cron. 0 (default) = disabled. Clamped to [1, 720] (1h .. 30d).
 	AutoCancelStaleOrderHours int `yaml:"auto_cancel_stale_order_hours,omitempty"`
+
+	// TrustedProxies lists reverse-proxy addresses (single IPs or CIDRs,
+	// e.g. "127.0.0.1" / "10.0.0.0/8") whose X-Forwarded-For header may be
+	// believed for the client IP. Requests arriving from anywhere else
+	// have the header ignored — otherwise any direct client could rotate
+	// a fake X-Forwarded-For to sidestep every per-IP rate limit and to
+	// forge the IPs recorded in the audit log. Empty (default) = never
+	// trust the header; deployments behind nginx/Caddy should list the
+	// proxy here to keep per-client rate-limit keying.
+	TrustedProxies []string `yaml:"trusted_proxies,omitempty"`
 }
 
 // AutoCancelStaleOrders returns the clamped hours window or 0 (disabled).
