@@ -60,6 +60,13 @@ type App struct {
 	waitMu  sync.Mutex
 	waiters map[string][]chan struct{} // order_no → pending wait channels
 
+	// expiryRemMu serializes expiry-reminder passes. The hourly loop and
+	// the manual /admin/sms-log/expiry-reminders trigger share a 22h
+	// audit-row dedup window that is only written AFTER each SMS goes
+	// out — two overlapping passes both list the same eligible MACs
+	// before either writes its rows, double-texting every listed user.
+	expiryRemMu sync.Mutex
+
 	// sseTick overrides the 5s SSE push cadence (tests only). 0 = default.
 	sseTick time.Duration
 }

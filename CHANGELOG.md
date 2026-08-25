@@ -1,5 +1,50 @@
 # Changelog
 
+## v0.110 — Concurrency: DB↔firewall lost updates serialized; duplicate reminder SMS
+
+Race-hunting pass over everything that pairs a SQLite mutation with a
+firewall or SMS side effect. The DB layer is transactional and both
+firewall backends serialize their own commands, but the PAIRING of the
+two was not atomic — concurrent actors (payment finalizer, hourly
+expiry scheduler, minute schedule enforcer, admin handlers) could
+interleave into firewall state that contradicts the DB until the next
+resync. All fixes carry deterministic regression tests (a one-shot gate
+freezes one actor inside its firewall/SMS call while the conflicting
+actor runs); each test was verified to fail against the pre-fix code.
+
+A. (HIGH) `MACService` now holds a service-level mutex across every
+composite DB+firewall operation (grant, extend, revoke, delete,
+replace, resync, expiry sweep, schedule enforcement). Closed lost
+updates, each of which knocked a PAYING customer offline (or left a
+blocked one online) for up to an hour:
+
+- a grant landing between `Resync`'s active-list read and its full
+  set rebuild was flushed straight back out of the kernel set;
+- a payment re-activating a MAC between `ExpireDue`'s DB flip and its
+  firewall-removal loop had its fresh `FW.Add` yanked by the sweep;
+- the minute schedule enforcer could re-add a MAC that a concurrent
+  admin revoke had just blocked and removed, for the rest of the
+  schedule window.
+
+`GrantFromOrder`'s failure-path resync now reuses the already-held
+lock (`resyncLocked`) instead of self-deadlocking.
+
+B. The immediate schedule apply (`/admin/macs/schedule` save + clear)
+moved from the handler into the locked service method
+`ApplyScheduleNow`: the v0.108 eligibility check was correct but ran
+unlocked, so a revoke/expiry landing between the row re-read and the
+`FW.Add` was silently overwritten. Clearing a schedule on an
+ineligible MAC now defensively removes it (previously: just didn't
+add).
+
+C. Overlapping expiry-reminder passes double-texted users: the hourly
+loop and the manual /admin/sms-log/expiry-reminders trigger share a
+22h audit-row de-dup window that is only written AFTER each SMS is
+delivered, so two concurrent passes both listed (and texted) the same
+owners. One pass at a time now — the second pass observes the first
+one's de-dup rows and sends nothing. SMS costs real money per message,
+so this was a billable bug, not just noise.
+
 ## v0.109 — User logout CSRF + payment/voucher correctness
 
 ### User logout CSRF hardening
