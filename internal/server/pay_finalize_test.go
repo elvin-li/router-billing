@@ -27,7 +27,7 @@ func seedPendingOrder(t *testing.T, app *App, orderNo, mac string, days, cents i
 	}
 }
 
-// Regression (v0.105, HIGH): PSPs redeliver success notifications for up to
+// Regression (v0.106, HIGH): PSPs redeliver success notifications for up to
 // ~24h. If an admin refunded the order in that window, the redelivered (or
 // replayed) notification used to flip the order refunded→paid and re-grant
 // the MAC days — the customer kept the refund AND the access. A notification
@@ -65,7 +65,7 @@ func TestFinalizeDoesNotResurrectRefundedOrder(t *testing.T) {
 	}
 }
 
-// Regression (v0.105, HIGH): the PSP-confirmed amount was never checked
+// Regression (v0.106, HIGH): the PSP-confirmed amount was never checked
 // against the order (pay.ErrBadAmount existed but was unused). A notice
 // whose amount doesn't match the order must not finalize.
 func TestFinalizeRejectsAmountMismatch(t *testing.T) {
@@ -134,7 +134,7 @@ func TestFinalizeGrantsOnceAndIsIdempotent(t *testing.T) {
 	}
 }
 
-// Poll paths from before v0.105 (and hypothetical payloads without a usable
+// Poll paths from before v0.106 (and hypothetical payloads without a usable
 // amount) report AmountCents=0 — that means "unknown", and must finalize
 // rather than be treated as a zero-cost mismatch.
 func TestFinalizeAcceptsUnknownAmount(t *testing.T) {

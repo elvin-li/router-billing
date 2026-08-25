@@ -32,7 +32,7 @@ func New(d *db.DB, fw firewall.API) *MACService {
 // happened and the caller may safely retry the whole grant). A firewall
 // failure after the DB committed is NOT an error: the DB is the source of
 // truth for the mac_paid set, so we attempt an immediate Resync and
-// otherwise log loudly. Pre-v0.105 the fw error bubbled up as a webhook
+// otherwise log loudly. Pre-v0.106 the fw error bubbled up as a webhook
 // 500 whose PSP retries then no-oped (order already paid), so the failed
 // nft add was never retried anyway — and the paid signal/audit/notify were
 // all skipped.

@@ -541,7 +541,7 @@ func (d *DB) queryOrders(ctx context.Context, q string, args ...any) ([]models.O
 // Idempotent — re-calling for an already-paid order returns transitioned=false.
 //
 // `refunded` is a terminal state and is treated like already-paid: both
-// PSPs redeliver success notifications for up to ~24h, and pre-v0.105 a
+// PSPs redeliver success notifications for up to ~24h, and pre-v0.106 a
 // redelivery (or a replayed capture) arriving AFTER an admin refund flipped
 // the order back to `paid` and re-granted the MAC days — the customer kept
 // the refund AND the access. Returning transitioned=false (no error) acks

@@ -11,7 +11,7 @@ import (
 //
 // Only paid orders render. Anyone with the order_no can view — it's a tiny
 // data leak (price + MAC) but the order_no carries 64 bits of crypto-random
-// suffix (v0.105; 32 bits before) so guessing is infeasible. This is the
+// suffix (v0.106; 32 bits before) so guessing is infeasible. This is the
 // standard tradeoff for "click the link in your payment confirmation".
 func (a *App) handleReceipt(w http.ResponseWriter, r *http.Request) {
 	orderNo := r.URL.Query().Get("order_no")

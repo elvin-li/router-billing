@@ -1,5 +1,60 @@
 # Changelog
 
+## v0.106 — Payment hardening: refund-replay resurrection, amount cross-check, lost grants
+
+Money/security pass over the payment finalize path.
+
+A. (HIGH) Redelivered payment notifications could resurrect refunded
+orders. Both WeChat and Alipay redeliver success notifications for up
+to ~24h; MarkOrderPaid had no terminal-state guard, so a redelivery
+(or a replayed capture) arriving AFTER an admin refund flipped the
+order refunded→paid and re-granted the MAC days — the customer kept
+the refund AND the access, and the books showed the order paid.
+`refunded` is now terminal: the notification is acked (so the PSP
+stops retrying) without touching the order or the MAC. The UPDATE is
+additionally guarded on the status that was read, so a refund racing
+a webhook can't be overwritten either.
+
+B. (HIGH) The PSP-confirmed amount was never checked against the
+order — pay.ErrBadAmount existed but nothing used it. PaidNotice now
+carries AmountCents (WeChat notify `amount.total`, WeChat query,
+Alipay notify/query `total_amount`, parsed without floats) and the
+finalizer refuses + audits (`pay_amount_mismatch`) when it doesn't
+match the order's amount_cents. Amount-less payloads still finalize
+(0 = unknown, not "free").
+
+C. (HIGH, reliability) A failed grant after mark-paid was
+unrecoverable: MarkOrderPaid's one transitioned=true signal was
+consumed, so PSP retries and the poller both no-oped and the customer
+paid for nothing. Now: (1) a firewall-only failure no longer fails the
+grant — the DB row is authoritative, an immediate Resync converges the
+set, and the paid signal/audit/notify still fire (previously all three
+were skipped and the webhook 500'd uselessly); (2) if the DB grant
+itself fails, the order is reverted to pending so the next
+notify/poll retries the whole finalize; (3) finalize runs under
+context.WithoutCancel so a browser disconnect on the /status and
+/wait paths can't abort it halfway between "paid" and "granted".
+
+D. WeChat DecodeNotify only accepts event_type=TRANSACTION.SUCCESS —
+refund/other events can't be misread as payments.
+
+E. Alipay request `timestamp` is now GMT+8 (北京时间) as the gateway
+requires; a UTC router used to send it 8 hours off.
+
+F. order_no entropy bumped from 32 to 64 random bits (31 chars total,
+still within WeChat's 32-char out_trade_no cap) — it doubles as the
+bearer token for /api/pay/status, /api/pay/wait and /receipt, and the
+timestamp prefix is guessable. Old 23-char order numbers keep working
+everywhere, including audit-log links.
+
+G. Request-size caps: /api/pay/create body limited to 4KB, /notify/ali
+to 64KB (matching /notify/wx).
+
+Regression tests cover the refund-replay resurrection, the amount
+mismatch (rejected + audited), finalize idempotency, unknown-amount
+acceptance, the Beijing-time timestamp, the event_type filter, and the
+new order_no shape.
+
 ## v0.105 — Password change / reset now kills other sessions + trusted devices
 
 Changing password from `/user/me` previously left every other
