@@ -344,26 +344,33 @@ func (d *DB) ReplaceMAC(ctx context.Context, userID int64, oldMac, newMac, label
 }
 
 // ExpireDueMACs marks expired MACs and returns the ones newly expired.
+//
+// Single UPDATE ... RETURNING so the flip and the report are one atomic
+// statement. The previous SELECT-then-UPDATE pair had two races:
+//   - a MAC extended between the two statements stayed active (good) but
+//     was still in the returned list, so the caller revoked firewall
+//     access for a MAC that had just been renewed;
+//   - a MAC expiring between the two statements got flipped but was NOT
+//     in the returned list, so its revoke webhook/notify never fired —
+//     and two concurrent sweeps could both report the same MAC.
 func (d *DB) ExpireDueMACs(ctx context.Context) ([]string, error) {
-	rows, err := d.conn.QueryContext(ctx, `SELECT mac FROM macs WHERE status = 'active' AND expires_at <= CURRENT_TIMESTAMP`)
+	rows, err := d.conn.QueryContext(ctx, `
+		UPDATE macs SET status = 'expired', updated_at = CURRENT_TIMESTAMP
+		 WHERE status = 'active' AND expires_at <= CURRENT_TIMESTAMP
+		 RETURNING mac`)
 	if err != nil {
 		return nil, err
 	}
+	defer rows.Close()
 	var expired []string
 	for rows.Next() {
 		var m string
 		if err := rows.Scan(&m); err != nil {
-			rows.Close()
 			return nil, err
 		}
 		expired = append(expired, m)
 	}
-	rows.Close()
-	if len(expired) == 0 {
-		return nil, nil
-	}
-	_, err = d.conn.ExecContext(ctx, `UPDATE macs SET status = 'expired', updated_at = CURRENT_TIMESTAMP WHERE status = 'active' AND expires_at <= CURRENT_TIMESTAMP`)
-	return expired, err
+	return expired, rows.Err()
 }
 
 // ---------- Orders ----------
@@ -1055,16 +1062,30 @@ func (d *DB) ConfirmUserTOTP(ctx context.Context, userID int64) error {
 // Also clears backup codes AND trusted devices so a future enrollment
 // starts from a clean slate — and so an admin reset doesn't leave behind
 // trust-tokens that would bypass the next enrollment.
+//
+// All three writes run in one transaction: a crash or error after the
+// secret wipe but before the trusted-device wipe would otherwise leave
+// stale trust-tokens that silently bypass the NEXT enrollment's 2FA.
 func (d *DB) ClearUserTOTP(ctx context.Context, userID int64) error {
-	if _, err := d.conn.ExecContext(ctx,
+	tx, err := d.conn.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
+	if _, err := tx.ExecContext(ctx,
 		`UPDATE users SET totp_secret = '', totp_pending = '', updated_at = ? WHERE id = ?`,
 		time.Now().UTC(), userID); err != nil {
 		return err
 	}
-	if err := d.ClearBackupCodes(ctx, userID); err != nil {
+	if _, err := tx.ExecContext(ctx,
+		`DELETE FROM user_backup_codes WHERE user_id = ?`, userID); err != nil {
 		return err
 	}
-	return d.DeleteAllTrustedDevices(ctx, userID)
+	if _, err := tx.ExecContext(ctx,
+		`DELETE FROM user_trusted_devices WHERE user_id = ?`, userID); err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
 func (d *DB) ListUsers(ctx context.Context, limit int) ([]models.User, error) {
@@ -1101,25 +1122,51 @@ func (d *DB) SearchUsers(ctx context.Context, q string, limit int) ([]models.Use
 	return out, rows.Err()
 }
 
+// SuspendUser flips the suspended flag. Suspending also drops the user's
+// active sessions IN THE SAME transaction — previously the session delete
+// was a separate best-effort statement whose error was swallowed, so a
+// failed delete left a suspended user with a live session until it expired.
 func (d *DB) SuspendUser(ctx context.Context, id int64, suspended bool) error {
 	v := 0
 	if suspended {
 		v = 1
 	}
-	_, err := d.conn.ExecContext(ctx,
-		`UPDATE users SET suspended = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`, v, id)
-	if err == nil && suspended {
-		// also drop the user's active sessions so a suspended user can't keep using the app
-		_, _ = d.conn.ExecContext(ctx, `DELETE FROM sessions WHERE kind='user' AND user_id = ?`, id)
+	tx, err := d.conn.BeginTx(ctx, nil)
+	if err != nil {
+		return err
 	}
-	return err
+	defer func() { _ = tx.Rollback() }()
+	if _, err := tx.ExecContext(ctx,
+		`UPDATE users SET suspended = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`, v, id); err != nil {
+		return err
+	}
+	if suspended {
+		if _, err := tx.ExecContext(ctx,
+			`DELETE FROM sessions WHERE kind='user' AND user_id = ?`, id); err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
 }
 
-// DeleteUser removes a user. macs.user_id / orders.user_id are SET NULL by FK.
+// DeleteUser removes a user. macs.user_id / orders.user_id are SET NULL by
+// FK; trusted devices / backup codes / password resets CASCADE. Sessions
+// have no FK (token-keyed, kind-discriminated) so they're deleted in the
+// same transaction — atomic, and errors are no longer swallowed.
 func (d *DB) DeleteUser(ctx context.Context, id int64) error {
-	_, _ = d.conn.ExecContext(ctx, `DELETE FROM sessions WHERE kind='user' AND user_id = ?`, id)
-	_, err := d.conn.ExecContext(ctx, `DELETE FROM users WHERE id = ?`, id)
-	return err
+	tx, err := d.conn.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
+	if _, err := tx.ExecContext(ctx,
+		`DELETE FROM sessions WHERE kind='user' AND user_id = ?`, id); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM users WHERE id = ?`, id); err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
 // ---------- TOTP Trusted devices ----------
@@ -1352,13 +1399,15 @@ func (d *DB) GetActivePasswordReset(ctx context.Context, userID int64) (*models.
 // BumpPasswordResetAttempts atomically increments attempts. Returns the new
 // count so the caller can decide to expire the code (>= maxAttempts) and
 // audit-log the failure.
+//
+// Single UPDATE ... RETURNING — the previous UPDATE-then-SELECT pair let
+// two concurrent failed verifies both read the same post-increment value,
+// under-counting attempts and stretching the brute-force budget.
 func (d *DB) BumpPasswordResetAttempts(ctx context.Context, id int64) (int, error) {
-	if _, err := d.conn.ExecContext(ctx,
-		`UPDATE password_resets SET attempts = attempts + 1 WHERE id = ?`, id); err != nil {
-		return 0, err
-	}
 	var n int
-	if err := d.conn.QueryRowContext(ctx, `SELECT attempts FROM password_resets WHERE id = ?`, id).Scan(&n); err != nil {
+	err := d.conn.QueryRowContext(ctx,
+		`UPDATE password_resets SET attempts = attempts + 1 WHERE id = ? RETURNING attempts`, id).Scan(&n)
+	if err != nil {
 		return 0, err
 	}
 	return n, nil
@@ -1586,7 +1635,11 @@ func (d *DB) Attention(ctx context.Context) (AttentionCounts, error) {
 		{`SELECT COUNT(*) FROM macs WHERE status='active' AND expires_at > CURRENT_TIMESTAMP AND expires_at < datetime('now','+7 days')`, &a.ExpiringSoon},
 		{`SELECT COUNT(*) FROM orders WHERE status='pending' AND created_at < datetime('now','-10 minutes')`, &a.StalePending},
 		{`SELECT COUNT(*) FROM users WHERE suspended = 1`, &a.SuspendedUsers},
-		{`SELECT COUNT(*) FROM orders WHERE status='failed' AND date(created_at) = date('now')`, &a.FailedToday},
+		// created_at is Go-written text that SQLite's date() can't parse
+		// (returns NULL), so `date(created_at) = date('now')` matched
+		// nothing and FailedToday was permanently 0. Compare against
+		// start-of-day like DashboardSnapshot does.
+		{`SELECT COUNT(*) FROM orders WHERE status='failed' AND created_at >= datetime('now','start of day')`, &a.FailedToday},
 		// v0.59: 24h failure windows on the observability tables. Use
 		// sent_at since CURRENT_TIMESTAMP is what the DEFAULT computes —
 		// matches what the rows actually carry.
@@ -1961,10 +2014,18 @@ func (d *DB) SnapshotToday(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	// paid_orders for today
+	// paid_orders for today. NOTE: paid_at is written by Go (MarkOrderPaid)
+	// and modernc.org/sqlite stores time.Time as "2006-01-02 15:04:05.999
+	// +0000 UTC" — a format SQLite's date() can NOT parse (returns NULL),
+	// so the old `date(paid_at) = date('now')` predicate matched nothing
+	// and every snapshot recorded paid_orders = 0. Lexicographic >= against
+	// datetime('now','start of day') works because the "YYYY-MM-DD
+	// HH:MM:SS" prefix is shared between the two formats.
 	var paidToday int
-	_ = d.conn.QueryRowContext(ctx,
-		`SELECT COUNT(*) FROM orders WHERE status='paid' AND date(paid_at) = date('now')`).Scan(&paidToday)
+	if err := d.conn.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM orders WHERE status='paid' AND paid_at >= datetime('now','start of day')`).Scan(&paidToday); err != nil {
+		return err
+	}
 	day := time.Now().UTC().Format("2006-01-02")
 	now := time.Now().UTC()
 	_, err = d.conn.ExecContext(ctx,
