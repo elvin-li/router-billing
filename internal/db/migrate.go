@@ -63,9 +63,9 @@ func runMigrations(d *sql.DB) error {
 // hashing migrations because raw tokens and SHA-256 hashes are both 64-char
 // hex — indistinguishable by format.
 const (
-	// v0.97: sessions.token rewritten from raw cookie values to SHA-256.
+	// v0.113: sessions.token rewritten from raw cookie values to SHA-256.
 	schemaVersionSessionHashes = 1
-	// v0.97: user_trusted_devices.token likewise rewritten to SHA-256.
+	// v0.113: user_trusted_devices.token likewise rewritten to SHA-256.
 	schemaVersionTrustedDeviceHashes = 2
 )
 

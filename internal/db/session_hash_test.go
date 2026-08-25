@@ -104,7 +104,7 @@ func TestKeepExceptHelpersHashTheKeepToken(t *testing.T) {
 	}
 }
 
-// Upgrading a database that still holds plaintext tokens (pre-v0.97) must
+// Upgrading a database that still holds plaintext tokens (pre-v0.113) must
 // rewrite them to hashes WITHOUT invalidating the cookies clients hold.
 func TestMigrationHashesLegacyPlaintextTokens(t *testing.T) {
 	dir := t.TempDir()

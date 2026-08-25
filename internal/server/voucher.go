@@ -308,9 +308,14 @@ func (a *App) handleAdminVouchersExport(w http.ResponseWriter, r *http.Request) 
 	}
 	stamp := time.Now().Format("20060102-150405")
 	w.Header().Set("Content-Type", "text/csv; charset=utf-8")
-	filenameSuffix := batch
+	// The batch/status query params are free text; every other export uses
+	// constant filenames for exactly this reason. Strip anything outside
+	// [A-Za-z0-9._-] so a batch named `x";evil=` can't break out of the
+	// Content-Disposition quoted-string (net/http neutralizes CR/LF, but
+	// quotes pass through verbatim).
+	filenameSuffix := filenameSafe(batch)
 	if wantStatus != "" {
-		filenameSuffix = batch + "-" + wantStatus
+		filenameSuffix = filenameSafe(batch + "-" + wantStatus)
 	}
 	w.Header().Set("Content-Disposition",
 		fmt.Sprintf(`attachment; filename="vouchers-%s-%s.csv"`, filenameSuffix, stamp))
@@ -454,6 +459,24 @@ func (a *App) handleRedeem(w http.ResponseWriter, r *http.Request) {
 	q := fmt.Sprintf("/redeem?ok=1&days=%d&expires_at=%s",
 		v.Days, m.ExpiresAt.Format("2006-01-02"))
 	http.Redirect(w, r, q, http.StatusSeeOther)
+}
+
+// filenameSafe keeps ASCII letters, digits and ._- (capped at 60 chars) so
+// free-text values embedded in a Content-Disposition filename can't carry
+// quotes or separators into the header.
+func filenameSafe(s string) string {
+	var b strings.Builder
+	for _, r := range s {
+		if b.Len() >= 60 {
+			break
+		}
+		switch {
+		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9',
+			r == '.', r == '_', r == '-':
+			b.WriteRune(r)
+		}
+	}
+	return b.String()
 }
 
 func redeemErrLabel(err error) string {
