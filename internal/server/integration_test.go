@@ -215,8 +215,9 @@ func TestUserRegisterLoginLogout(t *testing.T) {
 		t.Error("phone not shown on /user/me")
 	}
 
-	// Logout
-	res, _ = do(t, h, "GET", "/user/logout", nil, jar)
+	// Logout — POST + CSRF (GET no longer ends the session).
+	res, _ = do(t, h, "POST", "/user/logout",
+		url.Values{"_csrf": {jar[csrfCookieName]}}, jar)
 	if res.StatusCode != 303 {
 		t.Errorf("logout: %d", res.StatusCode)
 	}

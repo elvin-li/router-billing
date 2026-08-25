@@ -17,7 +17,10 @@
       <h1>我的账号</h1>
       <p class="sub">{{.User.Phone}}</p>
     </div>
-    <a href="/user/logout" class="btn outline small" style="width:auto;">登出</a>
+    <form method="post" action="/user/logout" style="margin:0;">
+      {{template "csrf" .}}
+      <button type="submit" class="btn outline small" style="width:auto;">登出</button>
+    </form>
   </header>
 
   {{if eq .OK "registered"}}<div class="flash ok" style="max-width:680px; width:100%; margin-top:12px;">注册成功 ✓</div>{{end}}
