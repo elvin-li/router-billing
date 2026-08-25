@@ -1,6 +1,7 @@
 package server
 
 import (
+	"context"
 	"fmt"
 	"log"
 	"net/http"
@@ -124,18 +125,22 @@ func (a *App) handleAdminExpireNow(w http.ResponseWriter, r *http.Request) {
 		http.Redirect(w, r, "/admin/maintenance", http.StatusSeeOther)
 		return
 	}
-	expired, err := a.DB.ExpireDueMACs(r.Context())
+	// Detached from the request context (v0.106 finalize rationale): a
+	// client disconnect between the DB flip and the firewall resync would
+	// leave newly-expired MACs online until the next scheduler tick.
+	ctx := context.WithoutCancel(r.Context())
+	expired, err := a.DB.ExpireDueMACs(ctx)
 	if err != nil {
 		log.Printf("admin expire-now: %v", err)
-		a.DB.Audit(r.Context(), "admin", "expire_now_failed", "",
+		a.DB.Audit(ctx, "admin", "expire_now_failed", "",
 			"err="+err.Error()+" ip="+clientIP(r))
 		http.Redirect(w, r, "/admin/maintenance?err=expire_failed", http.StatusSeeOther)
 		return
 	}
-	if rerr := a.MACSvc.Resync(r.Context()); rerr != nil {
+	if rerr := a.MACSvc.Resync(ctx); rerr != nil {
 		log.Printf("admin expire-now resync: %v", rerr)
 	}
-	a.DB.Audit(r.Context(), "admin", "expire_now", "",
+	a.DB.Audit(ctx, "admin", "expire_now", "",
 		fmt.Sprintf("expired=%d ip=%s", len(expired), clientIP(r)))
 	http.Redirect(w, r,
 		fmt.Sprintf("/admin/maintenance?ok=expire_now&expired=%d", len(expired)),

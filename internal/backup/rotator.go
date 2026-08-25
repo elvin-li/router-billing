@@ -59,16 +59,46 @@ func (r *Rotator) Run(ctx context.Context) {
 }
 
 func (r *Rotator) once(ctx context.Context) {
+	dst := filepath.Join(r.Dir, fmt.Sprintf("billing-%s.db", time.Now().Format("20060102-150405")))
+	if err := r.snapshot(ctx, dst); err != nil {
+		log.Printf("backup: snapshot: %v", err)
+	} else {
+		log.Printf("backup: wrote %s", dst)
+	}
+	// Prune even when the snapshot failed. The common failure mode is a
+	// full flash partition — and skipping prune on failure (pre-v0.108
+	// behavior) meant a full disk could never be freed by the rotator, so
+	// every subsequent backup failed too: wedged until manual cleanup.
+	r.prune()
+}
+
+// snapshot writes one consistent copy of the DB to dst.
+//
+// Preferred path is `VACUUM INTO`, which produces a transactionally
+// consistent snapshot even while other goroutines write. The previous
+// checkpoint-then-io.Copy approach copied the live DB file byte-by-byte:
+// any write landing mid-copy (order paid, session created, audit row)
+// could tear pages and silently corrupt the backup — the one file ops
+// would reach for after losing the primary.
+//
+// Falls back to checkpoint+copy only if VACUUM INTO itself errors (e.g.
+// an old SQLite build), so backups keep flowing either way.
+func (r *Rotator) snapshot(ctx context.Context, dst string) error {
+	tmp := dst + ".tmp"
+	_ = os.Remove(tmp) // VACUUM INTO refuses to overwrite an existing file
+	_, verr := r.DB.Exec(ctx, "VACUUM INTO ?", tmp)
+	if verr == nil {
+		// Backups carry password hashes + payment data: clamp to 0600
+		// like the primary DB (VACUUM INTO creates with the umask).
+		_ = os.Chmod(tmp, 0o600)
+		return os.Rename(tmp, dst)
+	}
+	log.Printf("backup: vacuum into failed (%v); falling back to checkpoint+copy", verr)
+	_ = os.Remove(tmp)
 	if _, err := r.DB.Exec(ctx, "PRAGMA wal_checkpoint(TRUNCATE)"); err != nil {
 		log.Printf("backup: checkpoint failed: %v", err)
 	}
-	dst := filepath.Join(r.Dir, fmt.Sprintf("billing-%s.db", time.Now().Format("20060102-150405")))
-	if err := copyFile(r.DBPath, dst); err != nil {
-		log.Printf("backup: copy: %v", err)
-		return
-	}
-	log.Printf("backup: wrote %s", dst)
-	r.prune()
+	return copyFile(r.DBPath, dst)
 }
 
 func (r *Rotator) prune() {
@@ -84,6 +114,20 @@ func (r *Rotator) prune() {
 	var items []item
 	for _, e := range entries {
 		if e.IsDir() {
+			continue
+		}
+		// Orphaned .tmp from an interrupted snapshot (crash / power cut /
+		// disk full mid-write). The .db filter below skips them, so they
+		// used to accumulate forever and eat flash. A healthy snapshot
+		// holds its .tmp for well under a minute — anything older than an
+		// hour is garbage.
+		if strings.HasPrefix(e.Name(), "billing-") && strings.HasSuffix(e.Name(), ".db.tmp") {
+			if info, err := e.Info(); err == nil && time.Since(info.ModTime()) > time.Hour {
+				p := filepath.Join(r.Dir, e.Name())
+				if err := os.Remove(p); err == nil {
+					log.Printf("backup: removed stale temp file %s", p)
+				}
+			}
 			continue
 		}
 		if !strings.HasPrefix(e.Name(), "billing-") || !strings.HasSuffix(e.Name(), ".db") {
@@ -130,6 +174,7 @@ func copyFile(src, dst string) error {
 		return err
 	}
 	if err := out.Close(); err != nil {
+		os.Remove(tmp) // don't leak the partial file on a failed flush
 		return err
 	}
 	return os.Rename(tmp, dst)

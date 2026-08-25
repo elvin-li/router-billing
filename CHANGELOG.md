@@ -156,6 +156,85 @@ the set alone on DNS outage; the ipset restore script stages+swaps and
 never touches the live set directly.
 
 
+## v0.108 — Background-job reliability: webhook pipeline stall, SMS spam, torn backups
+
+Reliability pass over the background jobs (scheduler, notify worker,
+SMS loops, backup rotator, purge janitor). Complements v0.107's DB
+fixes; no product features.
+
+A. (HIGH) The webhook notify worker retried failures in-place, sleeping
+through the backoff (up to ~5.5 min per event on the default 2s/30s/5m
+schedule) on the single goroutine that drains the 64-slot queue. One
+dead/slow endpoint stalled the whole pipeline until the queue
+overflowed and later pay/grant/revoke events were silently dropped.
+Retries are now scheduled with a timer and re-enqueued, so fresh
+events keep flowing while a failed one waits its turn. (Retried events
+may arrive out of order relative to newer ones — receivers should key
+on the event payload, not arrival order.)
+
+B. (HIGH) A panic in the notify worker — including the OnDelivery hook
+that persists webhook_deliveries rows — or in one scheduler expiry
+pass was unrecovered, killing the entire process (billing UI, payment
+webhooks, firewall enforcement) over one bad tick. Both now recover,
+log, and continue.
+
+C. (HIGH) Backup snapshots could be silently corrupt: the rotator
+checkpointed the WAL and then byte-copied the live DB file, so any
+write landing mid-copy (order paid, session created) tore pages in the
+copy — discovered only when restoring after losing the primary.
+Snapshots now use `VACUUM INTO` (transactionally consistent under
+concurrent writers), written to a .tmp and renamed, clamped to 0600.
+Falls back to checkpoint+copy only if VACUUM INTO itself errors.
+
+D. Backup rotator could wedge a full flash partition permanently:
+prune only ran after a successful snapshot, so once the disk filled,
+every snapshot failed and nothing was ever freed. Prune now runs even
+when the snapshot fails. Orphaned `*.db.tmp` files from interrupted
+snapshots (which the prune filter used to skip forever) are removed
+once they're an hour old, and a failed copy flush no longer leaks its
+partial .tmp.
+
+E. (SMS spam) The expiry-reminder de-dup marker is an audit row written
+AFTER the SMS goes out — with the caller's context. If that context
+died in between (admin closed the manual-trigger page mid-pass, server
+shutdown), the insert failed silently and every later hourly pass
+re-texted the same users until the MAC expired. De-dup/outcome audit
+rows and the sms_log row now use context.WithoutCancel, and the manual
+trigger detaches from the request context entirely (same rationale as
+the v0.106 payment-finalize fix). /admin/maintenance/expire-now is
+likewise detached so a client disconnect can't split the DB expiry
+flip from the firewall resync.
+
+F. Daily admin digest fired one hour EARLY: the loop scheduled at
+`hour-1` while config documents "at the given UTC hour" (1..24, 24 =
+midnight). Also, after a suspend/clock step of N days the loop's
+`target += 24h` catch-up fired N digest SMSes back-to-back; the next
+send is now recomputed from the wall clock (extracted into testable
+`nextDigestAt`).
+
+G. Reminder SMS body understated remaining time by truncating
+(71h → "2 天"); now rounds up ("3 天").
+
+H. Aliyun SMS adapter: a literal &Aliyun{} (nil nowFn/nonceFn) panicked
+inside whichever background goroutine sent the SMS; lazy in-place
+HTTPClient/Endpoint defaulting inside Send was a data race under the
+concurrent senders (reminder loop, digest loop, login alerts). Both
+fixed with local-variable defaults and nil guards.
+
+I. The purge janitor only ever ran 2h after boot, so routers that get
+power-cycled daily never purged expired sessions / audit / sms /
+webhook logs at all. One housekeeping pass now runs at boot (the
+weekly VACUUM intentionally still waits — a daily-rebooted router
+should not VACUUM daily).
+
+Regression tests cover: fresh events flowing past a failing event's
+backoff, retry completion, OnDelivery-panic survival, scheduler
+panic survival, digest hour semantics + clock-jump absorption,
+reminder de-dup across a mid-pass context cancel, day-count rounding,
+snapshot integrity under a live DB (PRAGMA integrity_check), prune
+running despite snapshot failure, stale .tmp cleanup, boot-time purge
+pass, Aliyun zero-value Send and concurrent-Send race (-race).
+
 ## v0.106 — Payment hardening: refund-replay resurrection, amount cross-check, lost grants
 
 Money/security pass over the payment finalize path.
