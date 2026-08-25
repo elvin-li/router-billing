@@ -33,8 +33,10 @@ if [ -f /etc/router-billing/config.yaml ]; then
     log "已存在 /etc/router-billing/config.yaml，跳过覆盖"
 else
     log "首装：写入默认 config.yaml（请立即修改 admin.password）"
-    install -m 0644 "${PKG_DIR}/config.example.yaml" /etc/router-billing/config.yaml
+    install -m 0600 "${PKG_DIR}/config.example.yaml" /etc/router-billing/config.yaml
 fi
+# config 里有管理员口令散列 + 微信/支付宝商户密钥，绝不能全局可读。
+chmod 0600 /etc/router-billing/config.yaml
 
 log "安装 init 脚本"
 install -m 0755 "${PKG_DIR}/openwrt/etc/init.d/router-billing" /etc/init.d/router-billing

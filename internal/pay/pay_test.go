@@ -100,11 +100,16 @@ func TestWeChatAuthHeaderFormat(t *testing.T) {
 // craftWxNotifyEnvelope builds a valid v3 notification envelope using the
 // provided APIv3 key. Mirrors the WeChat server behavior.
 func craftWxNotifyEnvelope(t *testing.T, apiV3Key []byte, mchID, appID string) []byte {
+	return craftWxNotifyEnvelopeEvent(t, apiV3Key, mchID, appID, "TRANSACTION.SUCCESS")
+}
+
+func craftWxNotifyEnvelopeEvent(t *testing.T, apiV3Key []byte, mchID, appID, eventType string) []byte {
 	t.Helper()
 	res := wxNotifyResource{
 		MchID: mchID, AppID: appID, OutTradeNo: "B123456",
 		TransactionID: "WX-TX-001", TradeState: "SUCCESS",
 	}
+	res.Amount.Total = 1234
 	plain, _ := json.Marshal(res)
 
 	nonce := []byte("123456789012") // 12 bytes
@@ -115,7 +120,7 @@ func craftWxNotifyEnvelope(t *testing.T, apiV3Key []byte, mchID, appID string) [
 	ct := aead.Seal(nil, nonce, plain, assoc)
 
 	env := wxNotifyEnvelope{
-		ID: "ev-1", EventType: "TRANSACTION.SUCCESS", ResourceType: "encrypt-resource",
+		ID: "ev-1", EventType: eventType, ResourceType: "encrypt-resource",
 	}
 	env.Resource.Algorithm = "AEAD_AES_256_GCM"
 	env.Resource.Ciphertext = base64.StdEncoding.EncodeToString(ct)
@@ -137,6 +142,24 @@ func TestWeChatDecodeNotifyRoundtrip(t *testing.T) {
 	}
 	if notice.OrderNo != "B123456" || notice.TradeNo != "WX-TX-001" || notice.Provider != "wechat" {
 		t.Errorf("notice mismatch: %+v", notice)
+	}
+	// The notice must carry the PSP-confirmed amount so the server can
+	// cross-check it against the order before granting.
+	if notice.AmountCents != 1234 {
+		t.Errorf("AmountCents = %d, want 1234", notice.AmountCents)
+	}
+}
+
+// Non-payment events (e.g. REFUND.SUCCESS) must never decode into a
+// PaidNotice, even if their resource happens to carry trade_state fields.
+func TestWeChatDecodeNotifyRejectsNonPaymentEvent(t *testing.T) {
+	privPath, _, _ := writePEMKey(t)
+	apiV3 := []byte("01234567890123456789012345678901")
+	w, _ := NewWeChat("MCH-X", "APP-Y", string(apiV3), "S", privPath, "http://x")
+
+	body := craftWxNotifyEnvelopeEvent(t, apiV3, "MCH-X", "APP-Y", "REFUND.SUCCESS")
+	if _, err := w.DecodeNotify(body); err == nil {
+		t.Error("expected non-TRANSACTION.SUCCESS event_type to be rejected")
 	}
 }
 
@@ -204,6 +227,7 @@ func TestAlipayDecodeNotifyRoundtrip(t *testing.T) {
 	form.Set("trade_status", "TRADE_SUCCESS")
 	form.Set("out_trade_no", "ORDER-7")
 	form.Set("trade_no", "ALI-TX-7")
+	form.Set("total_amount", "10.50")
 	form.Set("notify_id", "n-1")
 	form.Set("notify_time", "2025-01-01 00:00:00")
 	form.Set("sign_type", "RSA2")
@@ -223,6 +247,37 @@ func TestAlipayDecodeNotifyRoundtrip(t *testing.T) {
 	}
 	if notice.OrderNo != "ORDER-7" || notice.TradeNo != "ALI-TX-7" || notice.Provider != "alipay" {
 		t.Errorf("notice mismatch: %+v", notice)
+	}
+	if notice.AmountCents != 1050 {
+		t.Errorf("AmountCents = %d, want 1050", notice.AmountCents)
+	}
+}
+
+func TestParseAmountCents(t *testing.T) {
+	cases := []struct {
+		in   string
+		want int
+	}{
+		{"10.50", 1050},
+		{"0.01", 1},
+		{"1", 100},
+		{"1.5", 150},
+		{"300.00", 30000},
+		{" 2.00 ", 200},
+		{"", 0},       // absent → unknown
+		{"abc", 0},    // garbage → unknown
+		{"-1.00", 0},  // negative → unknown
+		{"1.-5", 0},   // negative fraction → unknown
+		{"1.234", 0},  // >2 decimals is not a valid CNY amount → unknown
+		{"0.00", 0},   // zero is indistinguishable from unknown by design
+		{"1e3", 0},    // no scientific notation
+		{"10.", 1000}, // trailing dot tolerated
+		{".50", 50},   // leading dot tolerated
+	}
+	for _, c := range cases {
+		if got := parseAmountCents(c.in); got != c.want {
+			t.Errorf("parseAmountCents(%q) = %d, want %d", c.in, got, c.want)
+		}
 	}
 }
 
@@ -333,7 +388,7 @@ func TestAlipayPrecreateHitsGateway(t *testing.T) {
 func TestAlipayQueryReturnsSuccessTradeNo(t *testing.T) {
 	privPath, pubPath, _ := writePEMKey(t)
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		_, _ = w.Write([]byte(`{"alipay_trade_query_response":{"code":"10000","trade_no":"TX-9","out_trade_no":"O-9","trade_status":"TRADE_SUCCESS"}}`))
+		_, _ = w.Write([]byte(`{"alipay_trade_query_response":{"code":"10000","trade_no":"TX-9","out_trade_no":"O-9","trade_status":"TRADE_SUCCESS","total_amount":"3.00"}}`))
 	}))
 	defer srv.Close()
 	a, _ := NewAlipay("ali", privPath, pubPath, "http://notify", srv.URL)
@@ -344,6 +399,33 @@ func TestAlipayQueryReturnsSuccessTradeNo(t *testing.T) {
 	}
 	if notice.TradeNo != "TX-9" {
 		t.Errorf("trade_no = %q", notice.TradeNo)
+	}
+	if notice.AmountCents != 300 {
+		t.Errorf("AmountCents = %d, want 300", notice.AmountCents)
+	}
+}
+
+// Alipay's gateway requires the request timestamp in GMT+8 (北京时间).
+// A router running UTC used to send its local time — 8 hours off.
+func TestAlipayRequestTimestampIsBeijingTime(t *testing.T) {
+	privPath, pubPath, _ := writePEMKey(t)
+	var gotTS string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotTS = r.PostFormValue("timestamp")
+		_, _ = w.Write([]byte(`{"alipay_trade_precreate_response":{"code":"10000","qr_code":"https://qr.alipay.com/x"}}`))
+	}))
+	defer srv.Close()
+
+	a, _ := NewAlipay("ali", privPath, pubPath, "http://notify", srv.URL)
+	if _, err := a.Precreate(context.Background(), "O-TZ", "tz test", 100); err != nil {
+		t.Fatal(err)
+	}
+	ts, err := time.ParseInLocation("2006-01-02 15:04:05", gotTS, beijing)
+	if err != nil {
+		t.Fatalf("timestamp %q not parseable: %v", gotTS, err)
+	}
+	if d := time.Since(ts); d < -2*time.Minute || d > 2*time.Minute {
+		t.Errorf("timestamp %q is %s away from now — not GMT+8", gotTS, d)
 	}
 }
 

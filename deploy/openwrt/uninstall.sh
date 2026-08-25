@@ -32,8 +32,8 @@ cat <<EOF
 如需移除 Paid_WiFi 的 SSID/网络/防火墙区域，手动执行：
   uci delete network.paid
   uci delete dhcp.paid
-  # 删除 ssid 为 Paid_WiFi 的 wifi-iface：
-  for i in \$(uci show wireless | awk -F'[].[]' '/ssid=.Paid_WiFi./ {print \$2}'); do
+  # 删除 ssid 为 Paid_WiFi 的 wifi-iface（倒序删，删除会让后面的下标前移）：
+  for i in \$(uci show wireless | sed -n "s/^wireless\.@wifi-iface\[\([0-9]*\)\]\.ssid='Paid_WiFi'\$/\1/p" | sort -rn); do
       uci delete wireless.@wifi-iface[\$i]
   done
   uci commit && /etc/init.d/network reload && /etc/init.d/firewall reload && wifi reload

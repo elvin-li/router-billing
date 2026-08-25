@@ -10,9 +10,9 @@ import (
 // GET /receipt?order_no=...  → printable receipt page (商家/用户/admin 都能开)
 //
 // Only paid orders render. Anyone with the order_no can view — it's a tiny
-// data leak (price + MAC) but the order_no itself is 30 chars of mixed
-// timestamp+UUID so guessing is infeasible. This is the standard tradeoff
-// for "click the link in your payment confirmation".
+// data leak (price + MAC) but the order_no carries 64 bits of crypto-random
+// suffix (v0.106; 32 bits before) so guessing is infeasible. This is the
+// standard tradeoff for "click the link in your payment confirmation".
 func (a *App) handleReceipt(w http.ResponseWriter, r *http.Request) {
 	orderNo := r.URL.Query().Get("order_no")
 	if orderNo == "" {

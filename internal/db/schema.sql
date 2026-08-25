@@ -42,12 +42,21 @@ CREATE TABLE IF NOT EXISTS orders (
     user_id         INTEGER REFERENCES users(id) ON DELETE SET NULL,
     last_queried_at DATETIME,                  -- last upstream query (for fallback polling)
     paid_at         DATETIME,
+    -- qr_payload stores the upstream PSP's QR string (e.g. WeChat
+    -- code_url / Alipay qr_code). Authoritative for /api/pay/qr so the
+    -- handler doesn't have to trust a URL-supplied payload, which would
+    -- let any holder of a valid order_no render arbitrary QR images on
+    -- our domain (phishing-aid). v0.103.
+    qr_payload      TEXT NOT NULL DEFAULT '',
     created_at      DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 CREATE INDEX IF NOT EXISTS idx_orders_mac     ON orders(mac);
 CREATE INDEX IF NOT EXISTS idx_orders_status  ON orders(status);
 CREATE INDEX IF NOT EXISTS idx_orders_created ON orders(created_at);
 CREATE INDEX IF NOT EXISTS idx_orders_user    ON orders(user_id);
+-- Dashboard/stats run ~13 "status='paid' AND paid_at >= ..." aggregates per
+-- page load; the composite index serves them without scanning all paid rows.
+CREATE INDEX IF NOT EXISTS idx_orders_status_paid ON orders(status, paid_at);
 
 CREATE TABLE IF NOT EXISTS sessions (
     token       TEXT PRIMARY KEY,
@@ -57,6 +66,8 @@ CREATE TABLE IF NOT EXISTS sessions (
     expires_at  DATETIME NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_sessions_kind ON sessions(kind);
+-- Purge loop deletes by expiry every few minutes.
+CREATE INDEX IF NOT EXISTS idx_sessions_expires ON sessions(expires_at);
 
 -- Live device tracking — populated by sightings.Tracker.
 -- Used by the admin /devices page to suggest unsubscribed MACs.
@@ -168,6 +179,9 @@ CREATE TABLE IF NOT EXISTS audit_log (
     detail      TEXT NOT NULL DEFAULT ''
 );
 CREATE INDEX IF NOT EXISTS idx_audit_at ON audit_log(at);
+-- /admin/audit exact-match action filter + DISTINCT action dropdown; the
+-- audit log is the largest table on long-running installs.
+CREATE INDEX IF NOT EXISTS idx_audit_action ON audit_log(action);
 
 -- SMS log — every send-through-App.SendSMS records one row regardless of
 -- outcome. Persistent (survives restarts) and provider-agnostic, unlike

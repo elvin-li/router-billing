@@ -57,7 +57,7 @@ ipk: arm64
 	           $(BUILD_DIR)/ipk/data/usr/share/router-billing/web/static \
 	           $(BUILD_DIR)/ipk/data/var/lib/router-billing
 	install -m 0755 $(BUILD_DIR)/$(APP)-arm64 $(BUILD_DIR)/ipk/data/usr/bin/$(APP)
-	install -m 0644 config.example.yaml $(BUILD_DIR)/ipk/data/etc/router-billing/config.yaml
+	install -m 0600 config.example.yaml $(BUILD_DIR)/ipk/data/etc/router-billing/config.yaml
 	cp -r web/templates/. $(BUILD_DIR)/ipk/data/usr/share/router-billing/web/templates/
 	cp -r web/static/.    $(BUILD_DIR)/ipk/data/usr/share/router-billing/web/static/
 	install -m 0755 deploy/openwrt/etc/init.d/router-billing $(BUILD_DIR)/ipk/data/etc/init.d/router-billing

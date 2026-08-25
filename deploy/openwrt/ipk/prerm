@@ -4,6 +4,15 @@ set -e
 
 /etc/init.d/router-billing stop 2>/dev/null || true
 /etc/init.d/router-billing disable 2>/dev/null || true
-/usr/share/router-billing/firewall-billing.sh purge 2>/dev/null || true
+
+# Purge the billing table only on a REAL removal. opkg also runs prerm
+# during upgrades (remove-then-install) and sets PKG_UPGRADE=1: purging
+# there tears down the redirect/drop rules while the new version unpacks,
+# giving every unpaid Paid_WiFi device free internet until postinst
+# re-applies — and losing the mac_paid membership fw-side mid-upgrade.
+# On upgrade the rules stay up; postinst reconciles them.
+if [ "${PKG_UPGRADE:-0}" != "1" ]; then
+    /usr/share/router-billing/firewall-billing.sh purge 2>/dev/null || true
+fi
 
 exit 0
