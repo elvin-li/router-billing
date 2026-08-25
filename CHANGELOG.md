@@ -1,5 +1,52 @@
 # Changelog
 
+## v0.106 — Admin API: backup scope escalation, grant ownership clobber, CSV formula injection
+
+Four admin-API security fixes:
+
+A. /api/admin/backup accepted READ-ONLY Bearer tokens. The raw SQLite
+file contains plaintext session tokens (which mint live admin/user
+cookies), password hashes, TOTP secrets, full unredeemed voucher
+codes, and SMS message bodies — exactly the material every JSON read
+endpoint deliberately strips. A leaked monitoring token was therefore
+a full-scope token in disguise. The route now goes through
+requireAPITokenPrivileged, which rejects readonly tokens with 403 on
+every method. Off-router backup automation must use a non-readonly
+token (which it should have anyway — it holds the whole DB).
+
+B. /api/admin/users/grant and /api/admin/users/grant-by-phone listed a
+user's MACs and then extended each one through the unconditional
+UpsertMAC path, which OVERWRITES macs.user_id. A device transferred
+to a different user between the list and the per-MAC write (user-side
+replace/claim flow) was silently re-extended AND reassigned back to
+the granted user. New db.ExtendMACOwned / MACSvc.ExtendOwned guard
+the update with WHERE user_id = ? in a single statement; a row whose
+ownership changed is skipped (logged, excluded from macs_extended),
+never stolen.
+
+C. CSV exports (/admin/export/{macs,orders,users,audit,sms-log,
+webhook-log}.csv + /admin/vouchers/export.csv) wrote user-influenced
+text raw. MAC labels are settable by END USERS via /user/macs/label;
+audit detail, SMS bodies, and gateway error strings carry external
+text too. A label like =HYPERLINK(...) or a DDE payload executes when
+the admin opens the export in Excel/LibreOffice. All text cells now
+pass through csvCell, which prefixes ' when the first non-space byte
+is one of = + - @ TAB CR. Timestamps/ids/normalized MACs are
+unaffected.
+
+D. /api/admin/orders/cancel-stale silently discarded JSON decode
+errors, so a malformed body ({"older_than_hours":"48"} — string, not
+int) fell back to the 24h default and canceled a MORE aggressive
+window than the caller asked for. Empty body still means the
+documented 24h default; malformed non-empty JSON is now a 400 with
+zero cancellations.
+
+Tests: readonly backup 403 (+ no DB bytes, no audit row, 401 without
+token), ExtendOwned skip/extend matrix + grant-by-phone end-to-end
+isolation, csvCell unit matrix + macs/audit/sms-log export round-trips
+through encoding/csv, cancel-stale malformed-JSON 400 with order
+untouched.
+
 ## v0.105 — Password change / reset now kills other sessions + trusted devices
 
 Changing password from `/user/me` previously left every other
