@@ -612,10 +612,13 @@ func (a *App) handleAdminUsers(w http.ResponseWriter, r *http.Request) {
 		rawQuery[k] = r.URL.Query().Get(k)
 	}
 	a.render(w, "admin_users.html", a.adminCtx(r, "users", map[string]any{
-		"Users":        users,
-		"MacCount":     macCount,
-		"Query":        q,
-		"Query0":       rawQuery,
+		"Users":    users,
+		"MacCount": macCount,
+		"Query":    q,
+		"Query0":   rawQuery,
+		// One-shot temp password from a reset-password redirect. Popping
+		// consumes it — a reload of this page shows nothing.
+		"ResetPwd":     a.popFlash(r.URL.Query().Get("flash")),
 		"SMSAvailable": a.SMS != nil && a.SMS.Available(),
 		"SMSProvider": func() string {
 			if a.SMS == nil {
@@ -751,7 +754,11 @@ func (a *App) handleAdminUserResetPassword(w http.ResponseWriter, r *http.Reques
 		}
 	}
 	a.DB.Audit(r.Context(), "admin", "user_reset_password", strconv.FormatInt(id, 10), "via=inline ip="+clientIP(r))
-	http.Redirect(w, r, "/admin/users?reset_pwd="+url.QueryEscape(tmpPwd)+"&reset_uid="+strconv.FormatInt(id, 10), http.StatusSeeOther)
+	// The plaintext goes through the one-time flash store, NOT the URL —
+	// query strings persist in browser history and any intermediary logs,
+	// which is exactly where a live credential must not end up.
+	tok := a.stashFlash(tmpPwd)
+	http.Redirect(w, r, "/admin/users?flash="+url.QueryEscape(tok)+"&reset_uid="+strconv.FormatInt(id, 10), http.StatusSeeOther)
 }
 
 // POST /admin/users/delete  {id}
