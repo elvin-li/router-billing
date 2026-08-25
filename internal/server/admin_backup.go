@@ -58,13 +58,31 @@ func (a *App) handleAPIBackup(w http.ResponseWriter, r *http.Request, actor stri
 	a.streamBackup(w, r, actor, clientIP(r))
 }
 
-// streamBackup is the shared body — checkpoint + stream + audit row.
+// streamBackup is the shared body — consistent snapshot + stream + audit row.
 // `actor` distinguishes UI ("admin") from API (Bearer label) in audit.
+//
+// The snapshot goes through `VACUUM INTO` for the same reason the nightly
+// rotator does (v0.109): checkpoint-then-copy reads the LIVE database file
+// byte-by-byte, so any write landing mid-download (order paid, session
+// created, audit row) can tear pages and silently corrupt the very file an
+// operator will reach for after losing the primary. Only if VACUUM INTO
+// itself errors (ancient SQLite) do we fall back to checkpoint+copy.
 func (a *App) streamBackup(w http.ResponseWriter, r *http.Request, actor, ip string) {
-	if _, err := a.DB.Exec(r.Context(), "PRAGMA wal_checkpoint(TRUNCATE)"); err != nil {
-		log.Printf("backup: checkpoint failed: %v", err)
+	snap := filepath.Join(filepath.Dir(a.Cfg.DBPath),
+		fmt.Sprintf(".download-%s.db.tmp", time.Now().Format("20060102-150405.000000000")))
+	_ = os.Remove(snap) // VACUUM INTO refuses to overwrite
+	path := snap
+	if _, verr := a.DB.Exec(r.Context(), "VACUUM INTO ?", snap); verr != nil {
+		log.Printf("backup: vacuum into failed (%v); falling back to checkpoint+copy", verr)
+		_ = os.Remove(snap)
+		path = a.Cfg.DBPath
+		if _, err := a.DB.Exec(r.Context(), "PRAGMA wal_checkpoint(TRUNCATE)"); err != nil {
+			log.Printf("backup: checkpoint failed: %v", err)
+		}
+	} else {
+		defer os.Remove(snap)
 	}
-	f, err := os.Open(a.Cfg.DBPath)
+	f, err := os.Open(path)
 	if err != nil {
 		http.Error(w, "open db: "+err.Error(), http.StatusInternalServerError)
 		return
