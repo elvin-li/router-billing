@@ -54,7 +54,11 @@ type Order struct {
 	UserID        *int64      `json:"user_id,omitempty"`
 	LastQueriedAt *time.Time  `json:"last_queried_at,omitempty"`
 	PaidAt        *time.Time  `json:"paid_at,omitempty"`
-	CreatedAt     time.Time   `json:"created_at"`
+	// QRPayload is the upstream PSP's QR string (WeChat code_url /
+	// Alipay qr_code). Authoritative for /api/pay/qr so the handler
+	// doesn't trust a URL-supplied payload (security: v0.103).
+	QRPayload string    `json:"qr_payload,omitempty"`
+	CreatedAt time.Time `json:"created_at"`
 }
 
 // --- User ---

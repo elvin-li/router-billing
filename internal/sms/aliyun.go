@@ -68,11 +68,17 @@ func (a *Aliyun) Send(ctx context.Context, phone, message string) error {
 	if a == nil {
 		return ErrNotConfigured
 	}
-	if a.HTTPClient == nil {
-		a.HTTPClient = &http.Client{Timeout: 10 * time.Second}
+	// Read defaults into locals instead of lazily mutating the shared
+	// struct: Send is called concurrently (expiry-reminder loop, admin
+	// digest loop, login-alert goroutines, password-reset handlers), and
+	// the old in-place `a.HTTPClient = ...` writes were a data race.
+	httpClient := a.HTTPClient
+	if httpClient == nil {
+		httpClient = &http.Client{Timeout: 10 * time.Second}
 	}
-	if a.Endpoint == "" {
-		a.Endpoint = aliyunEndpoint
+	endpoint := a.Endpoint
+	if endpoint == "" {
+		endpoint = aliyunEndpoint
 	}
 
 	// Normalise message into JSON template params.
@@ -82,11 +88,20 @@ func (a *Aliyun) Send(ctx context.Context, phone, message string) error {
 		tmplParams = string(b)
 	}
 
-	now := a.nowFn()
-	if now.IsZero() {
-		now = time.Now().UTC()
+	// nowFn/nonceFn are only set by NewAliyun — a zero-value or literal
+	// &Aliyun{...} left them nil and the old unguarded calls panicked
+	// inside whichever background goroutine sent the SMS, killing the
+	// whole process.
+	now := time.Now().UTC()
+	if a.nowFn != nil {
+		if t := a.nowFn(); !t.IsZero() {
+			now = t
+		}
 	}
-	nonce := a.nonceFn()
+	nonce := ""
+	if a.nonceFn != nil {
+		nonce = a.nonceFn()
+	}
 	if nonce == "" {
 		nonce = defaultNonce()
 	}
@@ -113,12 +128,12 @@ func (a *Aliyun) Send(ctx context.Context, phone, message string) error {
 	for k, v := range params {
 		form.Set(k, v)
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, a.Endpoint, strings.NewReader(form.Encode()))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, strings.NewReader(form.Encode()))
 	if err != nil {
 		return err
 	}
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded;charset=utf-8")
-	resp, err := a.HTTPClient.Do(req)
+	resp, err := httpClient.Do(req)
 	if err != nil {
 		return fmt.Errorf("aliyun sms: %w", err)
 	}

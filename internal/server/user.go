@@ -100,7 +100,7 @@ func (a *App) requireUser(h http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		uid := a.currentUserID(r)
 		if uid == 0 {
-			http.Redirect(w, r, "/user/login?next="+r.URL.RequestURI(), http.StatusSeeOther)
+			http.Redirect(w, r, "/user/login?next="+url.QueryEscape(r.URL.RequestURI()), http.StatusSeeOther)
 			return
 		}
 		if !verifyCSRF(r) {
@@ -130,10 +130,31 @@ func (a *App) currentUserID(r *http.Request) int64 {
 	return *sess.UserID
 }
 
+// safeNextPath validates a post-login redirect target. Only same-site
+// relative paths pass: must start with exactly one "/" (so "//evil.com"
+// and "/\evil.com" — which browsers treat as protocol-relative external
+// URLs — are rejected) and contain no backslashes anywhere (some browsers
+// normalize "\" to "/" before resolving). Anything else → fallback.
+//
+// Pre-v0.99 the login path only checked strings.HasPrefix(next, "/") and
+// the 2FA login path did no validation at all — both were open redirects.
+func safeNextPath(next, fallback string) string {
+	if next == "" || next[0] != '/' {
+		return fallback
+	}
+	if len(next) > 1 && next[1] == '/' {
+		return fallback
+	}
+	if strings.ContainsAny(next, "\\\r\n") {
+		return fallback
+	}
+	return next
+}
+
 func (a *App) handleUserLogin(w http.ResponseWriter, r *http.Request) {
 	if r.Method == http.MethodGet {
 		a.render(w, "user_login.html", a.userCtx(r, "login", map[string]any{
-			"Next":         r.URL.Query().Get("next"),
+			"Next":         safeNextPath(r.URL.Query().Get("next"), ""),
 			"SMSAvailable": a.SMS.Available(),
 		}))
 		return
@@ -178,10 +199,7 @@ func (a *App) handleUserLogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	next := r.PostForm.Get("next")
-	if !strings.HasPrefix(next, "/") {
-		next = "/user/me"
-	}
+	next := safeNextPath(r.PostForm.Get("next"), "/user/me")
 
 	// If 2FA is enrolled, hold the session in pending state until the user
 	// submits a valid TOTP code. Same shape as the admin 2FA flow (see
@@ -780,6 +798,23 @@ func (a *App) handleUserPassword(w http.ResponseWriter, r *http.Request) {
 	if err := a.DB.UpdateUserPassword(r.Context(), uid, string(hash)); err != nil {
 		http.Redirect(w, r, "/user/me?err=internal", http.StatusSeeOther)
 		return
+	}
+	// A password change means every other login is untrusted: stolen
+	// rb_user cookies must die. Keep the browser that just proved the
+	// old password so the user is not bounced to /user/login.
+	keep := ""
+	if c, err := r.Cookie(userCookieName); err == nil {
+		keep = c.Value
+	}
+	if keep != "" {
+		if _, err := a.DB.DeleteUserSessionsExcept(r.Context(), uid, keep); err != nil {
+			log.Printf("password-change drop other sessions %d: %v", uid, err)
+		}
+	} else if _, err := a.DB.DeleteSessionsByUserID(r.Context(), uid); err != nil {
+		log.Printf("password-change drop sessions %d: %v", uid, err)
+	}
+	if err := a.DB.DeleteAllTrustedDevices(r.Context(), uid); err != nil {
+		log.Printf("password-change drop trusted devices %d: %v", uid, err)
 	}
 	a.DB.Audit(r.Context(), "user:"+user.Phone, "password_change", "", "")
 	http.Redirect(w, r, "/user/me?ok=password", http.StatusSeeOther)

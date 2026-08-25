@@ -14,17 +14,18 @@ import (
 
 // Manager keeps the nftables `mac_paid` set in sync with the DB.
 //
-// Layout managed externally by /etc/firewall.user.billing:
+// Layout managed externally by firewall-billing.sh (chain names are the
+// script's concern — this package only touches the set):
 //
 //	table inet billing {
 //	    set mac_paid { type ether_addr; }
-//	    chain pre  { type nat    hook prerouting priority -1;
-//	                 iifname "br-paid" ether saddr @mac_paid return
-//	                 iifname "br-paid" tcp dport 80 redirect to :8080
-//	                 iifname "br-paid" tcp dport 443 reject }
-//	    chain fwd  { type filter hook forward    priority -1;
-//	                 iifname "br-paid" ether saddr @mac_paid return
-//	                 iifname "br-paid" drop }
+//	    chain pre      { type nat    hook prerouting priority -1;
+//	                     iifname "br-paid" ether saddr @mac_paid return
+//	                     iifname "br-paid" tcp dport 80 redirect to :8080
+//	                     iifname "br-paid" tcp dport 443 reject }
+//	    chain forward  { type filter hook forward    priority -1;
+//	                     iifname "br-paid" ether saddr @mac_paid return
+//	                     iifname "br-paid" drop }
 //	}
 type Manager struct {
 	Family string // inet

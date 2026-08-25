@@ -45,6 +45,13 @@ func (a *App) expiryReminderLoop(ctx context.Context) {
 // owner's phone, send SMS, audit. Returns the (sent, skipped, errored)
 // counts so tests can assert behavior without poking the SMS provider.
 func (a *App) sendExpiryReminders(ctx context.Context) (sent, skipped, errored int) {
+	// The `expiry_reminder` audit row IS the de-dup marker for the next
+	// 22h. It must land even when ctx is canceled between the SMS send
+	// and the insert (admin closed the trigger page mid-pass, or the
+	// server began shutdown): the SMS already went out, and a swallowed
+	// audit failure meant every later hourly pass re-texted the same
+	// users until the MAC expired.
+	auditCtx := context.WithoutCancel(ctx)
 	days := a.Cfg.SMS.ExpiryReminderWindowDays()
 	macs, err := a.DB.ListExpiringMACsWithoutRecentReminder(ctx, days)
 	if err != nil {
@@ -65,13 +72,13 @@ func (a *App) sendExpiryReminders(ctx context.Context) (sent, skipped, errored i
 		if err := a.SendSMS(ctx, user.Phone, body); err != nil {
 			log.Printf("expiry reminder %s → %s: %v", m.Mac, user.Phone, err)
 			errored++
-			a.DB.Audit(ctx, "system", "expiry_reminder_failed", m.Mac,
+			a.DB.Audit(auditCtx, "system", "expiry_reminder_failed", m.Mac,
 				"phone="+user.Phone+" err="+err.Error())
 			continue
 		}
 		// Audit BEFORE deciding "sent" so the de-dup query (last 22h) finds
 		// this row on the next pass.
-		a.DB.Audit(ctx, "system", "expiry_reminder", m.Mac,
+		a.DB.Audit(auditCtx, "system", "expiry_reminder", m.Mac,
 			"phone="+user.Phone+" provider="+a.SMS.Name())
 		sent++
 	}
@@ -96,8 +103,12 @@ func (a *App) handleAdminExpiryReminderTrigger(w http.ResponseWriter, r *http.Re
 		http.Redirect(w, r, "/admin/sms-log?err=sms_disabled", http.StatusSeeOther)
 		return
 	}
-	sent, skipped, errored := a.sendExpiryReminders(r.Context())
-	a.DB.Audit(r.Context(), "admin", "expiry_reminder_pass", "",
+	// Detach from the request context (same rationale as the v0.106
+	// payment-finalize fix): an admin disconnecting mid-pass must not
+	// abort between "SMS delivered" and "de-dup audit row written".
+	ctx := context.WithoutCancel(r.Context())
+	sent, skipped, errored := a.sendExpiryReminders(ctx)
+	a.DB.Audit(ctx, "admin", "expiry_reminder_pass", "",
 		"sent="+itoaSmall(sent)+" skipped="+itoaSmall(skipped)+" errored="+itoaSmall(errored)+
 			" ip="+clientIP(r))
 	loc := "/admin/sms-log?ok=reminders&sent=" + itoaSmall(sent) +
@@ -108,7 +119,10 @@ func (a *App) handleAdminExpiryReminderTrigger(w http.ResponseWriter, r *http.Re
 // formatExpiryReminderBody builds the SMS body. Kept as a pure function so
 // it can be unit-tested without spinning up the whole App.
 func formatExpiryReminderBody(mac, label string, expiresAt time.Time) string {
-	days := int(time.Until(expiresAt).Hours() / 24)
+	// Ceiling, not truncation: 71h out is "3 天" not "2 天" — truncating
+	// understated the remaining time in every non-exact case, telling a
+	// user with 2.9 days left they had 2.
+	days := int((time.Until(expiresAt) + 24*time.Hour - 1) / (24 * time.Hour))
 	if days < 1 {
 		days = 1
 	}

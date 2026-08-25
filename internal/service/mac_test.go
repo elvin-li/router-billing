@@ -151,14 +151,44 @@ func TestGrantFromOrderAddsToFirewall(t *testing.T) {
 	}
 }
 
-func TestGrantPropagatesFirewallError(t *testing.T) {
-	svc, _, fw := newTestSvc(t)
+// A firewall Add failure must NOT fail the grant: the DB row is committed
+// (source of truth) and the service falls back to a full Resync. Failing
+// here used to 500 the payment webhook, whose retries then no-oped because
+// the order was already paid — the customer stayed offline with no signal.
+func TestGrantToleratesFirewallAddErrorViaResync(t *testing.T) {
+	svc, dbx, fw := newTestSvc(t)
 	fw.addErr = errors.New("nft EBADF")
 	err := svc.GrantFromOrder(context.Background(), &models.Order{
 		OrderNo: "B-2", Mac: "11:22:33:44:55:66", Plan: "month", Days: 1,
 	})
-	if err == nil || !errors.Is(err, fw.addErr) && err.Error() == "" {
-		t.Errorf("expected firewall err to propagate; got %v", err)
+	if err != nil {
+		t.Fatalf("fw add failure should not fail the grant; got %v", err)
+	}
+	// DB grant landed.
+	if m, err := dbx.GetMAC(context.Background(), "11:22:33:44:55:66"); err != nil || m == nil {
+		t.Fatalf("expected MAC row despite fw error; err=%v", err)
+	}
+	// Resync fallback ran and converged the set.
+	if len(fw.syncCalls) != 1 {
+		t.Errorf("expected 1 Resync fallback, got %d", len(fw.syncCalls))
+	}
+	if !fw.set["11:22:33:44:55:66"] {
+		t.Error("mac should be in fw set after resync fallback")
+	}
+}
+
+// If BOTH the Add and the fallback Resync fail, the grant still succeeds
+// (DB is authoritative; convergence happens on the next resync) — but the
+// upsert error path must still propagate.
+func TestGrantStillSucceedsWhenResyncAlsoFails(t *testing.T) {
+	svc, _, fw := newTestSvc(t)
+	fw.addErr = errors.New("nft EBADF")
+	fw.syncErr = errors.New("nft ENOENT")
+	err := svc.GrantFromOrder(context.Background(), &models.Order{
+		OrderNo: "B-3", Mac: "11:22:33:44:55:77", Plan: "month", Days: 1,
+	})
+	if err != nil {
+		t.Fatalf("grant should survive fw+resync failure; got %v", err)
 	}
 }
 

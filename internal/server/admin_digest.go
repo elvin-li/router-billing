@@ -43,10 +43,7 @@ func (a *App) adminDigestLoop(ctx context.Context) {
 		return
 	}
 
-	target := time.Date(time.Now().UTC().Year(), time.Now().UTC().Month(), time.Now().UTC().Day(), hour-1, 0, 0, 0, time.UTC)
-	if target.Before(time.Now().UTC()) {
-		target = target.Add(24 * time.Hour)
-	}
+	target := nextDigestAt(time.Now().UTC(), hour)
 	for {
 		wait := time.Until(target)
 		log.Printf("admin digest: next send in %s (at %s UTC)", wait, target.Format(time.RFC3339))
@@ -58,8 +55,28 @@ func (a *App) adminDigestLoop(ctx context.Context) {
 		// Discard return — the function already logs + audits any error.
 		// The loop must continue to the next day regardless.
 		_, _ = a.sendAdminDigest(ctx)
+		// Recompute from the wall clock instead of target.Add(24h): if the
+		// clock jumped forward or the process was suspended across several
+		// days (router hibernate, NTP step), the old +24h-per-iteration
+		// catch-up fired one digest SMS per missed day back-to-back.
+		target = nextDigestAt(time.Now().UTC(), hour)
+	}
+}
+
+// nextDigestAt returns the next wall-clock instant at which the daily
+// digest should fire: the next occurrence of `hour` o'clock UTC strictly
+// after `now`. hour is the config's 1..24 range — 24 means midnight.
+// Pure function so the schedule math is testable without running the loop.
+//
+// Pre-v0.108 the loop used `hour-1`, so a digest configured for 09:00
+// UTC actually fired at 08:00 — one hour before the documented time.
+func nextDigestAt(now time.Time, hour int) time.Time {
+	h := hour % 24 // 24 → 0 (midnight); 1..23 mean the literal hour
+	target := time.Date(now.Year(), now.Month(), now.Day(), h, 0, 0, 0, time.UTC)
+	if !target.After(now) {
 		target = target.Add(24 * time.Hour)
 	}
+	return target
 }
 
 // sendAdminDigest does one pass — gather counts, format SMS, send. Returns
