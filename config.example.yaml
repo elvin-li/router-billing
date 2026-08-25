@@ -100,3 +100,11 @@ scheduler:
 # webhook:
 #   url: "https://shopkeeper.example/router-billing/hook"
 #   secret: "a-long-random-shared-secret"
+
+# 安全选项（全部可选）
+# security:
+#   # 仅当你在本服务前面架设了「你自己控制的」反向代理（nginx/Caddy），
+#   # 且该代理会「覆盖」（而不是追加）X-Forwarded-For 时才开启。
+#   # 默认 false：路由器直连部署下 X-Forwarded-For 是客户端可伪造的，
+#   # 信任它会让限流（充值码爆破/登录/下单）被轻易绕过、审计 IP 被伪造。
+#   trust_proxy_headers: false

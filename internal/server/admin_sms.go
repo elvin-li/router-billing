@@ -90,7 +90,7 @@ func (a *App) handleAdminSMSTest(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if msg == "" {
-		msg = "router-billing test message from " + clientIP(r)
+		msg = "router-billing test message from " + a.clientIP(r)
 	}
 	if len(msg) > 500 {
 		msg = msg[:500]
@@ -98,11 +98,11 @@ func (a *App) handleAdminSMSTest(w http.ResponseWriter, r *http.Request) {
 	if err := a.SendSMS(r.Context(), phone, msg); err != nil {
 		log.Printf("admin sms test %s: %v", phone, err)
 		a.DB.Audit(r.Context(), "admin", "sms_test_failed", phone,
-			"provider="+a.SMS.Name()+" err="+err.Error()+" ip="+clientIP(r))
+			"provider="+a.SMS.Name()+" err="+err.Error()+" ip="+a.clientIP(r))
 		http.Redirect(w, r, "/admin/sms-log?err=sms_failed", http.StatusSeeOther)
 		return
 	}
 	a.DB.Audit(r.Context(), "admin", "sms_test", phone,
-		"provider="+a.SMS.Name()+" ip="+clientIP(r))
+		"provider="+a.SMS.Name()+" ip="+a.clientIP(r))
 	http.Redirect(w, r, "/admin/sms-log?ok=sent", http.StatusSeeOther)
 }

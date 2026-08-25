@@ -103,7 +103,7 @@ func (a *App) handleUserLogin2FA(w http.ResponseWriter, r *http.Request) {
 	if n := userTwoFANextAttempt(c.Value); n > 5 {
 		_ = a.DB.DeleteSession(r.Context(), c.Value)
 		userTwoFAReset(c.Value)
-		a.DB.Audit(r.Context(), "user-attempt:"+user.Phone, "2fa_locked", "", "attempts>5 ip="+clientIP(r))
+		a.DB.Audit(r.Context(), "user-attempt:"+user.Phone, "2fa_locked", "", "attempts>5 ip="+a.clientIP(r))
 		http.Redirect(w, r, "/user/login?err=2fa_locked", http.StatusSeeOther)
 		return
 	}
@@ -125,7 +125,7 @@ func (a *App) handleUserLogin2FA(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	if !ok {
-		a.DB.Audit(r.Context(), "user-attempt:"+user.Phone, "2fa_failed", "", "ip="+clientIP(r))
+		a.DB.Audit(r.Context(), "user-attempt:"+user.Phone, "2fa_failed", "", "ip="+a.clientIP(r))
 		a.render(w, "user_2fa_login.html", a.userCtx(r, "2fa", map[string]any{
 			"Phone": user.Phone,
 			"Next":  next,
@@ -152,12 +152,12 @@ func (a *App) handleUserLogin2FA(w http.ResponseWriter, r *http.Request) {
 			log.Printf("issue trusted device for %d: %v", user.ID, err)
 			// Non-fatal — proceed with login.
 		} else {
-			a.DB.Audit(r.Context(), "user:"+user.Phone, "2fa_trusted_device_issued", "", "ip="+clientIP(r))
+			a.DB.Audit(r.Context(), "user:"+user.Phone, "2fa_trusted_device_issued", "", "ip="+a.clientIP(r))
 		}
 	}
 
 	a.startUserSession(w, r, user)
-	a.DB.Audit(r.Context(), "user:"+user.Phone, "login", "", "via="+via+" ip="+clientIP(r))
+	a.DB.Audit(r.Context(), "user:"+user.Phone, "login", "", "via="+via+" ip="+a.clientIP(r))
 	http.Redirect(w, r, next, http.StatusSeeOther)
 }
 
@@ -252,7 +252,7 @@ func (a *App) handleUser2FABegin(w http.ResponseWriter, r *http.Request) {
 		http.Redirect(w, r, "/user/2fa?err=internal", http.StatusSeeOther)
 		return
 	}
-	a.DB.Audit(r.Context(), "user:"+user.Phone, "2fa_enroll_begin", "", "ip="+clientIP(r))
+	a.DB.Audit(r.Context(), "user:"+user.Phone, "2fa_enroll_begin", "", "ip="+a.clientIP(r))
 	http.Redirect(w, r, "/user/2fa", http.StatusSeeOther)
 }
 
@@ -278,7 +278,7 @@ func (a *App) handleUser2FAConfirm(w http.ResponseWriter, r *http.Request) {
 	}
 	code := extractDigits(r.PostForm.Get("code"))
 	if !totp.Verify(user.TOTPPending, code, time.Now()) {
-		a.DB.Audit(r.Context(), "user:"+user.Phone, "2fa_enroll_failed", "", "ip="+clientIP(r))
+		a.DB.Audit(r.Context(), "user:"+user.Phone, "2fa_enroll_failed", "", "ip="+a.clientIP(r))
 		http.Redirect(w, r, "/user/2fa?err=2fa_failed", http.StatusSeeOther)
 		return
 	}
@@ -289,7 +289,7 @@ func (a *App) handleUser2FAConfirm(w http.ResponseWriter, r *http.Request) {
 	}
 	// Re-load so the rendered "Codes" page shows the now-enabled state.
 	user, _ = a.DB.GetUser(r.Context(), uid)
-	a.DB.Audit(r.Context(), "user:"+user.Phone, "2fa_enrolled", "", "ip="+clientIP(r))
+	a.DB.Audit(r.Context(), "user:"+user.Phone, "2fa_enrolled", "", "ip="+a.clientIP(r))
 
 	// Generate + display backup codes — last chance to save them before
 	// they're hashed-and-forgotten. If generation fails we still leave 2FA
@@ -301,7 +301,7 @@ func (a *App) handleUser2FAConfirm(w http.ResponseWriter, r *http.Request) {
 		http.Redirect(w, r, "/user/2fa?ok=2fa_enabled&err=backup_codes_failed", http.StatusSeeOther)
 		return
 	}
-	a.DB.Audit(r.Context(), "user:"+user.Phone, "2fa_backup_codes_issued", "", "count=10 ip="+clientIP(r))
+	a.DB.Audit(r.Context(), "user:"+user.Phone, "2fa_backup_codes_issued", "", "count=10 ip="+a.clientIP(r))
 	a.renderBackupCodesOnce(w, r, user, codes)
 }
 
@@ -332,12 +332,12 @@ func (a *App) handleUser2FADisable(w http.ResponseWriter, r *http.Request) {
 	pwd := r.PostForm.Get("password")
 	code := extractDigits(r.PostForm.Get("code"))
 	if bcrypt.CompareHashAndPassword([]byte(user.PasswordHash), []byte(pwd)) != nil {
-		a.DB.Audit(r.Context(), "user:"+user.Phone, "2fa_disable_failed", "", "reason=bad_password ip="+clientIP(r))
+		a.DB.Audit(r.Context(), "user:"+user.Phone, "2fa_disable_failed", "", "reason=bad_password ip="+a.clientIP(r))
 		http.Redirect(w, r, "/user/2fa?err=bad_credentials", http.StatusSeeOther)
 		return
 	}
 	if !totp.Verify(user.TOTPSecret, code, time.Now()) {
-		a.DB.Audit(r.Context(), "user:"+user.Phone, "2fa_disable_failed", "", "reason=bad_code ip="+clientIP(r))
+		a.DB.Audit(r.Context(), "user:"+user.Phone, "2fa_disable_failed", "", "reason=bad_code ip="+a.clientIP(r))
 		http.Redirect(w, r, "/user/2fa?err=2fa_failed", http.StatusSeeOther)
 		return
 	}
@@ -346,7 +346,7 @@ func (a *App) handleUser2FADisable(w http.ResponseWriter, r *http.Request) {
 		http.Redirect(w, r, "/user/2fa?err=internal", http.StatusSeeOther)
 		return
 	}
-	a.DB.Audit(r.Context(), "user:"+user.Phone, "2fa_disabled", "", "ip="+clientIP(r))
+	a.DB.Audit(r.Context(), "user:"+user.Phone, "2fa_disabled", "", "ip="+a.clientIP(r))
 	http.Redirect(w, r, "/user/2fa?ok=2fa_disabled", http.StatusSeeOther)
 }
 

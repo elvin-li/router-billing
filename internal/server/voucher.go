@@ -100,7 +100,7 @@ func (a *App) handleAdminVouchersImport(w http.ResponseWriter, r *http.Request) 
 	var (
 		specs   []db.VoucherSpec
 		failed  int
-		auditIP = clientIP(r)
+		auditIP = a.clientIP(r)
 	)
 	for _, raw := range strings.Split(bulk, "\n") {
 		line := strings.TrimSpace(raw)
@@ -283,7 +283,7 @@ func (a *App) handleAdminVoucherBatchRevoke(w http.ResponseWriter, r *http.Reque
 		displayBatch = "(no batch)"
 	}
 	a.DB.Audit(r.Context(), "admin", "voucher_batch_revoke", displayBatch,
-		fmt.Sprintf("count=%d ip=%s", n, clientIP(r)))
+		fmt.Sprintf("count=%d ip=%s", n, a.clientIP(r)))
 	http.Redirect(w, r,
 		fmt.Sprintf("/admin/vouchers?ok=batch_revoke&revoked=%d&batch=%s", n, url.QueryEscape(displayBatch)),
 		http.StatusSeeOther)
@@ -371,7 +371,7 @@ func (a *App) handleRedeem(w http.ResponseWriter, r *http.Request) {
 	}
 	// Rate-limit by client IP. 10 tries / 10 minutes is generous for honest
 	// fat-finger typos and prohibitive for brute-forcing the 12-char alphabet.
-	if a.redeemLimiter != nil && !a.redeemLimiter.allow(clientIP(r)) {
+	if a.redeemLimiter != nil && !a.redeemLimiter.allow(a.clientIP(r)) {
 		http.Redirect(w, r, "/redeem?err="+url.QueryEscape("尝试过于频繁，请 10 分钟后再试"), http.StatusSeeOther)
 		return
 	}

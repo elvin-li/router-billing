@@ -58,7 +58,7 @@ func (a *App) handleAdminLogin(w http.ResponseWriter, r *http.Request) {
 	}
 	u := r.PostForm.Get("username")
 	p := r.PostForm.Get("password")
-	if !a.adminLoginLimiter.allow(clientIP(r)) {
+	if !a.adminLoginLimiter.allow(a.clientIP(r)) {
 		a.render(w, "admin_login.html", map[string]any{"Error": "尝试过于频繁，请稍候再试"})
 		return
 	}
@@ -71,7 +71,7 @@ func (a *App) handleAdminLogin(w http.ResponseWriter, r *http.Request) {
 	}
 	admin, ok := a.Cfg.AuthenticateAdminFull(u, p)
 	if !ok {
-		a.DB.Audit(r.Context(), "admin-attempt:"+u, "login_failed", "", clientIP(r))
+		a.DB.Audit(r.Context(), "admin-attempt:"+u, "login_failed", "", a.clientIP(r))
 		a.render(w, "admin_login.html", map[string]any{"Error": "用户名或密码错误"})
 		return
 	}
@@ -127,7 +127,7 @@ func (a *App) issueAdminSession(w http.ResponseWriter, r *http.Request, username
 	http.SetCookie(w, &http.Cookie{
 		Name: adminPendingCookie, Value: "", Path: "/admin", MaxAge: -1, HttpOnly: true,
 	})
-	a.DB.Audit(r.Context(), "admin:"+username, "login", "", "ip="+clientIP(r))
+	a.DB.Audit(r.Context(), "admin:"+username, "login", "", "ip="+a.clientIP(r))
 	a.maybeAlertAdminLogin(r, username)
 	http.Redirect(w, r, "/admin/dashboard", http.StatusSeeOther)
 }
@@ -147,7 +147,7 @@ func (a *App) maybeAlertAdminLogin(r *http.Request, username string) {
 		log.Printf("admin-login alert: invalid phone in config (%q), skipping", phone)
 		return
 	}
-	ip := clientIP(r)
+	ip := a.clientIP(r)
 	go func() {
 		// Detach from request context so an in-flight cookie-set + redirect
 		// doesn't cancel the upstream SMS request. 8s budget should cover
@@ -645,7 +645,7 @@ func (a *App) handleAdminUserReset2FA(w http.ResponseWriter, r *http.Request) {
 	// post-2FA session would lose its "extra factor" property silently.
 	_, _ = a.DB.DeleteSessionsByUserID(r.Context(), id)
 	a.DB.Audit(r.Context(), "admin", "user_reset_2fa", strconv.FormatInt(id, 10),
-		"phone="+user.Phone+" ip="+clientIP(r))
+		"phone="+user.Phone+" ip="+a.clientIP(r))
 	http.Redirect(w, r, "/admin/users?ok=reset_2fa&reset_uid="+strconv.FormatInt(id, 10), http.StatusSeeOther)
 }
 
@@ -691,14 +691,14 @@ func (a *App) handleAdminUserResetPassword(w http.ResponseWriter, r *http.Reques
 			sErr := a.SendSMS(r.Context(), user.Phone, tmpPwd)
 			if sErr == nil {
 				a.DB.Audit(r.Context(), "admin", "user_reset_password", strconv.FormatInt(id, 10),
-					"via=sms provider="+a.SMS.Name()+" ip="+clientIP(r))
+					"via=sms provider="+a.SMS.Name()+" ip="+a.clientIP(r))
 				http.Redirect(w, r, "/admin/users?ok=reset_sms&reset_uid="+strconv.FormatInt(id, 10), http.StatusSeeOther)
 				return
 			}
 			log.Printf("reset-password sms %s: %v — falling back to inline display", user.Phone, sErr)
 		}
 	}
-	a.DB.Audit(r.Context(), "admin", "user_reset_password", strconv.FormatInt(id, 10), "via=inline ip="+clientIP(r))
+	a.DB.Audit(r.Context(), "admin", "user_reset_password", strconv.FormatInt(id, 10), "via=inline ip="+a.clientIP(r))
 	http.Redirect(w, r, "/admin/users?reset_pwd="+url.QueryEscape(tmpPwd)+"&reset_uid="+strconv.FormatInt(id, 10), http.StatusSeeOther)
 }
 
@@ -760,7 +760,7 @@ func (a *App) handleAdminMACAdd(w http.ResponseWriter, r *http.Request) {
 		http.Redirect(w, r, redirectBack(r, "err=internal"), http.StatusSeeOther)
 		return
 	}
-	ip := clientIP(r)
+	ip := a.clientIP(r)
 	a.DB.Audit(r.Context(), "admin", "grant", mac, fmt.Sprintf("days=%d label=%s ip=%s", days, label, ip))
 	a.Notifier.Send(notify.Event{Type: "grant", Actor: "admin", MAC: mac, Days: days, Detail: label})
 	http.Redirect(w, r, redirectBack(r, "ok=1"), http.StatusSeeOther)
@@ -783,7 +783,7 @@ func (a *App) handleAdminMACDelete(w http.ResponseWriter, r *http.Request) {
 	if err := a.MACSvc.Delete(r.Context(), mac); err != nil {
 		log.Printf("admin delete %s: %v", mac, err)
 	}
-	a.DB.Audit(r.Context(), "admin", "revoke", mac, "ip="+clientIP(r))
+	a.DB.Audit(r.Context(), "admin", "revoke", mac, "ip="+a.clientIP(r))
 	a.Notifier.Send(notify.Event{Type: "revoke", Actor: "admin", MAC: mac})
 	http.Redirect(w, r, redirectBack(r, "ok=1"), http.StatusSeeOther)
 }
@@ -878,7 +878,7 @@ func (a *App) handleAdminMACExtend(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	a.DB.Audit(r.Context(), "admin", "extend", mac,
-		"days="+strconv.Itoa(days)+" ip="+clientIP(r))
+		"days="+strconv.Itoa(days)+" ip="+a.clientIP(r))
 	http.Redirect(w, r, redirectBack(r, "ok=1"), http.StatusSeeOther)
 }
 
@@ -908,7 +908,7 @@ func (a *App) handleAdminMACRevoke(w http.ResponseWriter, r *http.Request) {
 		http.Redirect(w, r, redirectBack(r, "err=internal"), http.StatusSeeOther)
 		return
 	}
-	a.DB.Audit(r.Context(), "admin", "revoke", mac, "ip="+clientIP(r))
+	a.DB.Audit(r.Context(), "admin", "revoke", mac, "ip="+a.clientIP(r))
 	http.Redirect(w, r, redirectBack(r, "ok=revoked"), http.StatusSeeOther)
 }
 
@@ -1109,7 +1109,7 @@ func (a *App) handleAdminOrderRefund(w http.ResponseWriter, r *http.Request) {
 		}(mac.Mac)
 	}
 	a.DB.Audit(r.Context(), "admin", "order_refunded", orderNo,
-		"reason="+reason+" ip="+clientIP(r))
+		"reason="+reason+" ip="+a.clientIP(r))
 	http.Redirect(w, r, "/admin/orders?ok=refunded", http.StatusSeeOther)
 }
 
@@ -1148,7 +1148,7 @@ func (a *App) handleAdminOrderCancel(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	a.DB.Audit(r.Context(), "admin", "order_canceled", orderNo,
-		"via=ui ip="+clientIP(r))
+		"via=ui ip="+a.clientIP(r))
 	http.Redirect(w, r, "/admin/orders?ok=canceled", http.StatusSeeOther)
 }
 
@@ -1178,12 +1178,12 @@ func (a *App) handleAdminOrderCancelStale(w http.ResponseWriter, r *http.Request
 	if err != nil {
 		log.Printf("admin cancel-stale: %v", err)
 		a.DB.Audit(r.Context(), "admin", "orders_cancel_stale_failed", "",
-			"err="+err.Error()+" ip="+clientIP(r))
+			"err="+err.Error()+" ip="+a.clientIP(r))
 		http.Redirect(w, r, "/admin/orders?err=cancel_stale_failed", http.StatusSeeOther)
 		return
 	}
 	a.DB.Audit(r.Context(), "admin", "orders_cancel_stale", "",
-		fmt.Sprintf("count=%d hours=%d via=ui ip=%s", n, hours, clientIP(r)))
+		fmt.Sprintf("count=%d hours=%d via=ui ip=%s", n, hours, a.clientIP(r)))
 	http.Redirect(w, r,
 		fmt.Sprintf("/admin/orders?ok=cancel_stale&count=%d&hours=%d", n, hours),
 		http.StatusSeeOther)
@@ -1221,7 +1221,7 @@ func (a *App) handleAdminMACNotes(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	a.DB.Audit(r.Context(), "admin", "mac_notes", normalized,
-		"len="+strconv.Itoa(len(notes))+" ip="+clientIP(r))
+		"len="+strconv.Itoa(len(notes))+" ip="+a.clientIP(r))
 	http.Redirect(w, r, "/admin/macs/detail?mac="+normalized+"&ok=notes", http.StatusSeeOther)
 }
 
@@ -1235,11 +1235,11 @@ func (a *App) handleAdminResync(w http.ResponseWriter, r *http.Request) {
 	}
 	if err := a.MACSvc.Resync(r.Context()); err != nil {
 		log.Printf("admin resync: %v", err)
-		a.DB.Audit(r.Context(), "admin", "firewall_resync_failed", "", "err="+err.Error()+" ip="+clientIP(r))
+		a.DB.Audit(r.Context(), "admin", "firewall_resync_failed", "", "err="+err.Error()+" ip="+a.clientIP(r))
 		http.Redirect(w, r, "/admin/macs?err=internal", http.StatusSeeOther)
 		return
 	}
-	a.DB.Audit(r.Context(), "admin", "firewall_resync", "", "ip="+clientIP(r))
+	a.DB.Audit(r.Context(), "admin", "firewall_resync", "", "ip="+a.clientIP(r))
 	http.Redirect(w, r, "/admin/macs?ok=1", http.StatusSeeOther)
 }
 
