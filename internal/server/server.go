@@ -59,6 +59,11 @@ type App struct {
 	waitMu  sync.Mutex
 	waiters map[string][]chan struct{} // order_no → pending wait channels
 
+	// One-time flash values (see flash.go) — secrets that must survive
+	// exactly one POST-redirect-GET hop without touching the URL.
+	flashMu sync.Mutex
+	flashes map[string]flashEntry
+
 	// trustedProxies is parsed once from config security.trusted_proxies.
 	// clientIP only honors X-Forwarded-For when the TCP peer is in here.
 	trustedProxies []*net.IPNet
@@ -88,6 +93,7 @@ func NewApp(cfg *config.Config, dbx *db.DB, svc *service.MACService) (*App, erro
 		apiTokenLimiter: map[string]*rateLimiter{},
 
 		waiters: map[string][]chan struct{}{},
+		flashes: map[string]flashEntry{},
 	}
 
 	// Validated at config load already; re-parse here to wire the value in.

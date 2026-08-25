@@ -28,13 +28,13 @@
 
     {{template "flash" .}}
 
-    {{$rp := index .Query0 "reset_pwd"}}{{if $rp}}
+    {{if .ResetPwd}}
     <div class="flash ok" style="display:flex; gap:14px; align-items:center;">
       <div>
         用户 <strong>#{{index .Query0 "reset_uid"}}</strong> 的临时密码：
-        <code style="background:rgba(255,255,255,0.6); padding:3px 10px; border-radius:6px; font-size:15px;">{{$rp}}</code>
+        <code style="background:rgba(255,255,255,0.6); padding:3px 10px; border-radius:6px; font-size:15px;">{{.ResetPwd}}</code>
       </div>
-      <span style="color:var(--text-soft); font-size:12px;">⚠ 只显示一次，请立即告知用户。该用户的旧 session 已全部失效。</span>
+      <span style="color:var(--text-soft); font-size:12px;">⚠ 只显示一次，刷新后不再显示，请立即告知用户。该用户的旧 session 已全部失效。</span>
     </div>
     {{end}}
 
