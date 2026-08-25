@@ -59,16 +59,45 @@ func (r *Rotator) Run(ctx context.Context) {
 }
 
 func (r *Rotator) once(ctx context.Context) {
-	if _, err := r.DB.Exec(ctx, "PRAGMA wal_checkpoint(TRUNCATE)"); err != nil {
-		log.Printf("backup: checkpoint failed: %v", err)
-	}
 	dst := filepath.Join(r.Dir, fmt.Sprintf("billing-%s.db", time.Now().Format("20060102-150405")))
-	if err := copyFile(r.DBPath, dst); err != nil {
-		log.Printf("backup: copy: %v", err)
+	if err := r.snapshot(ctx, dst); err != nil {
+		log.Printf("backup: %v", err)
 		return
 	}
 	log.Printf("backup: wrote %s", dst)
 	r.prune()
+}
+
+// snapshot prefers `VACUUM INTO` — SQLite takes the copy inside a read
+// transaction, so the result is consistent even while writers are active,
+// and it compacts free pages as a bonus. The old checkpoint+file-copy path
+// stays as a fallback (e.g. target filesystem quirks): it is safe only when
+// no write lands between the checkpoint and the copy, which is almost
+// always true on a router but not guaranteed.
+func (r *Rotator) snapshot(ctx context.Context, dst string) error {
+	tmp := dst + ".tmp"
+	_ = os.Remove(tmp) // VACUUM INTO refuses to overwrite an existing file
+	if _, err := r.DB.Exec(ctx, "VACUUM INTO ?", tmp); err == nil {
+		if err := os.Chmod(tmp, 0o600); err != nil {
+			os.Remove(tmp)
+			return fmt.Errorf("chmod snapshot: %w", err)
+		}
+		if err := syncFile(tmp); err != nil {
+			os.Remove(tmp)
+			return fmt.Errorf("fsync snapshot: %w", err)
+		}
+		return os.Rename(tmp, dst)
+	} else {
+		log.Printf("backup: vacuum-into failed (%v); falling back to file copy", err)
+		_ = os.Remove(tmp)
+	}
+	if _, err := r.DB.Exec(ctx, "PRAGMA wal_checkpoint(TRUNCATE)"); err != nil {
+		log.Printf("backup: checkpoint failed: %v", err)
+	}
+	if err := copyFile(r.DBPath, dst); err != nil {
+		return fmt.Errorf("copy: %w", err)
+	}
+	return nil
 }
 
 func (r *Rotator) prune() {
@@ -129,8 +158,25 @@ func copyFile(src, dst string) error {
 		os.Remove(tmp)
 		return err
 	}
+	// fsync before rename: routers lose power routinely, and a rename that
+	// lands before the data blocks would leave a "complete-looking" backup
+	// full of zero pages — worse than no backup at all.
+	if err := out.Sync(); err != nil {
+		out.Close()
+		os.Remove(tmp)
+		return err
+	}
 	if err := out.Close(); err != nil {
 		return err
 	}
 	return os.Rename(tmp, dst)
+}
+
+func syncFile(path string) error {
+	f, err := os.OpenFile(path, os.O_RDWR, 0)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	return f.Sync()
 }

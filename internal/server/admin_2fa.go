@@ -67,7 +67,7 @@ func (a *App) handleAdminLogin2FA(w http.ResponseWriter, r *http.Request) {
 	if n := twoFANextAttempt(c.Value); n > 5 {
 		_ = a.DB.DeleteSession(r.Context(), c.Value)
 		twoFAReset(c.Value)
-		a.DB.Audit(r.Context(), "admin-attempt:"+username, "2fa_locked", "", "attempts>5 ip="+clientIP(r))
+		a.DB.Audit(r.Context(), "admin-attempt:"+username, "2fa_locked", "", "attempts>5 ip="+a.clientIP(r))
 		http.Redirect(w, r, "/admin/login?err=2fa_locked", http.StatusSeeOther)
 		return
 	}
@@ -89,7 +89,7 @@ func (a *App) handleAdminLogin2FA(w http.ResponseWriter, r *http.Request) {
 	}, code)
 
 	if !totp.Verify(admin.TOTPSecret, code, time.Now()) {
-		a.DB.Audit(r.Context(), "admin-attempt:"+username, "2fa_failed", "", "ip="+clientIP(r))
+		a.DB.Audit(r.Context(), "admin-attempt:"+username, "2fa_failed", "", "ip="+a.clientIP(r))
 		a.render(w, "admin_2fa.html", map[string]any{
 			"Error":    "验证码错误，请再试一次",
 			"Username": username,
@@ -102,6 +102,6 @@ func (a *App) handleAdminLogin2FA(w http.ResponseWriter, r *http.Request) {
 		log.Printf("delete pending session: %v", err)
 	}
 	twoFAReset(c.Value)
-	a.DB.Audit(r.Context(), "admin:"+username, "2fa_ok", "", "ip="+clientIP(r))
+	a.DB.Audit(r.Context(), "admin:"+username, "2fa_ok", "", "ip="+a.clientIP(r))
 	a.issueAdminSession(w, r, username)
 }

@@ -53,6 +53,27 @@ func (s *MACService) Extend(ctx context.Context, mac, label string, days int, us
 	return m, nil
 }
 
+// RedeemVoucherGrant consumes a voucher and grants its days to the MAC as
+// ONE DB transaction, then adds the MAC to the firewall best-effort.
+//
+// The firewall add deliberately does NOT fail the redemption: the DB is
+// the source of truth and the hourly scheduler reconcile (plus manual
+// /admin/resync) self-heals set drift. Failing here would burn the
+// customer's voucher over a transient nft/ipset hiccup — the one outcome
+// this method exists to prevent. A failed add is returned via fwErr so
+// the caller can audit it without telling the customer their code is gone.
+func (s *MACService) RedeemVoucherGrant(ctx context.Context, code, mac string, userID *int64) (v *models.Voucher, m *models.MAC, fwErr error, err error) {
+	v, m, err = s.DB.RedeemVoucherGrant(ctx, code, mac, userID)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	if aerr := s.FW.Add(ctx, m.Mac); aerr != nil {
+		log.Printf("warn: firewall add %s after voucher redeem: %v (reconcile will heal)", m.Mac, aerr)
+		fwErr = aerr
+	}
+	return v, m, fwErr, nil
+}
+
 // Revoke marks blocked + drops from firewall set.
 func (s *MACService) Revoke(ctx context.Context, mac string) error {
 	if err := s.DB.SetMACStatus(ctx, mac, models.MACBlocked); err != nil {
@@ -86,13 +107,27 @@ func (s *MACService) Replace(ctx context.Context, userID int64, oldMac, newMac, 
 }
 
 // Resync rebuilds the firewall set from active MACs in DB.
+//
+// MACs carrying a time-of-day schedule are only included while their
+// window is open — otherwise a resync (startup, admin-triggered, or the
+// periodic reconcile) would grant a schedule-blocked device access until
+// the next EnforceSchedules tick removed it again.
 func (s *MACService) Resync(ctx context.Context) error {
 	macs, err := s.DB.ListActiveMACs(ctx)
 	if err != nil {
 		return err
 	}
+	now := time.Now()
 	out := make([]string, 0, len(macs))
 	for _, m := range macs {
+		if m.ScheduleJSON != "" {
+			sched, err := models.ParseSchedule(m.ScheduleJSON)
+			if err == nil && !sched.Active(now) {
+				continue
+			}
+			// Parse errors fail open (include the MAC) — matching
+			// EnforceSchedules, which also skips unparseable schedules.
+		}
 		out = append(out, m.Mac)
 	}
 	return s.FW.Sync(ctx, out)

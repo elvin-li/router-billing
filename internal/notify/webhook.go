@@ -9,6 +9,10 @@
 //   - Drops on full queue, logs to standard logger
 //   - Exponential backoff retries — by default 2s, 30s, 5m; tests inject
 //     a tighter schedule via BackoffSchedule.
+//   - While waiting out a retry backoff the worker keeps draining the Send
+//     queue into a bounded in-order buffer, so a down endpoint (up to
+//     ~5.5 min of backoff per event) doesn't overflow the 64-slot channel
+//     and silently drop everything sent in the meantime.
 package notify
 
 import (
@@ -109,17 +113,35 @@ func (n *Notifier) schedule() []time.Duration {
 	return DefaultBackoffSchedule
 }
 
+// maxPendingOverflow bounds the worker-side buffer that absorbs events
+// arriving while a retry backoff is in progress. Combined with the 64-slot
+// Send queue this gives ~320 events of headroom before anything is dropped
+// during an endpoint outage.
+const maxPendingOverflow = 256
+
 // Run blocks until ctx is canceled. Spawn it in a goroutine from main.
 func (n *Notifier) Run(ctx context.Context) {
 	if n.URL == "" {
 		return
 	}
+	// pending holds events received while a backoff wait was in progress.
+	// It preserves arrival order and is always drained before reading the
+	// channel again, so cross-event ordering is unchanged.
+	var pending []Event
 	for {
-		select {
-		case <-ctx.Done():
+		var ev Event
+		if len(pending) > 0 {
+			ev = pending[0]
+			pending = pending[1:]
+		} else {
+			select {
+			case <-ctx.Done():
+				return
+			case ev = <-n.queue:
+			}
+		}
+		if !n.deliverWithRetries(ctx, ev, &pending) {
 			return
-		case ev := <-n.queue:
-			n.deliver(ctx, ev, 0)
 		}
 	}
 }
@@ -139,16 +161,59 @@ func (n *Notifier) Send(ev Event) {
 	}
 }
 
-func (n *Notifier) deliver(ctx context.Context, ev Event, attempt int) {
+// deliverWithRetries runs the initial attempt plus the retry schedule for a
+// single event. Ordering is preserved: no later event is attempted before
+// this one succeeds or exhausts its schedule. During each backoff wait the
+// worker keeps absorbing newly-sent events into *pending (bounded by
+// maxPendingOverflow) instead of leaving them to pile up in — and overflow —
+// the Send channel. Returns false when ctx was canceled mid-wait.
+func (n *Notifier) deliverWithRetries(ctx context.Context, ev Event, pending *[]Event) bool {
+	for attempt := 0; ; attempt++ {
+		retryable, err := n.attempt(ctx, ev, attempt)
+		if err == nil {
+			return true
+		}
+		sched := n.schedule()
+		if !retryable || attempt >= len(sched) {
+			log.Printf("notify: drop %s/%s after %d attempts: %v", ev.Type, ev.MAC, attempt+1, err)
+			return true
+		}
+		delay := sched[attempt]
+		log.Printf("notify: %s/%s attempt %d failed (%v); retrying in %s",
+			ev.Type, ev.MAC, attempt+1, err, delay)
+		timer := time.NewTimer(delay)
+	wait:
+		for {
+			select {
+			case <-ctx.Done():
+				timer.Stop()
+				return false
+			case e2 := <-n.queue:
+				if len(*pending) < maxPendingOverflow {
+					*pending = append(*pending, e2)
+				} else {
+					log.Printf("notify: pending buffer full, dropping %s/%s", e2.Type, e2.MAC)
+				}
+			case <-timer.C:
+				break wait
+			}
+		}
+	}
+}
+
+// attempt performs exactly one HTTP delivery. Returns a nil error on 2xx;
+// otherwise the error plus whether the failure is worth retrying.
+func (n *Notifier) attempt(ctx context.Context, ev Event, attempt int) (retryable bool, _ error) {
 	body, _ := json.Marshal(ev)
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, n.URL, bytes.NewReader(body))
 	if err != nil {
+		// Malformed URL — retrying can't help.
 		log.Printf("notify: build request: %v", err)
 		if n.OnDelivery != nil {
 			n.OnDelivery(ev, attempt, 0, 0, err)
 		}
-		return
+		return false, err
 	}
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("User-Agent", "router-billing/1 notify")
@@ -168,25 +233,12 @@ func (n *Notifier) deliver(ctx context.Context, ev Event, attempt int) {
 			if n.OnDelivery != nil {
 				n.OnDelivery(ev, attempt, statusCode, time.Since(start).Milliseconds(), nil)
 			}
-			return
+			return false, nil
 		}
 		err = fmt.Errorf("http %d", resp.StatusCode)
 	}
 	if n.OnDelivery != nil {
 		n.OnDelivery(ev, attempt, statusCode, time.Since(start).Milliseconds(), err)
 	}
-	sched := n.schedule()
-	if attempt < len(sched) {
-		delay := sched[attempt]
-		log.Printf("notify: %s/%s attempt %d failed (%v); retrying in %s",
-			ev.Type, ev.MAC, attempt+1, err, delay)
-		select {
-		case <-ctx.Done():
-			return
-		case <-time.After(delay):
-		}
-		n.deliver(ctx, ev, attempt+1)
-		return
-	}
-	log.Printf("notify: drop %s/%s after %d attempts: %v", ev.Type, ev.MAC, attempt+1, err)
+	return true, err
 }

@@ -21,7 +21,7 @@ import (
 // /api/admin/health can alert without computing it themselves.
 func (a *App) handleAdminHealth(w http.ResponseWriter, r *http.Request) {
 	stats, _ := a.DB.Stats(r.Context())
-	att, _ := a.DB.Attention(r.Context())
+	att := a.attention(r.Context())
 	fwMACs, fwErr := a.MACSvc.FW.List(r.Context())
 	fwStatus := "ok"
 	if fwErr != nil {
@@ -92,7 +92,7 @@ func (a *App) handleAdminAuditNote(w http.ResponseWriter, r *http.Request) {
 			actor = "admin:" + sess.Subject
 		}
 	}
-	a.DB.Audit(r.Context(), actor, "manual_note", "", note+" ip="+clientIP(r))
+	a.DB.Audit(r.Context(), actor, "manual_note", "", note+" ip="+a.clientIP(r))
 	http.Redirect(w, r, "/admin/audit?ok=note", http.StatusSeeOther)
 }
 

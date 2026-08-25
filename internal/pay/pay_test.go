@@ -105,6 +105,7 @@ func craftWxNotifyEnvelope(t *testing.T, apiV3Key []byte, mchID, appID string) [
 		MchID: mchID, AppID: appID, OutTradeNo: "B123456",
 		TransactionID: "WX-TX-001", TradeState: "SUCCESS",
 	}
+	res.Amount.Total = 500
 	plain, _ := json.Marshal(res)
 
 	nonce := []byte("123456789012") // 12 bytes
@@ -137,6 +138,9 @@ func TestWeChatDecodeNotifyRoundtrip(t *testing.T) {
 	}
 	if notice.OrderNo != "B123456" || notice.TradeNo != "WX-TX-001" || notice.Provider != "wechat" {
 		t.Errorf("notice mismatch: %+v", notice)
+	}
+	if notice.AmountCents != 500 {
+		t.Errorf("AmountCents = %d, want 500", notice.AmountCents)
 	}
 }
 
@@ -206,6 +210,7 @@ func TestAlipayDecodeNotifyRoundtrip(t *testing.T) {
 	form.Set("trade_no", "ALI-TX-7")
 	form.Set("notify_id", "n-1")
 	form.Set("notify_time", "2025-01-01 00:00:00")
+	form.Set("total_amount", "1.50")
 	form.Set("sign_type", "RSA2")
 
 	// Compute the canonical sign-base ourselves and produce sign with k.
@@ -223,6 +228,9 @@ func TestAlipayDecodeNotifyRoundtrip(t *testing.T) {
 	}
 	if notice.OrderNo != "ORDER-7" || notice.TradeNo != "ALI-TX-7" || notice.Provider != "alipay" {
 		t.Errorf("notice mismatch: %+v", notice)
+	}
+	if notice.AmountCents != 150 {
+		t.Errorf("AmountCents = %d, want 150", notice.AmountCents)
 	}
 }
 
@@ -333,7 +341,7 @@ func TestAlipayPrecreateHitsGateway(t *testing.T) {
 func TestAlipayQueryReturnsSuccessTradeNo(t *testing.T) {
 	privPath, pubPath, _ := writePEMKey(t)
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		_, _ = w.Write([]byte(`{"alipay_trade_query_response":{"code":"10000","trade_no":"TX-9","out_trade_no":"O-9","trade_status":"TRADE_SUCCESS"}}`))
+		_, _ = w.Write([]byte(`{"alipay_trade_query_response":{"code":"10000","trade_no":"TX-9","out_trade_no":"O-9","trade_status":"TRADE_SUCCESS","total_amount":"9.99"}}`))
 	}))
 	defer srv.Close()
 	a, _ := NewAlipay("ali", privPath, pubPath, "http://notify", srv.URL)
@@ -344,6 +352,39 @@ func TestAlipayQueryReturnsSuccessTradeNo(t *testing.T) {
 	}
 	if notice.TradeNo != "TX-9" {
 		t.Errorf("trade_no = %q", notice.TradeNo)
+	}
+	if notice.AmountCents != 999 {
+		t.Errorf("AmountCents = %d, want 999", notice.AmountCents)
+	}
+}
+
+// --- yuanToCents ---------------------------------------------------------------
+
+func TestYuanToCents(t *testing.T) {
+	cases := []struct {
+		in   string
+		want int
+		ok   bool
+	}{
+		{"12.34", 1234, true},
+		{"5", 500, true},
+		{"0.50", 50, true},
+		{"0.5", 50, true},
+		{"0.05", 5, true},
+		{"100.00", 10000, true},
+		{" 1.00 ", 100, true},
+		{"", 0, false},
+		{"abc", 0, false},
+		{"1.234", 0, false}, // sub-cent precision never happens in CNY
+		{"-1.00", 0, false},
+		{".50", 0, false},
+		{"1.-5", 0, false},
+	}
+	for _, c := range cases {
+		got, ok := yuanToCents(c.in)
+		if got != c.want || ok != c.ok {
+			t.Errorf("yuanToCents(%q) = (%d, %v), want (%d, %v)", c.in, got, ok, c.want, c.ok)
+		}
 	}
 }
 

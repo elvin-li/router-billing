@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"html/template"
 	"log"
+	"net"
 	"net/http"
 	"path/filepath"
 	"strings"
@@ -57,6 +58,20 @@ type App struct {
 
 	waitMu  sync.Mutex
 	waiters map[string][]chan struct{} // order_no → pending wait channels
+
+	// One-time flash values (see flash.go) — secrets that must survive
+	// exactly one POST-redirect-GET hop without touching the URL.
+	flashMu sync.Mutex
+	flashes map[string]flashEntry
+
+	// Short-TTL cache for the attention counters (see attention_cache.go).
+	attMu  sync.Mutex
+	attVal db.AttentionCounts
+	attAt  time.Time
+
+	// trustedProxies is parsed once from config security.trusted_proxies.
+	// clientIP only honors X-Forwarded-For when the TCP peer is in here.
+	trustedProxies []*net.IPNet
 }
 
 func NewApp(cfg *config.Config, dbx *db.DB, svc *service.MACService) (*App, error) {
@@ -83,7 +98,15 @@ func NewApp(cfg *config.Config, dbx *db.DB, svc *service.MACService) (*App, erro
 		apiTokenLimiter: map[string]*rateLimiter{},
 
 		waiters: map[string][]chan struct{}{},
+		flashes: map[string]flashEntry{},
 	}
+
+	// Validated at config load already; re-parse here to wire the value in.
+	proxies, err := cfg.Security.TrustedProxyNets()
+	if err != nil {
+		return nil, fmt.Errorf("trusted proxies: %w", err)
+	}
+	app.trustedProxies = proxies
 
 	// Wire the v0.49 webhook delivery logger: every Notifier attempt
 	// (initial + each retry) lands a row in webhook_deliveries so
@@ -131,7 +154,12 @@ func NewApp(cfg *config.Config, dbx *db.DB, svc *service.MACService) (*App, erro
 	}
 
 	tplGlob := filepath.Join(cfg.WebRoot, "templates", "*.html")
-	tpl, err := template.New("").Funcs(tplFuncs()).ParseGlob(tplGlob)
+	// missingkey=zero: when a template references {{.X}} and X isn't in the
+	// map (we pass map[string]any to many handlers via adminCtx), render the
+	// zero value ("" / 0 / nil) instead of the literal string "<no value>".
+	// Struct-field misses are unaffected — those have always been hard
+	// errors, which is what surfaced the v0.96 dashboard plan-sales bug.
+	tpl, err := template.New("").Option("missingkey=zero").Funcs(tplFuncs()).ParseGlob(tplGlob)
 	if err != nil {
 		return nil, fmt.Errorf("parse templates %s: %w", tplGlob, err)
 	}
@@ -452,8 +480,12 @@ func auditTargetHref(target string) string {
 	if mac, ok := models.NormalizeMAC(target); ok {
 		return "/admin/macs/detail?mac=" + mac
 	}
-	// Order number — starts with "ORD" or "ord".
-	if strings.HasPrefix(target, "ORD") || strings.HasPrefix(target, "ord") {
+	// Order number — either the legacy "ORD"/"ord" prefix or the real
+	// shape newOrderNo() emits: "B" + 14-digit UTC timestamp + 8 hex
+	// chars (e.g. B20260824190000a1b2c3d4). The refund/cancel audit rows
+	// use these as targets, so without this branch they rendered as
+	// plain text.
+	if strings.HasPrefix(target, "ORD") || strings.HasPrefix(target, "ord") || looksLikeOrderNo(target) {
 		return "/admin/orders/detail?order_no=" + target
 	}
 	// All-digit shapes: 11-digit starts-with-1 → phone; 1-9 digits → user_id.
@@ -473,6 +505,25 @@ func auditTargetHref(target string) string {
 		}
 	}
 	return ""
+}
+
+// looksLikeOrderNo reports whether s matches the exact shape newOrderNo()
+// generates: 'B' + 14 digits (yyyymmddhhmmss) + 8 lowercase hex chars.
+func looksLikeOrderNo(s string) bool {
+	if len(s) != 23 || s[0] != 'B' {
+		return false
+	}
+	for _, c := range s[1:15] {
+		if c < '0' || c > '9' {
+			return false
+		}
+	}
+	for _, c := range s[15:] {
+		if (c < '0' || c > '9') && (c < 'a' || c > 'f') {
+			return false
+		}
+	}
+	return true
 }
 
 func tplFuncs() template.FuncMap {

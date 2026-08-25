@@ -2,8 +2,10 @@ package db
 
 import (
 	"context"
+	"crypto/sha256"
 	"database/sql"
 	_ "embed"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"os"
@@ -191,6 +193,28 @@ func (d *DB) queryMACs(ctx context.Context, q string, args ...any) ([]models.MAC
 	return out, rows.Err()
 }
 
+// CountMACsByUser returns user_id → number of MAC rows owned. One GROUP BY
+// instead of shipping every MAC row to Go just to count (the /admin/users
+// page did exactly that).
+func (d *DB) CountMACsByUser(ctx context.Context) (map[int64]int, error) {
+	rows, err := d.conn.QueryContext(ctx,
+		`SELECT user_id, COUNT(*) FROM macs WHERE user_id IS NOT NULL GROUP BY user_id`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := map[int64]int{}
+	for rows.Next() {
+		var uid int64
+		var n int
+		if err := rows.Scan(&uid, &n); err != nil {
+			return nil, err
+		}
+		out[uid] = n
+	}
+	return out, rows.Err()
+}
+
 func (d *DB) GetMAC(ctx context.Context, mac string) (*models.MAC, error) {
 	row := d.conn.QueryRowContext(ctx, `SELECT `+macCols+` FROM macs WHERE mac = ?`, mac)
 	m, err := scanMAC(row)
@@ -203,6 +227,48 @@ func (d *DB) GetMAC(ctx context.Context, mac string) (*models.MAC, error) {
 	return m, nil
 }
 
+// GetMACsIn returns the subset of `macs` that exist as billing rows, keyed
+// by MAC. One IN query (chunked to stay under SQLite's parameter limit)
+// instead of a point lookup per element — used by the admin devices page,
+// which merges ARP + sightings and previously issued one GetMAC per device.
+func (d *DB) GetMACsIn(ctx context.Context, macs []string) (map[string]*models.MAC, error) {
+	out := make(map[string]*models.MAC, len(macs))
+	const chunk = 500
+	for start := 0; start < len(macs); start += chunk {
+		end := start + chunk
+		if end > len(macs) {
+			end = len(macs)
+		}
+		part := macs[start:end]
+		args := make([]any, len(part))
+		for i, m := range part {
+			args[i] = m
+		}
+		// Only compile-time constants plus a repeated "?" placeholder are
+		// concatenated; every value binds through args.
+		q := `SELECT ` + macCols + ` FROM macs WHERE mac IN (?` + //nolint:gosec // G202: placeholders only
+			strings.Repeat(",?", len(part)-1) + `)`
+		rows, err := d.conn.QueryContext(ctx, q, args...)
+		if err != nil {
+			return nil, err
+		}
+		for rows.Next() {
+			m, err := scanMAC(rows)
+			if err != nil {
+				rows.Close()
+				return nil, err
+			}
+			out[m.Mac] = m
+		}
+		if err := rows.Err(); err != nil {
+			rows.Close()
+			return nil, err
+		}
+		rows.Close()
+	}
+	return out, nil
+}
+
 // UpsertMAC adds new MAC or extends existing one's expiry. Returns the post-state.
 // If existing MAC is still active, new expiry = current_expiry + days.
 // Otherwise new expiry = now + days. userID nil keeps the existing owner (or null).
@@ -213,9 +279,22 @@ func (d *DB) UpsertMAC(ctx context.Context, mac, label string, days int, userID 
 	}
 	defer tx.Rollback()
 
+	if err := upsertMACTx(ctx, tx, mac, label, days, userID); err != nil {
+		return nil, err
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, err
+	}
+	return d.GetMAC(ctx, mac)
+}
+
+// upsertMACTx is the transaction-level body of UpsertMAC, shared with
+// RedeemVoucherGrant so voucher consumption and the MAC grant can commit
+// (or roll back) together.
+func upsertMACTx(ctx context.Context, tx *sql.Tx, mac, label string, days int, userID *int64) error {
 	existing, err := getMACTx(ctx, tx, mac)
 	if err != nil {
-		return nil, err
+		return err
 	}
 	now := time.Now().UTC()
 	var newExpiry time.Time
@@ -247,13 +326,7 @@ func (d *DB) UpsertMAC(ctx context.Context, mac, label string, days int, userID 
 				newLabel, newExpiry, now, mac)
 		}
 	}
-	if err != nil {
-		return nil, err
-	}
-	if err := tx.Commit(); err != nil {
-		return nil, err
-	}
-	return d.GetMAC(ctx, mac)
+	return err
 }
 
 func getMACTx(ctx context.Context, tx *sql.Tx, mac string) (*models.MAC, error) {
@@ -333,8 +406,18 @@ func (d *DB) ReplaceMAC(ctx context.Context, userID int64, oldMac, newMac, label
 }
 
 // ExpireDueMACs marks expired MACs and returns the ones newly expired.
+// SELECT + UPDATE run in one transaction so the returned list is exactly
+// the set of rows the UPDATE flipped — a MAC crossing the expiry boundary
+// between the two statements can neither be missed by the caller's
+// firewall revoke nor flipped without being reported.
 func (d *DB) ExpireDueMACs(ctx context.Context) ([]string, error) {
-	rows, err := d.conn.QueryContext(ctx, `SELECT mac FROM macs WHERE status = 'active' AND expires_at <= CURRENT_TIMESTAMP`)
+	tx, err := d.conn.BeginTx(ctx, nil)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	rows, err := tx.QueryContext(ctx, `SELECT mac FROM macs WHERE status = 'active' AND expires_at <= CURRENT_TIMESTAMP`)
 	if err != nil {
 		return nil, err
 	}
@@ -347,24 +430,30 @@ func (d *DB) ExpireDueMACs(ctx context.Context) ([]string, error) {
 		}
 		expired = append(expired, m)
 	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return nil, err
+	}
 	rows.Close()
 	if len(expired) == 0 {
 		return nil, nil
 	}
-	_, err = d.conn.ExecContext(ctx, `UPDATE macs SET status = 'expired', updated_at = CURRENT_TIMESTAMP WHERE status = 'active' AND expires_at <= CURRENT_TIMESTAMP`)
-	return expired, err
+	if _, err := tx.ExecContext(ctx, `UPDATE macs SET status = 'expired', updated_at = CURRENT_TIMESTAMP WHERE status = 'active' AND expires_at <= CURRENT_TIMESTAMP`); err != nil {
+		return nil, err
+	}
+	return expired, tx.Commit()
 }
 
 // ---------- Orders ----------
 
-const orderCols = `id, order_no, mac, plan, days, amount_cents, status, payment_method, trade_no, user_id, last_queried_at, paid_at, created_at`
+const orderCols = `id, order_no, mac, plan, days, amount_cents, status, payment_method, trade_no, user_id, last_queried_at, paid_at, qr_payload, created_at`
 
 func scanOrder(row interface{ Scan(...any) error }) (*models.Order, error) {
 	var o models.Order
 	var userID sql.NullInt64
 	var lastQ, paidAt sql.NullTime
 	if err := row.Scan(&o.ID, &o.OrderNo, &o.Mac, &o.Plan, &o.Days, &o.AmountCents, &o.Status,
-		&o.PaymentMethod, &o.TradeNo, &userID, &lastQ, &paidAt, &o.CreatedAt); err != nil {
+		&o.PaymentMethod, &o.TradeNo, &userID, &lastQ, &paidAt, &o.QRPayload, &o.CreatedAt); err != nil {
 		return nil, err
 	}
 	if userID.Valid {
@@ -472,6 +561,26 @@ func (d *DB) SearchOrdersFiltered(ctx context.Context, f OrderFilter) ([]models.
 	return d.queryOrders(ctx, sb.String(), args...)
 }
 
+// LatestPaidOrderForMAC returns the most recently paid order for a MAC,
+// or nil when the MAC never had one. Used by the /pay/success page to
+// offer a receipt link — a targeted indexed lookup instead of scanning
+// the newest N orders in Go (which silently missed the order once it
+// aged out of the scan window).
+func (d *DB) LatestPaidOrderForMAC(ctx context.Context, mac string) (*models.Order, error) {
+	row := d.conn.QueryRowContext(ctx,
+		`SELECT `+orderCols+` FROM orders
+		 WHERE mac = ? AND status = 'paid'
+		 ORDER BY paid_at DESC, id DESC LIMIT 1`, mac)
+	o, err := scanOrder(row)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	return o, nil
+}
+
 func (d *DB) ListOrdersForUser(ctx context.Context, userID int64, limit int) ([]models.Order, error) {
 	if limit <= 0 || limit > 500 {
 		limit = 50
@@ -495,6 +604,17 @@ func (d *DB) ListPendingOrdersToPoll(ctx context.Context, staleAfter time.Durati
 
 func (d *DB) MarkOrderQueried(ctx context.Context, orderNo string) error {
 	_, err := d.conn.ExecContext(ctx, `UPDATE orders SET last_queried_at = ? WHERE order_no = ?`, time.Now().UTC(), orderNo)
+	return err
+}
+
+// SetOrderQRPayload stores the upstream PSP's QR string on the order row.
+// Used immediately after Precreate so /api/pay/qr can render from the
+// authoritative server-side value instead of a URL-supplied parameter.
+// v0.97 security fix.
+func (d *DB) SetOrderQRPayload(ctx context.Context, orderNo, payload string) error {
+	_, err := d.conn.ExecContext(ctx,
+		`UPDATE orders SET qr_payload = ? WHERE order_no = ?`,
+		payload, orderNo)
 	return err
 }
 
@@ -711,6 +831,15 @@ func (d *DB) CancelStalePendingOrders(ctx context.Context, olderThan time.Durati
 
 // ---------- Sessions ----------
 
+// HashToken maps a raw session token (the cookie value) to the value stored
+// in sessions.token. Tokens are stored as SHA-256 digests so a leaked DB
+// file or backup cannot be replayed as live cookies. The raw token only ever
+// lives in the client's cookie.
+func HashToken(raw string) string {
+	sum := sha256.Sum256([]byte(raw))
+	return hex.EncodeToString(sum[:])
+}
+
 func (d *DB) CreateSession(ctx context.Context, token, kind, subject string, userID *int64, ttl time.Duration) error {
 	var uid sql.NullInt64
 	if userID != nil {
@@ -718,7 +847,7 @@ func (d *DB) CreateSession(ctx context.Context, token, kind, subject string, use
 	}
 	_, err := d.conn.ExecContext(ctx,
 		`INSERT INTO sessions (token, kind, subject, user_id, expires_at) VALUES (?, ?, ?, ?, ?)`,
-		token, kind, subject, uid, time.Now().UTC().Add(ttl))
+		HashToken(token), kind, subject, uid, time.Now().UTC().Add(ttl))
 	return err
 }
 
@@ -728,9 +857,10 @@ type SessionRow struct {
 	UserID  *int64
 }
 
+// GetSession looks up a session by its raw token (cookie value).
 func (d *DB) GetSession(ctx context.Context, token string) (*SessionRow, error) {
 	row := d.conn.QueryRowContext(ctx,
-		`SELECT kind, subject, user_id FROM sessions WHERE token = ? AND expires_at > CURRENT_TIMESTAMP`, token)
+		`SELECT kind, subject, user_id FROM sessions WHERE token = ? AND expires_at > CURRENT_TIMESTAMP`, HashToken(token))
 	var s SessionRow
 	var uid sql.NullInt64
 	err := row.Scan(&s.Kind, &s.Subject, &uid)
@@ -747,8 +877,19 @@ func (d *DB) GetSession(ctx context.Context, token string) (*SessionRow, error) 
 	return &s, nil
 }
 
+// DeleteSession removes a session by its raw token (cookie value). For
+// revoking a row picked from a session list (which only exposes the stored
+// hash), use DeleteSessionByHash instead.
 func (d *DB) DeleteSession(ctx context.Context, token string) error {
-	_, err := d.conn.ExecContext(ctx, `DELETE FROM sessions WHERE token = ?`, token)
+	_, err := d.conn.ExecContext(ctx, `DELETE FROM sessions WHERE token = ?`, HashToken(token))
+	return err
+}
+
+// DeleteSessionByHash removes a session by its stored token hash — the value
+// surfaced by ListActiveSessions / ListSessionsForUser. Used by the admin
+// sessions page, whose revoke form round-trips the hash, never a raw token.
+func (d *DB) DeleteSessionByHash(ctx context.Context, tokenHash string) error {
+	_, err := d.conn.ExecContext(ctx, `DELETE FROM sessions WHERE token = ?`, tokenHash)
 	return err
 }
 
@@ -767,7 +908,7 @@ func (d *DB) DeleteSessionsByUserID(ctx context.Context, userID int64) (int64, e
 
 // SessionRecord is one row of the live-sessions list used by /admin/sessions.
 type SessionRecord struct {
-	Token     string // server-side primary key — shown truncated in UI
+	Token     string // SHA-256 hash of the cookie token — safe to show truncated in UI
 	Kind      string // "admin" | "user"
 	Subject   string // username for admin, phone for user
 	UserID    *int64 // present for kind=user
@@ -836,12 +977,12 @@ func (d *DB) ListSessionsForUser(ctx context.Context, userID int64) ([]SessionRe
 	return out, rows.Err()
 }
 
-// DeleteAllAdminSessionsExcept logs out every admin session except `keep`.
-// Useful for "I lost my laptop" — keep current cookie alive, kill the rest.
-// Returns the number of sessions deleted.
+// DeleteAllAdminSessionsExcept logs out every admin session except `keep`
+// (a raw cookie token). Useful for "I lost my laptop" — keep current cookie
+// alive, kill the rest. Returns the number of sessions deleted.
 func (d *DB) DeleteAllAdminSessionsExcept(ctx context.Context, keep string) (int64, error) {
 	res, err := d.conn.ExecContext(ctx,
-		`DELETE FROM sessions WHERE kind = 'admin' AND token != ?`, keep)
+		`DELETE FROM sessions WHERE kind = 'admin' AND token != ?`, HashToken(keep))
 	if err != nil {
 		return 0, err
 	}
@@ -863,12 +1004,12 @@ func (d *DB) DeleteAllUserSessions(ctx context.Context) (int64, error) {
 }
 
 // DeleteUserSessionsExcept is the user equivalent — logs out every session
-// belonging to userID except `keep`, used by "sign me out of all other
-// devices". Returns the number of sessions deleted.
+// belonging to userID except `keep` (a raw cookie token), used by "sign me
+// out of all other devices". Returns the number of sessions deleted.
 func (d *DB) DeleteUserSessionsExcept(ctx context.Context, userID int64, keep string) (int64, error) {
 	res, err := d.conn.ExecContext(ctx,
 		`DELETE FROM sessions WHERE kind = 'user' AND user_id = ? AND token != ?`,
-		userID, keep)
+		userID, HashToken(keep))
 	if err != nil {
 		return 0, err
 	}
@@ -1074,22 +1215,26 @@ func (d *DB) DeleteUser(ctx context.Context, id int64) error {
 func (d *DB) CreateTrustedDevice(ctx context.Context, userID int64, token, label string, ttl time.Duration) (*models.TrustedDevice, error) {
 	now := time.Now().UTC()
 	exp := now.Add(ttl)
+	// Stored hashed, same rationale as sessions: a leaked DB dump must not
+	// yield working "skip 2FA" cookies.
+	hashed := HashToken(token)
 	res, err := d.conn.ExecContext(ctx,
 		`INSERT INTO user_trusted_devices (user_id, token, label, expires_at, last_seen, created_at)
 		 VALUES (?, ?, ?, ?, ?, ?)`,
-		userID, token, label, exp, now, now)
+		userID, hashed, label, exp, now, now)
 	if err != nil {
 		return nil, err
 	}
 	id, _ := res.LastInsertId()
 	return &models.TrustedDevice{
-		ID: id, UserID: userID, Token: token, Label: label,
+		ID: id, UserID: userID, Token: hashed, Label: label,
 		ExpiresAt: exp, LastSeen: now, CreatedAt: now,
 	}, nil
 }
 
-// GetTrustedDevice looks up by raw token, returning nil if missing/expired.
-// On hit it also bumps last_seen so the /user/2fa page shows fresh data.
+// GetTrustedDevice looks up by raw token (cookie value), returning nil if
+// missing/expired. On hit it also bumps last_seen so the /user/2fa page
+// shows fresh data.
 func (d *DB) GetTrustedDevice(ctx context.Context, token string) (*models.TrustedDevice, error) {
 	if token == "" {
 		return nil, nil
@@ -1097,7 +1242,7 @@ func (d *DB) GetTrustedDevice(ctx context.Context, token string) (*models.Truste
 	row := d.conn.QueryRowContext(ctx,
 		`SELECT id, user_id, token, label, expires_at, last_seen, created_at
 		 FROM user_trusted_devices WHERE token = ? AND expires_at > ?`,
-		token, time.Now().UTC())
+		HashToken(token), time.Now().UTC())
 	var t models.TrustedDevice
 	err := row.Scan(&t.ID, &t.UserID, &t.Token, &t.Label, &t.ExpiresAt, &t.LastSeen, &t.CreatedAt)
 	if errors.Is(err, sql.ErrNoRows) {
@@ -1636,6 +1781,66 @@ func (d *DB) CreateVoucher(ctx context.Context, code string, days int, label, ba
 	return &models.Voucher{ID: id, Code: code, Days: days, Label: label, Batch: batch, ExpiresAt: expiresAt}, nil
 }
 
+// VoucherSpec is one row destined for CreateVouchersBulk.
+type VoucherSpec struct {
+	Code      string
+	Days      int
+	Label     string
+	Batch     string
+	ExpiresAt *time.Time
+}
+
+// CreateVouchersBulk inserts every spec in a single SQLite transaction —
+// one fsync at COMMIT instead of one-per-row. A 1000-row import goes from
+// "noticeably slow" to "instant". Per-row UNIQUE collisions don't abort
+// the transaction (SQLite default: stmt-level error, tx survives), so a
+// duplicate paste in the middle of an import doesn't lose the rest.
+//
+// Returns a parallel []bool — true at index i means specs[i] was inserted
+// successfully, false means it failed (almost always UNIQUE collision).
+// The caller surfaces per-row outcomes to the operator (added=N failed=M).
+//
+// Used by both the admin voucher import (CSV paste) and bulk generate
+// flows. v0.97.
+func (d *DB) CreateVouchersBulk(ctx context.Context, specs []VoucherSpec) ([]bool, error) {
+	out := make([]bool, len(specs))
+	if len(specs) == 0 {
+		return out, nil
+	}
+	tx, err := d.conn.BeginTx(ctx, nil)
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback()
+
+	stmt, err := tx.PrepareContext(ctx,
+		`INSERT INTO vouchers (code, days, label, batch, expires_at) VALUES (?, ?, ?, ?, ?)`)
+	if err != nil {
+		return nil, err
+	}
+	defer stmt.Close()
+
+	for i, s := range specs {
+		var expr any
+		if s.ExpiresAt != nil {
+			expr = *s.ExpiresAt
+		}
+		if _, err := stmt.ExecContext(ctx, s.Code, s.Days, s.Label, s.Batch, expr); err != nil {
+			// SQLite reports UNIQUE/CHECK violations as stmt errors that
+			// don't abort the surrounding tx, so we record the failure
+			// and continue. Anything else (driver disconnect, full disk)
+			// will resurface at Commit and we'll bail.
+			out[i] = false
+			continue
+		}
+		out[i] = true
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 func (d *DB) GetVoucher(ctx context.Context, code string) (*models.Voucher, error) {
 	row := d.conn.QueryRowContext(ctx, `SELECT `+voucherCols+` FROM vouchers WHERE code = ?`, code)
 	v, err := scanVoucher(row)
@@ -1811,6 +2016,65 @@ func (d *DB) RedeemVoucher(ctx context.Context, code, mac string, userID *int64)
 	v.RedeemedByMac = mac
 	v.RedeemedUserID = userID
 	return v, nil
+}
+
+// RedeemVoucherGrant marks the voucher consumed AND grants its days to the
+// MAC in one transaction. Either both land or neither does — the standalone
+// RedeemVoucher + UpsertMAC sequence had a window where a failed grant left
+// the voucher burned with nothing delivered, unrecoverable for the customer
+// without admin surgery.
+//
+// The MAC's label is set to "voucher:<batch>" matching the label the
+// two-step flow used. Returns the voucher and the post-grant MAC row.
+// Validation errors are the same typed errors RedeemVoucher returns.
+func (d *DB) RedeemVoucherGrant(ctx context.Context, code, mac string, userID *int64) (*models.Voucher, *models.MAC, error) {
+	tx, err := d.conn.BeginTx(ctx, nil)
+	if err != nil {
+		return nil, nil, err
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	row := tx.QueryRowContext(ctx, `SELECT `+voucherCols+` FROM vouchers WHERE code = ?`, code)
+	v, err := scanVoucher(row)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, nil, ErrVoucherNotFound
+	}
+	if err != nil {
+		return nil, nil, err
+	}
+	if v.Revoked {
+		return nil, nil, ErrVoucherRevoked
+	}
+	if v.RedeemedAt != nil {
+		return nil, nil, ErrVoucherUsed
+	}
+	if v.ExpiresAt != nil && v.ExpiresAt.Before(time.Now().UTC()) {
+		return nil, nil, ErrVoucherExpired
+	}
+	now := time.Now().UTC()
+	var uid any
+	if userID != nil {
+		uid = *userID
+	}
+	if _, err := tx.ExecContext(ctx,
+		`UPDATE vouchers SET redeemed_at = ?, redeemed_by_mac = ?, redeemed_user_id = ? WHERE code = ?`,
+		now, mac, uid, code); err != nil {
+		return nil, nil, err
+	}
+	if err := upsertMACTx(ctx, tx, mac, "voucher:"+v.Batch, v.Days, userID); err != nil {
+		return nil, nil, err
+	}
+	m, err := getMACTx(ctx, tx, mac)
+	if err != nil {
+		return nil, nil, err
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, nil, err
+	}
+	v.RedeemedAt = &now
+	v.RedeemedByMac = mac
+	v.RedeemedUserID = userID
+	return v, m, nil
 }
 
 // Voucher errors.

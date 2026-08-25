@@ -3,6 +3,7 @@ package config
 import (
 	"crypto/subtle"
 	"fmt"
+	"net"
 	"os"
 	"strings"
 	"time"
@@ -80,6 +81,50 @@ type Security struct {
 	// /api/admin/orders/cancel-stale; this saves operators having to
 	// wire up cron. 0 (default) = disabled. Clamped to [1, 720] (1h .. 30d).
 	AutoCancelStaleOrderHours int `yaml:"auto_cancel_stale_order_hours,omitempty"`
+
+	// TrustedProxies lists the reverse proxies (IPs or CIDRs) whose
+	// X-Forwarded-For header the server may trust for client-IP
+	// derivation. When empty (the default), X-Forwarded-For is IGNORED
+	// and the TCP peer address is used — otherwise any client could
+	// spoof the header to rotate around the per-IP rate limits and to
+	// pollute audit-log IPs. Set this to your nginx/Caddy address(es)
+	// when running behind a reverse proxy, e.g. ["127.0.0.1", "10.0.0.0/8"].
+	TrustedProxies []string `yaml:"trusted_proxies,omitempty"`
+}
+
+// TrustedProxyNets parses TrustedProxies into net.IPNet values. Plain IPs
+// are treated as /32 (or /128 for IPv6). Invalid entries produce an error
+// so a config typo fails loudly at startup instead of silently disabling
+// proxy trust.
+func (s Security) TrustedProxyNets() ([]*net.IPNet, error) {
+	if len(s.TrustedProxies) == 0 {
+		return nil, nil
+	}
+	out := make([]*net.IPNet, 0, len(s.TrustedProxies))
+	for _, raw := range s.TrustedProxies {
+		entry := strings.TrimSpace(raw)
+		if entry == "" {
+			continue
+		}
+		if !strings.Contains(entry, "/") {
+			ip := net.ParseIP(entry)
+			if ip == nil {
+				return nil, fmt.Errorf("security.trusted_proxies: %q is not an IP or CIDR", raw)
+			}
+			bits := 32
+			if ip.To4() == nil {
+				bits = 128
+			}
+			out = append(out, &net.IPNet{IP: ip, Mask: net.CIDRMask(bits, bits)})
+			continue
+		}
+		_, ipnet, err := net.ParseCIDR(entry)
+		if err != nil {
+			return nil, fmt.Errorf("security.trusted_proxies: %q: %w", raw, err)
+		}
+		out = append(out, ipnet)
+	}
+	return out, nil
 }
 
 // AutoCancelStaleOrders returns the clamped hours window or 0 (disabled).
@@ -411,6 +456,9 @@ func (c *Config) validate() error {
 			c.Pay.WeChat.PrivateKeyPath == "" || c.Pay.WeChat.NotifyURL == "" {
 			return fmt.Errorf("pay.wechat enabled but credentials incomplete")
 		}
+	}
+	if _, err := c.Security.TrustedProxyNets(); err != nil {
+		return err
 	}
 	if c.Pay.Alipay.Enabled {
 		if c.Pay.Alipay.AppID == "" || c.Pay.Alipay.PrivateKeyPath == "" ||

@@ -10,6 +10,7 @@ import (
 	"log"
 	"net/http"
 	"net/url"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -58,7 +59,7 @@ func (a *App) handleAdminLogin(w http.ResponseWriter, r *http.Request) {
 	}
 	u := r.PostForm.Get("username")
 	p := r.PostForm.Get("password")
-	if !a.adminLoginLimiter.allow(clientIP(r)) {
+	if !a.adminLoginLimiter.allow(a.clientIP(r)) {
 		a.render(w, "admin_login.html", map[string]any{"Error": "尝试过于频繁，请稍候再试"})
 		return
 	}
@@ -71,7 +72,7 @@ func (a *App) handleAdminLogin(w http.ResponseWriter, r *http.Request) {
 	}
 	admin, ok := a.Cfg.AuthenticateAdminFull(u, p)
 	if !ok {
-		a.DB.Audit(r.Context(), "admin-attempt:"+u, "login_failed", "", clientIP(r))
+		a.DB.Audit(r.Context(), "admin-attempt:"+u, "login_failed", "", a.clientIP(r))
 		a.render(w, "admin_login.html", map[string]any{"Error": "用户名或密码错误"})
 		return
 	}
@@ -127,7 +128,7 @@ func (a *App) issueAdminSession(w http.ResponseWriter, r *http.Request, username
 	http.SetCookie(w, &http.Cookie{
 		Name: adminPendingCookie, Value: "", Path: "/admin", MaxAge: -1, HttpOnly: true,
 	})
-	a.DB.Audit(r.Context(), "admin:"+username, "login", "", "ip="+clientIP(r))
+	a.DB.Audit(r.Context(), "admin:"+username, "login", "", "ip="+a.clientIP(r))
 	a.maybeAlertAdminLogin(r, username)
 	http.Redirect(w, r, "/admin/dashboard", http.StatusSeeOther)
 }
@@ -147,7 +148,7 @@ func (a *App) maybeAlertAdminLogin(r *http.Request, username string) {
 		log.Printf("admin-login alert: invalid phone in config (%q), skipping", phone)
 		return
 	}
-	ip := clientIP(r)
+	ip := a.clientIP(r)
 	go func() {
 		// Detach from request context so an in-flight cookie-set + redirect
 		// doesn't cancel the upstream SMS request. 8s budget should cover
@@ -215,10 +216,10 @@ func (a *App) requireAdmin(h http.HandlerFunc) http.HandlerFunc {
 // admins can spot work-needed pages without clicking through.
 func (a *App) adminCtx(r *http.Request, page string, extra map[string]any) map[string]any {
 	// Sidebar attention badges. Best-effort — if the DB query errors, the
-	// badge silently disappears rather than 500-ing the page. The counts
-	// are already cheap (handled by Attention()) so this isn't a perf hit
-	// per render.
-	att, _ := a.DB.Attention(r.Context())
+	// badge silently disappears rather than 500-ing the page. Served from
+	// the short-TTL cache so every page render doesn't refire the 6-COUNT
+	// query set on the router's single SQLite connection.
+	att := a.attention(r.Context())
 
 	out := map[string]any{
 		"Version": a.Version,
@@ -271,13 +272,11 @@ func errLabel(code string) string {
 func (a *App) handleAdminMACs(w http.ResponseWriter, r *http.Request) {
 	q := strings.TrimSpace(r.URL.Query().Get("q"))
 	status := strings.TrimSpace(r.URL.Query().Get("status"))
-	var macs []models.MAC
-	var err error
-	if q == "" && status == "" {
-		macs, err = a.DB.ListMACs(r.Context())
-	} else {
-		macs, err = a.DB.SearchMACs(r.Context(), q, status, 500)
-	}
+	// Always go through SearchMACs so the unfiltered view gets the same
+	// 500-row cap as the filtered one — ListMACs returned EVERY row,
+	// which on a long-running install rendered a multi-megabyte page.
+	// The Stats card still shows the true total.
+	macs, err := a.DB.SearchMACs(r.Context(), q, status, 500)
 	if err != nil {
 		http.Error(w, "db", http.StatusInternalServerError)
 		return
@@ -286,7 +285,7 @@ func (a *App) handleAdminMACs(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		log.Printf("stats: %v", err)
 	}
-	att, _ := a.DB.Attention(r.Context())
+	att := a.attention(r.Context())
 	planSales, _ := a.DB.PlanSalesSince(r.Context(), 30)
 	a.render(w, "admin_macs.html", a.adminCtx(r, "macs", map[string]any{
 		"MACs":      macs,
@@ -325,7 +324,29 @@ func (a *App) handleAdminDevices(w http.ResponseWriter, r *http.Request) {
 	// 4) Per-MAC nftables counters (bytes/packets through forward chain).
 	counters, _ := a.MACSvc.FW.Counters(r.Context())
 
-	// Merge: every sighted MAC + every online MAC.
+	// Merge: every sighted MAC + every online MAC. Billing rows are fetched
+	// in ONE batched query up front instead of a per-device point lookup
+	// (this page can easily list 100+ devices on a busy network).
+	allMACs := make([]string, 0, len(sightings)+len(entries))
+	inList := map[string]bool{}
+	for _, s := range sightings {
+		if !inList[s.MAC] {
+			inList[s.MAC] = true
+			allMACs = append(allMACs, s.MAC)
+		}
+	}
+	for _, e := range entries {
+		if !inList[e.MAC] {
+			inList[e.MAC] = true
+			allMACs = append(allMACs, e.MAC)
+		}
+	}
+	known, err := a.DB.GetMACsIn(r.Context(), allMACs)
+	if err != nil {
+		log.Printf("devices: batch mac lookup: %v", err)
+		known = nil
+	}
+
 	seen := map[string]bool{}
 	devices := make([]deviceView, 0, len(sightings)+len(entries))
 
@@ -341,7 +362,7 @@ func (a *App) handleAdminDevices(w http.ResponseWriter, r *http.Request) {
 				dv.IP = onlineIP
 			}
 		}
-		if m, _ := a.DB.GetMAC(r.Context(), mac); m != nil {
+		if m := known[mac]; m != nil {
 			dv.Known = true
 			dv.Label = m.Label
 			dv.ExpiresAt = m.ExpiresAt
@@ -389,12 +410,9 @@ func sortDevices(d []deviceView) {
 			return 3
 		}
 	}
-	// insertion sort — small lists, stable
-	for i := 1; i < len(d); i++ {
-		for j := i; j > 0 && rank(d[j]) < rank(d[j-1]); j-- {
-			d[j], d[j-1] = d[j-1], d[j]
-		}
-	}
+	// Stable so devices within the same rank keep their sighting order
+	// (most-recently-seen first, as built by the caller).
+	sort.SliceStable(d, func(i, j int) bool { return rank(d[i]) < rank(d[j]) })
 }
 
 // GET /admin/users/detail?id=<id>
@@ -467,7 +485,7 @@ func (a *App) handleAdminUserDetail(w http.ResponseWriter, r *http.Request) {
 func (a *App) handleAdminDashboard(w http.ResponseWriter, r *http.Request) {
 	stats, _ := a.DB.Stats(r.Context())
 	snap, _ := a.DB.DashboardSnapshot(r.Context())
-	att, _ := a.DB.Attention(r.Context())
+	att := a.attention(r.Context())
 	planSales, _ := a.DB.PlanSalesSince(r.Context(), 30)
 	recent, _ := a.DB.SearchAudit(r.Context(), db.AuditFilter{Limit: 10})
 
@@ -546,12 +564,9 @@ func (a *App) handleAdminUsers(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "db", http.StatusInternalServerError)
 		return
 	}
-	macCount := map[int64]int{}
-	macs, _ := a.DB.ListMACs(r.Context())
-	for _, m := range macs {
-		if m.UserID != nil {
-			macCount[*m.UserID]++
-		}
+	macCount, _ := a.DB.CountMACsByUser(r.Context())
+	if macCount == nil {
+		macCount = map[int64]int{}
 	}
 	// Allow the template to read raw query params (e.g. flash data from
 	// reset-password redirects). Keeps the data shape simple.
@@ -560,10 +575,13 @@ func (a *App) handleAdminUsers(w http.ResponseWriter, r *http.Request) {
 		rawQuery[k] = r.URL.Query().Get(k)
 	}
 	a.render(w, "admin_users.html", a.adminCtx(r, "users", map[string]any{
-		"Users":        users,
-		"MacCount":     macCount,
-		"Query":        q,
-		"Query0":       rawQuery,
+		"Users":    users,
+		"MacCount": macCount,
+		"Query":    q,
+		"Query0":   rawQuery,
+		// One-shot temp password from a reset-password redirect. Popping
+		// consumes it — a reload of this page shows nothing.
+		"ResetPwd":     a.popFlash(r.URL.Query().Get("flash")),
 		"SMSAvailable": a.SMS != nil && a.SMS.Available(),
 		"SMSProvider": func() string {
 			if a.SMS == nil {
@@ -645,7 +663,7 @@ func (a *App) handleAdminUserReset2FA(w http.ResponseWriter, r *http.Request) {
 	// post-2FA session would lose its "extra factor" property silently.
 	_, _ = a.DB.DeleteSessionsByUserID(r.Context(), id)
 	a.DB.Audit(r.Context(), "admin", "user_reset_2fa", strconv.FormatInt(id, 10),
-		"phone="+user.Phone+" ip="+clientIP(r))
+		"phone="+user.Phone+" ip="+a.clientIP(r))
 	http.Redirect(w, r, "/admin/users?ok=reset_2fa&reset_uid="+strconv.FormatInt(id, 10), http.StatusSeeOther)
 }
 
@@ -690,15 +708,19 @@ func (a *App) handleAdminUserResetPassword(w http.ResponseWriter, r *http.Reques
 			sErr := a.SendSMS(r.Context(), user.Phone, tmpPwd)
 			if sErr == nil {
 				a.DB.Audit(r.Context(), "admin", "user_reset_password", strconv.FormatInt(id, 10),
-					"via=sms provider="+a.SMS.Name()+" ip="+clientIP(r))
+					"via=sms provider="+a.SMS.Name()+" ip="+a.clientIP(r))
 				http.Redirect(w, r, "/admin/users?ok=reset_sms&reset_uid="+strconv.FormatInt(id, 10), http.StatusSeeOther)
 				return
 			}
 			log.Printf("reset-password sms %s: %v — falling back to inline display", user.Phone, sErr)
 		}
 	}
-	a.DB.Audit(r.Context(), "admin", "user_reset_password", strconv.FormatInt(id, 10), "via=inline ip="+clientIP(r))
-	http.Redirect(w, r, "/admin/users?reset_pwd="+url.QueryEscape(tmpPwd)+"&reset_uid="+strconv.FormatInt(id, 10), http.StatusSeeOther)
+	a.DB.Audit(r.Context(), "admin", "user_reset_password", strconv.FormatInt(id, 10), "via=inline ip="+a.clientIP(r))
+	// The plaintext goes through the one-time flash store, NOT the URL —
+	// query strings persist in browser history and any intermediary logs,
+	// which is exactly where a live credential must not end up.
+	tok := a.stashFlash(tmpPwd)
+	http.Redirect(w, r, "/admin/users?flash="+url.QueryEscape(tok)+"&reset_uid="+strconv.FormatInt(id, 10), http.StatusSeeOther)
 }
 
 // POST /admin/users/delete  {id}
@@ -759,7 +781,7 @@ func (a *App) handleAdminMACAdd(w http.ResponseWriter, r *http.Request) {
 		http.Redirect(w, r, redirectBack(r, "err=internal"), http.StatusSeeOther)
 		return
 	}
-	ip := clientIP(r)
+	ip := a.clientIP(r)
 	a.DB.Audit(r.Context(), "admin", "grant", mac, fmt.Sprintf("days=%d label=%s ip=%s", days, label, ip))
 	a.Notifier.Send(notify.Event{Type: "grant", Actor: "admin", MAC: mac, Days: days, Detail: label})
 	http.Redirect(w, r, redirectBack(r, "ok=1"), http.StatusSeeOther)
@@ -782,7 +804,7 @@ func (a *App) handleAdminMACDelete(w http.ResponseWriter, r *http.Request) {
 	if err := a.MACSvc.Delete(r.Context(), mac); err != nil {
 		log.Printf("admin delete %s: %v", mac, err)
 	}
-	a.DB.Audit(r.Context(), "admin", "revoke", mac, "ip="+clientIP(r))
+	a.DB.Audit(r.Context(), "admin", "revoke", mac, "ip="+a.clientIP(r))
 	a.Notifier.Send(notify.Event{Type: "revoke", Actor: "admin", MAC: mac})
 	http.Redirect(w, r, redirectBack(r, "ok=1"), http.StatusSeeOther)
 }
@@ -877,7 +899,7 @@ func (a *App) handleAdminMACExtend(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	a.DB.Audit(r.Context(), "admin", "extend", mac,
-		"days="+strconv.Itoa(days)+" ip="+clientIP(r))
+		"days="+strconv.Itoa(days)+" ip="+a.clientIP(r))
 	http.Redirect(w, r, redirectBack(r, "ok=1"), http.StatusSeeOther)
 }
 
@@ -907,7 +929,7 @@ func (a *App) handleAdminMACRevoke(w http.ResponseWriter, r *http.Request) {
 		http.Redirect(w, r, redirectBack(r, "err=internal"), http.StatusSeeOther)
 		return
 	}
-	a.DB.Audit(r.Context(), "admin", "revoke", mac, "ip="+clientIP(r))
+	a.DB.Audit(r.Context(), "admin", "revoke", mac, "ip="+a.clientIP(r))
 	http.Redirect(w, r, redirectBack(r, "ok=revoked"), http.StatusSeeOther)
 }
 
@@ -1108,7 +1130,7 @@ func (a *App) handleAdminOrderRefund(w http.ResponseWriter, r *http.Request) {
 		}(mac.Mac)
 	}
 	a.DB.Audit(r.Context(), "admin", "order_refunded", orderNo,
-		"reason="+reason+" ip="+clientIP(r))
+		"reason="+reason+" ip="+a.clientIP(r))
 	http.Redirect(w, r, "/admin/orders?ok=refunded", http.StatusSeeOther)
 }
 
@@ -1147,7 +1169,7 @@ func (a *App) handleAdminOrderCancel(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	a.DB.Audit(r.Context(), "admin", "order_canceled", orderNo,
-		"via=ui ip="+clientIP(r))
+		"via=ui ip="+a.clientIP(r))
 	http.Redirect(w, r, "/admin/orders?ok=canceled", http.StatusSeeOther)
 }
 
@@ -1177,12 +1199,12 @@ func (a *App) handleAdminOrderCancelStale(w http.ResponseWriter, r *http.Request
 	if err != nil {
 		log.Printf("admin cancel-stale: %v", err)
 		a.DB.Audit(r.Context(), "admin", "orders_cancel_stale_failed", "",
-			"err="+err.Error()+" ip="+clientIP(r))
+			"err="+err.Error()+" ip="+a.clientIP(r))
 		http.Redirect(w, r, "/admin/orders?err=cancel_stale_failed", http.StatusSeeOther)
 		return
 	}
 	a.DB.Audit(r.Context(), "admin", "orders_cancel_stale", "",
-		fmt.Sprintf("count=%d hours=%d via=ui ip=%s", n, hours, clientIP(r)))
+		fmt.Sprintf("count=%d hours=%d via=ui ip=%s", n, hours, a.clientIP(r)))
 	http.Redirect(w, r,
 		fmt.Sprintf("/admin/orders?ok=cancel_stale&count=%d&hours=%d", n, hours),
 		http.StatusSeeOther)
@@ -1220,18 +1242,25 @@ func (a *App) handleAdminMACNotes(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	a.DB.Audit(r.Context(), "admin", "mac_notes", normalized,
-		"len="+strconv.Itoa(len(notes))+" ip="+clientIP(r))
+		"len="+strconv.Itoa(len(notes))+" ip="+a.clientIP(r))
 	http.Redirect(w, r, "/admin/macs/detail?mac="+normalized+"&ok=notes", http.StatusSeeOther)
 }
 
 func (a *App) handleAdminResync(w http.ResponseWriter, r *http.Request) {
+	// POST-only: this mutates the firewall set, and the CSRF middleware
+	// only verifies POST bodies. A GET here would be reachable cross-site
+	// (SameSite=Lax still sends cookies on top-level GET navigation).
+	if r.Method != http.MethodPost {
+		http.Redirect(w, r, "/admin/macs", http.StatusSeeOther)
+		return
+	}
 	if err := a.MACSvc.Resync(r.Context()); err != nil {
 		log.Printf("admin resync: %v", err)
-		a.DB.Audit(r.Context(), "admin", "firewall_resync_failed", "", "err="+err.Error()+" ip="+clientIP(r))
+		a.DB.Audit(r.Context(), "admin", "firewall_resync_failed", "", "err="+err.Error()+" ip="+a.clientIP(r))
 		http.Redirect(w, r, "/admin/macs?err=internal", http.StatusSeeOther)
 		return
 	}
-	a.DB.Audit(r.Context(), "admin", "firewall_resync", "", "ip="+clientIP(r))
+	a.DB.Audit(r.Context(), "admin", "firewall_resync", "", "ip="+a.clientIP(r))
 	http.Redirect(w, r, "/admin/macs?ok=1", http.StatusSeeOther)
 }
 

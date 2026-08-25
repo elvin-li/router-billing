@@ -1,5 +1,177 @@
 # Changelog
 
+## v0.97 — Security + correctness hardening sweep
+
+Security:
+
+- X-Forwarded-For is now IGNORED unless the TCP peer matches the new
+  `security.trusted_proxies` list (IPs/CIDRs). Pre-v0.97 any client
+  could spoof the header to rotate around every per-IP rate limit
+  (login / register / pay-create / redeem / password-reset) and stuff
+  fake IPs into the audit log. Deploys behind nginx/Caddy must add
+  their proxy address to keep real-client-IP behavior; direct deploys
+  need no change. Trusted chains resolve via the rightmost-untrusted
+  rule.
+- Fixed an open redirect: `/user/login` and `/user/login/2fa` accepted
+  `next=//evil.com` (protocol-relative) and the 2FA path accepted full
+  URLs. Both now sanitize through `safeNextPath` (same-site absolute
+  paths only).
+- `/metrics` bearer token now compares constant-time, matching the API
+  tokens.
+
+Correctness:
+
+- `nft` set Sync (boot resync / admin resync / refund kick) is now ONE
+  atomic `nft -f -` transaction. Previously flush + repopulate were two
+  invocations: every sync had a window where the whole paid set was
+  empty, and a failed repopulate knocked every paying customer offline
+  until the next sync.
+- Firewall reconcile now also runs on every scheduler tick (default
+  hourly), self-healing nft-set drift from transient failures. Resync
+  became schedule-aware: MACs whose time-of-day window is closed are no
+  longer re-granted by a resync.
+- /api/pay/create validates the provider BEFORE inserting the order, and
+  marks the order failed when the upstream precreate errors — no more
+  orphan pending orders feeding the poller and the stale-pending
+  attention counter for 30 minutes.
+- finalizeOrder detaches from request cancellation so a client
+  disconnect can no longer strand a paid order without its MAC grant;
+  grant failures after the paid transition now land a `pay_grant_failed`
+  audit row instead of vanishing.
+- ExpireDueMACs runs SELECT + UPDATE in one transaction — the returned
+  list now exactly matches the rows flipped.
+
+Performance / UI:
+
+- New indexes: orders(status, paid_at), sessions(expires_at),
+  audit_log(action, target, at) — cover the dashboard revenue roll-ups,
+  session purges, and the expiry-reminder dedup subquery.
+- /admin/users computes per-user MAC counts with one GROUP BY instead of
+  loading every MAC row; /admin/macs caps the unfiltered list at 500
+  rows (stats card still shows true totals); /pay/success finds the
+  receipt with a targeted query instead of scanning the newest 50
+  orders (which silently lost the link on busy installs).
+- /admin/audit now linkifies real order numbers (the `B` +
+  timestamp + hex shape newOrderNo generates) — refund/cancel audit rows
+  were rendering as plain text because the linkifier only knew the
+  legacy `ORD` prefix.
+
+15 new race-clean tests across firewall atomicity, clientIP trust
+rules, open-redirect shapes, pay-create orphans, schedule-aware resync,
+scheduler reconcile, per-user counts, latest-paid lookup, and order-no
+linkification.
+
+Round 2 (same release):
+
+Security:
+
+- Session tokens and trusted-device ("remember this browser") tokens
+  are now stored as SHA-256 hashes. A copied DB file or backup no
+  longer yields replayable login cookies or 2FA-bypass cookies. The
+  upgrade migrates existing rows in place (tracked via
+  `PRAGMA user_version`) — nobody is logged out; cookies on devices
+  keep working. The /admin/sessions revoke form now round-trips the
+  hash instead of embedding every live session's raw cookie value in
+  the page HTML (which let anyone who could read the page hijack any
+  listed session).
+- Account enumeration closed on two fronts: `/user/login` burns the
+  same bcrypt work whether the phone exists or not (response timing
+  used to reveal registered numbers), and `/user/forgot-password`
+  verify returns the same "code expired" answer for unknown phones as
+  for known phones with no active reset (it used to answer
+  bad_code / expired respectively — a direct registered-or-not oracle).
+
+Correctness / performance:
+
+- Webhook worker no longer goes deaf during retry backoff. Previously a
+  down endpoint made the single worker sleep through up to ~5.5 min of
+  backoff per event without reading the 64-slot queue, silently
+  dropping everything sent meanwhile. The worker now keeps absorbing
+  events into a bounded in-order buffer (256 + 64 slots of headroom)
+  while it waits; delivery order is unchanged.
+- /admin/devices fetches billing rows for all listed devices in one
+  batched query instead of one DB lookup per device (100+ on a busy
+  network).
+
+Round 3 (same release):
+
+Security:
+
+- `/admin/resync` now requires POST. It mutated the firewall set on any
+  method, and the CSRF check only covers POST bodies — with
+  SameSite=Lax cookies riding along on top-level GET navigation, any
+  page an authed admin visited could trigger a resync via a plain link.
+- The temp password from `/admin/users/reset-password` no longer rides
+  the redirect URL (`?reset_pwd=...` persisted a live credential in
+  browser history and intermediary logs). It now travels via a one-shot
+  server-side flash token: displayed on exactly one page render, gone
+  on reload, expires after 2 minutes if never viewed.
+
+Correctness:
+
+- Voucher redemption and the MAC grant now commit in ONE SQLite
+  transaction (`db.RedeemVoucherGrant`). The old two-step flow
+  (RedeemVoucher then MACSvc.Extend) could burn the customer's code
+  with nothing delivered if the grant failed — unrecoverable without
+  admin surgery. A firewall add failure no longer fails the redemption
+  either: the DB is the source of truth, the hourly reconcile heals set
+  drift, and the failure lands a `redeem_fw_add_failed` audit row so
+  ops can spot affected customers.
+
+Performance:
+
+- The attention counters (6 COUNT queries) are cached for 3 seconds.
+  They used to fire on every admin page render (sidebar badges), a
+  second time on pages that display them (dashboard, /admin/macs,
+  /admin/health), and every 5s per connected SSE stats stream — all
+  through the single SQLite connection a low-end router runs.
+- /admin/devices sorting switched from insertion sort to
+  sort.SliceStable — O(n log n) on busy networks, same stable ranking.
+
+9 new tests: resync method guard, redeem atomicity (DB + service +
+firewall-failure paths), reset-password flash flow + store semantics,
+attention cache TTL.
+
+Round 4 (same release):
+
+Security:
+
+- Payment finalization now verifies the provider-reported paid amount
+  against the order total before granting time. WeChat/Alipay
+  signatures prove who sent a notification, not that the amount matches
+  what we charged — a partial payment or upstream bug could previously
+  grant a full plan. Mismatches refuse the grant and land a
+  `pay_amount_mismatch` audit row. Amount parsing is integer-only (no
+  float rounding).
+- `/api/pay/qr` no longer encodes a URL-supplied `payload` parameter.
+  Anyone holding a valid order number could render arbitrary QR images
+  served from the router's origin (phishing aid, payment-QR swap). The
+  upstream PSP QR string is now stored on the order row (`qr_payload`)
+  and is the only thing the endpoint will render. (Folds in stale PR #2.)
+
+Correctness / ops:
+
+- render() now buffers template output: a template error mid-render
+  used to leak a broken half-page with HTTP 200; it's now a clean 500
+  and the templates parse with `missingkey=zero`. (Folds in stale PR #1.)
+- Backups are now taken with `VACUUM INTO` — SQLite copies inside a
+  read transaction, so both the daily rotator's snapshot and the
+  /admin/backup download are consistent even if a payment lands
+  mid-copy. The old checkpoint+file-copy remains as fallback. Backup
+  files are fsynced before the atomic rename so a router power cut
+  can't leave a complete-looking, zero-filled backup.
+
+Performance:
+
+- Voucher bulk import runs in one transaction — one fsync instead of
+  one per row; a 1000-row import drops from seconds to instant. UNIQUE
+  collisions still fail per-row without losing the rest of the batch.
+  (Folds in stale PR #2.)
+
+New tests: amount-mismatch refusal / matching-amount grant /
+unknown-amount skip, yuanToCents table, live-DB snapshot consistency,
+plus the folded PRs' payqr + bulk-import + buffered-render suites.
+
 ## v0.96 — Fix: dashboard plan-sales table was silently empty
 
 Pre-v0.96 the /admin/dashboard "最近 30 天按套餐" table referenced

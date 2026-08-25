@@ -71,6 +71,36 @@ func TestRunSurvivesExpirerError(t *testing.T) {
 	}
 }
 
+type fakeExpirerResyncer struct {
+	fakeExpirer
+	resyncCalls atomic.Int32
+	resyncErr   error
+}
+
+func (f *fakeExpirerResyncer) Resync(_ context.Context) error {
+	f.resyncCalls.Add(1)
+	return f.resyncErr
+}
+
+// When the Expirer also implements Resyncer, every tick reconciles the
+// firewall set (initial call is expire-only — main.go already resyncs at
+// boot). A resync error must not stop the loop either.
+func TestRunResyncsWhenSupported(t *testing.T) {
+	e := &fakeExpirerResyncer{resyncErr: errors.New("nft flake")}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() { Run(ctx, e, 20*time.Millisecond); close(done) }()
+	time.Sleep(90 * time.Millisecond)
+	cancel()
+	<-done
+	if got := e.resyncCalls.Load(); got < 2 {
+		t.Errorf("expected ≥2 Resync calls; got %d", got)
+	}
+	if got := e.calls.Load(); got < 3 {
+		t.Errorf("ExpireDue should keep running despite resync errors; got %d", got)
+	}
+}
+
 func TestRunDefaultsIntervalWhenZero(t *testing.T) {
 	// If interval ≤ 0, scheduler should default to 1 hour. We can't wait
 	// an hour, so verify by canceling fast and noting only the initial fired.

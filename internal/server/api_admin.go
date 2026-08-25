@@ -186,17 +186,13 @@ func (a *App) handleAPIMACList(w http.ResponseWriter, r *http.Request, _ string)
 			return
 		}
 	} else {
-		// No filters — limit the unfiltered list too, since the legacy
-		// no-cap behavior could ship 10k+ rows on busy installs.
-		all, lerr := a.DB.ListMACs(r.Context())
-		if lerr != nil {
-			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": lerr.Error()})
+		// No filters — SearchMACs with an empty query applies the LIMIT
+		// in SQL instead of shipping every row to Go and truncating.
+		macs, err = a.DB.SearchMACs(r.Context(), "", "", limit)
+		if err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 			return
 		}
-		if len(all) > limit {
-			all = all[:limit]
-		}
-		macs = all
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"macs": macs, "count": len(macs)})
 }
@@ -314,7 +310,7 @@ func (a *App) handleAPIMACLabel(w http.ResponseWriter, r *http.Request, actor st
 		return
 	}
 	a.DB.Audit(r.Context(), actor, "mac_label", normalized,
-		"label="+label+" via=api ip="+clientIP(r))
+		"label="+label+" via=api ip="+a.clientIP(r))
 	writeJSON(w, http.StatusOK, map[string]any{
 		"status": "ok",
 		"mac":    normalized,
@@ -373,7 +369,7 @@ func (a *App) handleAPIMACNotes(w http.ResponseWriter, r *http.Request, actor st
 		return
 	}
 	a.DB.Audit(r.Context(), actor, "mac_notes", normalized,
-		"len="+strconv.Itoa(len(notes))+" via=api ip="+clientIP(r))
+		"len="+strconv.Itoa(len(notes))+" via=api ip="+a.clientIP(r))
 	writeJSON(w, http.StatusOK, map[string]any{
 		"status": "ok",
 		"mac":    normalized,
@@ -646,7 +642,7 @@ func (a *App) handleAPIDashboard(w http.ResponseWriter, r *http.Request, _ strin
 		return
 	}
 	snap, _ := a.DB.DashboardSnapshot(r.Context())
-	att, _ := a.DB.Attention(r.Context())
+	att := a.attention(r.Context())
 	writeJSON(w, http.StatusOK, map[string]any{
 		"snapshot": map[string]int{
 			"today_revenue_cents":        snap.TodayRevenueCents,
@@ -730,7 +726,7 @@ func (a *App) handleAPIUserSuspend(w http.ResponseWriter, r *http.Request, actor
 		action = "user_suspend"
 	}
 	a.DB.Audit(r.Context(), actor, action, strconv.FormatInt(req.UserID, 10),
-		"via=api ip="+clientIP(r))
+		"via=api ip="+a.clientIP(r))
 	writeJSON(w, http.StatusOK, map[string]any{
 		"status":    "ok",
 		"user_id":   req.UserID,
@@ -784,7 +780,7 @@ func (a *App) handleAPIUserNotifyExpiry(w http.ResponseWriter, r *http.Request, 
 		onStr = "1"
 	}
 	a.DB.Audit(r.Context(), actor, "user_notify_pref", strconv.FormatInt(req.UserID, 10),
-		"on="+onStr+" via=api ip="+clientIP(r))
+		"on="+onStr+" via=api ip="+a.clientIP(r))
 	writeJSON(w, http.StatusOK, map[string]any{
 		"status":        "ok",
 		"user_id":       req.UserID,
@@ -1059,7 +1055,7 @@ func (a *App) handleAPIMACGrant(w http.ResponseWriter, r *http.Request, actor st
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 		return
 	}
-	a.DB.Audit(r.Context(), actor, "grant", mac, "days="+itoaSmall(req.Days)+" via=api ip="+clientIP(r))
+	a.DB.Audit(r.Context(), actor, "grant", mac, "days="+itoaSmall(req.Days)+" via=api ip="+a.clientIP(r))
 	writeJSON(w, http.StatusOK, map[string]any{"mac": m})
 }
 
@@ -1146,7 +1142,7 @@ func (a *App) handleAPIMACImport(w http.ResponseWriter, r *http.Request, actor s
 			}
 		}
 		a.DB.Audit(r.Context(), actor, "grant", mac,
-			"days="+strconv.Itoa(days)+" via=api ip="+clientIP(r))
+			"days="+strconv.Itoa(days)+" via=api ip="+a.clientIP(r))
 		added++
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"added": added, "failed": failed})
@@ -1201,7 +1197,7 @@ func (a *App) handleAPIOrderRefund(w http.ResponseWriter, r *http.Request, actor
 		return
 	}
 	a.DB.Audit(r.Context(), actor, "order_refunded", orderNo,
-		"reason="+reason+" via=api ip="+clientIP(r))
+		"reason="+reason+" via=api ip="+a.clientIP(r))
 	if mac != nil && mac.Status == models.MACExpired {
 		go func() {
 			ctx := context.Background()
@@ -1255,12 +1251,12 @@ func (a *App) handleAPISMSSend(w http.ResponseWriter, r *http.Request, actor str
 	if err := a.SendSMS(r.Context(), phone, msg); err != nil {
 		log.Printf("api sms %s: %v", phone, err)
 		a.DB.Audit(r.Context(), actor, "sms_test_failed", phone,
-			"provider="+a.SMS.Name()+" err="+err.Error()+" ip="+clientIP(r))
+			"provider="+a.SMS.Name()+" err="+err.Error()+" ip="+a.clientIP(r))
 		writeJSON(w, http.StatusBadGateway, map[string]string{"error": err.Error()})
 		return
 	}
 	a.DB.Audit(r.Context(), actor, "sms_test", phone,
-		"provider="+a.SMS.Name()+" via=api ip="+clientIP(r))
+		"provider="+a.SMS.Name()+" via=api ip="+a.clientIP(r))
 	writeJSON(w, http.StatusOK, map[string]any{"status": "sent", "provider": a.SMS.Name()})
 }
 
@@ -1284,7 +1280,7 @@ func (a *App) handleAPIMACRevoke(w http.ResponseWriter, r *http.Request, actor s
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 		return
 	}
-	a.DB.Audit(r.Context(), actor, "revoke", mac, "via=api ip="+clientIP(r))
+	a.DB.Audit(r.Context(), actor, "revoke", mac, "via=api ip="+a.clientIP(r))
 	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 }
 
@@ -1368,7 +1364,7 @@ func (a *App) handleAPIVoucherGenerate(w http.ResponseWriter, r *http.Request, a
 		}
 	}
 	a.DB.Audit(r.Context(), actor, "voucher_batch", batch,
-		"count="+strconv.Itoa(len(codes))+" days="+strconv.Itoa(req.Days)+" via=api ip="+clientIP(r))
+		"count="+strconv.Itoa(len(codes))+" days="+strconv.Itoa(req.Days)+" via=api ip="+a.clientIP(r))
 	writeJSON(w, http.StatusOK, map[string]any{
 		"batch":   batch,
 		"created": len(codes),
@@ -1412,7 +1408,7 @@ func (a *App) handleAPIVoucherBatchRevoke(w http.ResponseWriter, r *http.Request
 		displayBatch = "(no batch)"
 	}
 	a.DB.Audit(r.Context(), actor, "voucher_batch_revoke", displayBatch,
-		"count="+strconv.Itoa(n)+" via=api ip="+clientIP(r))
+		"count="+strconv.Itoa(n)+" via=api ip="+a.clientIP(r))
 	writeJSON(w, http.StatusOK, map[string]any{"revoked": n})
 }
 
@@ -1493,13 +1489,13 @@ func (a *App) handleAPIUserGrant(w http.ResponseWriter, r *http.Request, actor s
 			continue
 		}
 		a.DB.Audit(r.Context(), actor, "grant", macs[i].Mac,
-			"days="+strconv.Itoa(req.Days)+" via=api user_id="+strconv.FormatInt(req.UserID, 10)+" ip="+clientIP(r))
+			"days="+strconv.Itoa(req.Days)+" via=api user_id="+strconv.FormatInt(req.UserID, 10)+" ip="+a.clientIP(r))
 		out = append(out, extendedMAC{MAC: extended.Mac, ExpiresAt: extended.ExpiresAt})
 	}
 	// Summary audit row so reviewers don't have to grep for N grant rows
 	// at the same timestamp to reconstruct the batch.
 	a.DB.Audit(r.Context(), actor, "user_grant", strconv.FormatInt(req.UserID, 10),
-		"days="+strconv.Itoa(req.Days)+" macs="+strconv.Itoa(len(out))+" via=api ip="+clientIP(r))
+		"days="+strconv.Itoa(req.Days)+" macs="+strconv.Itoa(len(out))+" via=api ip="+a.clientIP(r))
 
 	writeJSON(w, http.StatusOK, map[string]any{
 		"user_id":       req.UserID,
@@ -1701,13 +1697,13 @@ func (a *App) handleAPIOptimizeNow(w http.ResponseWriter, r *http.Request, actor
 	start := time.Now()
 	if _, err := a.DB.Exec(r.Context(), "PRAGMA optimize"); err != nil {
 		a.DB.Audit(r.Context(), actor, "optimize_now_failed", "",
-			"err="+err.Error()+" via=api ip="+clientIP(r))
+			"err="+err.Error()+" via=api ip="+a.clientIP(r))
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 		return
 	}
 	ms := time.Since(start).Milliseconds()
 	a.DB.Audit(r.Context(), actor, "optimize_now", "",
-		"ms="+strconv.FormatInt(ms, 10)+" via=api ip="+clientIP(r))
+		"ms="+strconv.FormatInt(ms, 10)+" via=api ip="+a.clientIP(r))
 	writeJSON(w, http.StatusOK, map[string]any{"ms": ms})
 }
 
@@ -1728,7 +1724,7 @@ func (a *App) handleAPIExpireNow(w http.ResponseWriter, r *http.Request, actor s
 	expired, err := a.DB.ExpireDueMACs(r.Context())
 	if err != nil {
 		a.DB.Audit(r.Context(), actor, "expire_now_failed", "",
-			"err="+err.Error()+" via=api ip="+clientIP(r))
+			"err="+err.Error()+" via=api ip="+a.clientIP(r))
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 		return
 	}
@@ -1736,7 +1732,7 @@ func (a *App) handleAPIExpireNow(w http.ResponseWriter, r *http.Request, actor s
 		log.Printf("api expire-now resync: %v", rerr)
 	}
 	a.DB.Audit(r.Context(), actor, "expire_now", "",
-		"expired="+strconv.Itoa(len(expired))+" via=api ip="+clientIP(r))
+		"expired="+strconv.Itoa(len(expired))+" via=api ip="+a.clientIP(r))
 	writeJSON(w, http.StatusOK, map[string]any{"expired": len(expired)})
 }
 
@@ -1758,12 +1754,12 @@ func (a *App) handleAPIAuditTrim(w http.ResponseWriter, r *http.Request, actor s
 	keep := a.Cfg.Security.AuditLogRetention()
 	if err := a.DB.PurgeAuditLog(r.Context(), keep); err != nil {
 		a.DB.Audit(r.Context(), actor, "audit_trim_failed", "",
-			"err="+err.Error()+" via=api ip="+clientIP(r))
+			"err="+err.Error()+" via=api ip="+a.clientIP(r))
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 		return
 	}
 	a.DB.Audit(r.Context(), actor, "audit_trim", "",
-		"keep="+strconv.Itoa(keep)+" via=api ip="+clientIP(r))
+		"keep="+strconv.Itoa(keep)+" via=api ip="+a.clientIP(r))
 	writeJSON(w, http.StatusOK, map[string]any{"kept": keep})
 }
 
@@ -1806,7 +1802,7 @@ func (a *App) handleAPIOrderCancelStale(w http.ResponseWriter, r *http.Request, 
 		return
 	}
 	a.DB.Audit(r.Context(), actor, "orders_cancel_stale", "",
-		"count="+strconv.Itoa(n)+" hours="+strconv.Itoa(hours)+" via=api ip="+clientIP(r))
+		"count="+strconv.Itoa(n)+" hours="+strconv.Itoa(hours)+" via=api ip="+a.clientIP(r))
 	writeJSON(w, http.StatusOK, map[string]any{"canceled": n})
 }
 
@@ -1849,7 +1845,7 @@ func (a *App) handleAPIOrderCancel(w http.ResponseWriter, r *http.Request, actor
 		return
 	}
 	a.DB.Audit(r.Context(), actor, "order_canceled", orderNo,
-		"via=api ip="+clientIP(r))
+		"via=api ip="+a.clientIP(r))
 	writeJSON(w, http.StatusOK, map[string]any{
 		"status":   "canceled",
 		"order_no": o.OrderNo,
@@ -1921,7 +1917,7 @@ func (a *App) handleAPIAuditNote(w http.ResponseWriter, r *http.Request, actor s
 	if len(target) > 200 {
 		target = target[:200]
 	}
-	a.DB.Audit(r.Context(), actor, action, target, note+" via=api ip="+clientIP(r))
+	a.DB.Audit(r.Context(), actor, action, target, note+" via=api ip="+a.clientIP(r))
 	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 }
 
@@ -1948,9 +1944,9 @@ func (a *App) handleAPIWebhookTest(w http.ResponseWriter, r *http.Request, actor
 		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "webhook not configured"})
 		return
 	}
-	a.Notifier.Send(notifyTestEvent(actor, clientIP(r)))
+	a.Notifier.Send(notifyTestEvent(actor, a.clientIP(r)))
 	a.DB.Audit(r.Context(), actor, "webhook_test", "",
-		"url="+a.Cfg.Webhook.URL+" via=api ip="+clientIP(r))
+		"url="+a.Cfg.Webhook.URL+" via=api ip="+a.clientIP(r))
 	writeJSON(w, http.StatusOK, map[string]any{
 		"status": "enqueued",
 		"url":    a.Cfg.Webhook.URL,
@@ -2025,11 +2021,11 @@ func (a *App) handleAPIUserGrantByPhone(w http.ResponseWriter, r *http.Request, 
 			continue
 		}
 		a.DB.Audit(r.Context(), actor, "grant", macs[i].Mac,
-			"days="+strconv.Itoa(req.Days)+" via=api phone="+phone+" ip="+clientIP(r))
+			"days="+strconv.Itoa(req.Days)+" via=api phone="+phone+" ip="+a.clientIP(r))
 		out = append(out, extendedMAC{MAC: extended.Mac, ExpiresAt: extended.ExpiresAt})
 	}
 	a.DB.Audit(r.Context(), actor, "user_grant", strconv.FormatInt(user.ID, 10),
-		"days="+strconv.Itoa(req.Days)+" macs="+strconv.Itoa(len(out))+" via=api phone="+phone+" ip="+clientIP(r))
+		"days="+strconv.Itoa(req.Days)+" macs="+strconv.Itoa(len(out))+" via=api phone="+phone+" ip="+a.clientIP(r))
 
 	writeJSON(w, http.StatusOK, map[string]any{
 		"user_id":       user.ID,
@@ -2127,7 +2123,7 @@ func (a *App) handleAPIPlanSave(w http.ResponseWriter, r *http.Request, actor st
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 		return
 	}
-	a.DB.Audit(r.Context(), actor, "plan_save", key, "label="+label+" via=api ip="+clientIP(r))
+	a.DB.Audit(r.Context(), actor, "plan_save", key, "label="+label+" via=api ip="+a.clientIP(r))
 	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 }
 
@@ -2159,7 +2155,7 @@ func (a *App) handleAPIPlanDelete(w http.ResponseWriter, r *http.Request, actor 
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 		return
 	}
-	a.DB.Audit(r.Context(), actor, "plan_delete", key, "via=api ip="+clientIP(r))
+	a.DB.Audit(r.Context(), actor, "plan_delete", key, "via=api ip="+a.clientIP(r))
 	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 }
 

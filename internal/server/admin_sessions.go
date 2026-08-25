@@ -4,6 +4,8 @@ import (
 	"log"
 	"net/http"
 	"strings"
+
+	"router-billing/internal/db"
 )
 
 // GET /admin/sessions — list all live sessions (admin + user) and let admin
@@ -14,19 +16,19 @@ func (a *App) handleAdminSessions(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "db", http.StatusInternalServerError)
 		return
 	}
-	// Mark which row matches the requesting browser's cookie.
-	myTok := ""
+	// Mark which row matches the requesting browser's cookie. Rows carry
+	// token hashes, so hash the cookie value before comparing.
+	myHash := ""
 	if c, err := r.Cookie(adminCookieName); err == nil {
-		myTok = c.Value
+		myHash = db.HashToken(c.Value)
 	}
 	for i := range list {
-		if list[i].Token == myTok {
+		if list[i].Token == myHash {
 			list[i].IsCurrent = true
 		}
 	}
 	a.render(w, "admin_sessions.html", a.adminCtx(r, "sessions", map[string]any{
 		"Sessions": list,
-		"MyToken":  myTok,
 		"AdminTTL": int(a.Cfg.Security.AdminSessionTTL().Hours()),
 		"UserTTL":  int(a.Cfg.Security.UserSessionTTL().Hours() / 24),
 	}))
@@ -47,12 +49,14 @@ func (a *App) handleAdminSessionRevoke(w http.ResponseWriter, r *http.Request) {
 		http.Redirect(w, r, "/admin/sessions?err=invalid", http.StatusSeeOther)
 		return
 	}
-	if err := a.DB.DeleteSession(r.Context(), tok); err != nil {
+	// The revoke form round-trips the stored hash (never a raw cookie
+	// token), so delete by hash directly.
+	if err := a.DB.DeleteSessionByHash(r.Context(), tok); err != nil {
 		log.Printf("revoke session: %v", err)
 		http.Redirect(w, r, "/admin/sessions?err=internal", http.StatusSeeOther)
 		return
 	}
-	a.DB.Audit(r.Context(), "admin", "session_revoke", maskTok(tok), "ip="+clientIP(r))
+	a.DB.Audit(r.Context(), "admin", "session_revoke", maskTok(tok), "ip="+a.clientIP(r))
 	http.Redirect(w, r, "/admin/sessions?ok=1", http.StatusSeeOther)
 }
 
@@ -90,7 +94,7 @@ func (a *App) handleAdminSessionPanic(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	a.DB.Audit(r.Context(), "admin", "panic_logout", "",
-		"admin_killed="+mustItoa(adminKilled)+" user_killed="+mustItoa(userKilled)+" ip="+clientIP(r))
+		"admin_killed="+mustItoa(adminKilled)+" user_killed="+mustItoa(userKilled)+" ip="+a.clientIP(r))
 	http.Redirect(w, r, "/admin/sessions?ok=panic", http.StatusSeeOther)
 }
 
@@ -117,7 +121,7 @@ func (a *App) handleAdminSessionRevokeAllAdmin(w http.ResponseWriter, r *http.Re
 		return
 	}
 	a.DB.Audit(r.Context(), "admin", "session_revoke_all_admin", "",
-		mustItoa(n)+" sessions killed; ip="+clientIP(r))
+		mustItoa(n)+" sessions killed; ip="+a.clientIP(r))
 	http.Redirect(w, r, "/admin/sessions?ok=1", http.StatusSeeOther)
 }
 

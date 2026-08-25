@@ -306,6 +306,72 @@ func TestQueueDropsWhenFull(t *testing.T) {
 	close(block)
 }
 
+// Events sent while the worker is waiting out a retry backoff must not be
+// dropped, and must be delivered in send order once the endpoint recovers.
+func TestBackoffDoesNotStarveQueuedEvents(t *testing.T) {
+	srv := newCaptureSrv(t, func(call int) int {
+		if call <= 2 {
+			return 503 // first event fails twice, succeeds on 3rd attempt
+		}
+		return 200
+	})
+	n := New(srv.srv.URL, "")
+	// Two retries with a backoff long enough that all follow-up Sends land
+	// while the worker is inside the backoff wait.
+	n.BackoffSchedule = []time.Duration{300 * time.Millisecond, 300 * time.Millisecond}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go n.Run(ctx)
+
+	n.Send(Event{Type: "first", MAC: "AA:AA:AA:AA:AA:01"})
+	// Give the worker a beat to start attempt 0 and enter backoff.
+	time.Sleep(20 * time.Millisecond)
+	// Way more than the 64-slot channel holds — the old implementation
+	// (worker asleep in backoff, not draining) dropped everything past 64.
+	// Pace the sends slightly so the single-threaded drain loop keeps up;
+	// the point under test is "backoff wait keeps draining", not raw
+	// channel throughput.
+	const extra = 100
+	for i := 0; i < extra; i++ {
+		n.Send(Event{Type: "later", Detail: string(rune('A' + i%26))})
+		time.Sleep(time.Millisecond)
+	}
+
+	// first takes 3 calls; every later event should follow: 3 + extra.
+	want := int32(3 + extra)
+	deadline := time.After(5 * time.Second)
+	for atomic.LoadInt32(&srv.calls) < want {
+		select {
+		case <-deadline:
+			t.Fatalf("got %d calls; want %d — events sent during backoff were dropped",
+				atomic.LoadInt32(&srv.calls), want)
+		default:
+			time.Sleep(5 * time.Millisecond)
+		}
+	}
+
+	// Order check: the three "first" attempts precede every "later" event.
+	bodies, _ := srv.snapshot()
+	var types []string
+	for _, b := range bodies {
+		var ev Event
+		if err := json.Unmarshal(b, &ev); err != nil {
+			t.Fatal(err)
+		}
+		types = append(types, ev.Type)
+	}
+	for i, typ := range types {
+		wantType := "later"
+		if i < 3 {
+			wantType = "first"
+		}
+		if typ != wantType {
+			t.Fatalf("call %d: got type %q, want %q (order broken: %v)", i, typ, wantType, types[:i+1])
+		}
+	}
+}
+
 func TestAtIsSetIfZero(t *testing.T) {
 	srv := newCaptureSrv(t, nil)
 	n := New(srv.srv.URL, "")

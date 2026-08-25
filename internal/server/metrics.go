@@ -1,6 +1,7 @@
 package server
 
 import (
+	"crypto/subtle"
 	"fmt"
 	"net/http"
 	"os"
@@ -12,7 +13,8 @@ import (
 func (a *App) handleMetrics(w http.ResponseWriter, r *http.Request) {
 	if tok := a.Cfg.MetricsToken; tok != "" {
 		got := r.Header.Get("Authorization")
-		if got != "Bearer "+tok {
+		// Constant-time — same treatment the API tokens get.
+		if subtle.ConstantTimeCompare([]byte(got), []byte("Bearer "+tok)) != 1 {
 			http.Error(w, "unauthorized", http.StatusUnauthorized)
 			return
 		}

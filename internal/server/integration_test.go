@@ -617,6 +617,14 @@ func TestSecureCookieSetWhenBehindTLS(t *testing.T) {
 func TestAdminLoginRateLimitByUsername(t *testing.T) {
 	app := setupTestApp(t)
 	app.adminLoginByUser = newRateLimiter(3, time.Hour)
+	// Trust the httptest peer (192.0.2.1) as a reverse proxy so the
+	// X-Forwarded-For rotation below is honored — otherwise clientIP
+	// ignores the header entirely (see security.trusted_proxies).
+	nets, err := (config.Security{TrustedProxies: []string{"192.0.2.0/24"}}).TrustedProxyNets()
+	if err != nil {
+		t.Fatal(err)
+	}
+	app.trustedProxies = nets
 	h := app.Routes()
 
 	// 3 attempts with wrong password but the SAME username are allowed
@@ -873,8 +881,9 @@ func TestAdminSessionRevoke(t *testing.T) {
 		t.Fatal("victim has no session cookie")
 	}
 
-	// Admin revokes the victim's session.
-	form := url.Values{"_csrf": {tok}, "token": {victimTok}}
+	// Admin revokes the victim's session. The sessions page form round-trips
+	// the stored token hash, never the raw cookie value.
+	form := url.Values{"_csrf": {tok}, "token": {db.HashToken(victimTok)}}
 	req := httptest.NewRequest("POST", "/admin/sessions/revoke", strings.NewReader(form.Encode()))
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	for k, v := range jar {
