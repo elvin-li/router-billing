@@ -21,6 +21,12 @@ func runMigrations(d *sql.DB) error {
 		{"macs", "user_id", "INTEGER"},
 		{"orders", "user_id", "INTEGER"},
 		{"orders", "last_queried_at", "DATETIME"},
+		// v0.103: store upstream PSP QR payload on the order so /api/pay/qr
+		// no longer trusts the URL-supplied `payload=` parameter (open
+		// QR-encoder vector). Existing pending orders won't have it
+		// populated; they'll either get re-queried & finalized, or
+		// auto-cancelled by the stale-pending sweep.
+		{"orders", "qr_payload", "TEXT NOT NULL DEFAULT ''"},
 		{"sessions", "kind", "TEXT NOT NULL DEFAULT 'admin'"},
 		{"sessions", "subject", "TEXT NOT NULL DEFAULT ''"},
 		{"sessions", "user_id", "INTEGER"},

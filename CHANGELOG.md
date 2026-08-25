@@ -1,5 +1,32 @@
 # Changelog
 
+## v0.103 — Security: /api/pay/qr open QR encoder closed; 1000x voucher bulk import
+
+(Incorporates the standalone fix/payqr-and-bulk-vouchers branch.)
+
+A. /api/pay/qr took its payload directly from the URL ?payload=...
+parameter — fetching the order row only to nil-check it. Anyone
+holding any valid order_no could use the endpoint as a free QR
+generator serving phishing URLs from our domain. Now the upstream
+PSP's QR string is stored on orders.qr_payload at create time and
+the handler renders exclusively from the row; the URL parameter is
+ignored. Legacy orders without a stored payload get a clean 404.
+
+- schema.sql + migrate.go: orders.qr_payload TEXT NOT NULL DEFAULT ''
+- db.SetOrderQRPayload(ctx, orderNo, payload)
+- QRPNG URL no longer carries the payload param
+
+B. Voucher bulk import/generate did one implicit transaction (=1
+fsync) per row — a 1000-row batch was several seconds even on SSD,
+worse on router flash. db.CreateVouchersBulk wraps all inserts in
+one transaction with a prepared statement (~1 fsync per import).
+UNIQUE collisions fail only their own row (SQLite stmt-level error
+semantics), so a duplicate paste mid-import doesn't lose the rest.
+
+7 race-clean tests: URL payload must not be load-bearing (identical
+PNG bytes with/without attacker payload), legacy order 404s, bulk
+all-success / partial-duplicate / empty / expires_at round-trip.
+
 ## v0.102 — render() buffers output; missingkey=zero; all-pages smoke test
 
 render() previously executed templates straight into the

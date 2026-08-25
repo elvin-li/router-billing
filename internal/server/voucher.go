@@ -77,6 +77,13 @@ func (a *App) handleAdminVouchers(w http.ResponseWriter, r *http.Request) {
 // Returns to /admin/vouchers with added=N failed=M reasons in the flash.
 // Each created voucher is audited individually so the existing per-row
 // trail still works.
+//
+// All inserts run in a single SQLite transaction (CreateVouchersBulk) —
+// pre-v0.103 each row was its own implicit txn so a 1000-row import did
+// 1000 fsyncs ≈ several seconds even on SSD. Now: one fsync at COMMIT.
+// UNIQUE collisions still don't roll back the rest (SQLite stmt-level
+// errors don't abort the surrounding tx), so a duplicate paste in the
+// middle of an import doesn't lose the rest.
 func (a *App) handleAdminVouchersImport(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.Redirect(w, r, "/admin/vouchers", http.StatusSeeOther)
@@ -87,7 +94,14 @@ func (a *App) handleAdminVouchersImport(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	bulk := r.PostForm.Get("bulk")
-	var added, failed int
+
+	// Two-pass: first parse every line into specs (cheap, no DB), then a
+	// single bulk insert. Rejected-at-parse rows count as failed.
+	var (
+		specs   []db.VoucherSpec
+		failed  int
+		auditIP = clientIP(r)
+	)
 	for _, raw := range strings.Split(bulk, "\n") {
 		line := strings.TrimSpace(raw)
 		if line == "" || strings.HasPrefix(line, "#") {
@@ -119,14 +133,31 @@ func (a *App) handleAdminVouchersImport(w http.ResponseWriter, r *http.Request) 
 				expires = &t
 			}
 		}
-		if _, err := a.DB.CreateVoucher(r.Context(), code, days, label, batch, expires); err != nil {
-			log.Printf("voucher import %s: %v", code, err)
+		specs = append(specs, db.VoucherSpec{
+			Code: code, Days: days, Label: label, Batch: batch, ExpiresAt: expires,
+		})
+	}
+
+	results, err := a.DB.CreateVouchersBulk(r.Context(), specs)
+	if err != nil {
+		log.Printf("voucher bulk import: %v", err)
+		http.Redirect(w, r, "/admin/vouchers?err=db", http.StatusSeeOther)
+		return
+	}
+	added := 0
+	for i, ok := range results {
+		if !ok {
 			failed++
 			continue
 		}
-		a.DB.Audit(r.Context(), "admin", "voucher_imported", code,
-			"days="+strconv.Itoa(days)+" batch="+batch+" ip="+clientIP(r))
 		added++
+		// Per-row audit happens after the single tx so the timeline
+		// still records every imported code, but the slow part (sync to
+		// disk) only fsyncs once for the inserts. Audit rows themselves
+		// are best-effort and not in our hot loop.
+		s := specs[i]
+		a.DB.Audit(r.Context(), "admin", "voucher_imported", s.Code,
+			"days="+strconv.Itoa(s.Days)+" batch="+s.Batch+" ip="+auditIP)
 	}
 	http.Redirect(w, r, fmt.Sprintf("/admin/vouchers?ok=import&added=%d&failed=%d", added, failed), http.StatusSeeOther)
 }
@@ -163,24 +194,37 @@ func (a *App) handleAdminVouchersGenerate(w http.ResponseWriter, r *http.Request
 		expires = &t
 	}
 
-	created := 0
-	for i := 0; i < count; i++ {
-		// Up to 3 retries on the very unlikely 12-char collision.
-		for try := 0; try < 3; try++ {
-			code, err := voucher.New()
-			if err != nil {
-				log.Printf("voucher gen: %v", err)
-				break
-			}
-			if _, err := a.DB.CreateVoucher(r.Context(), code, days, label, batch, expires); err != nil {
-				if strings.Contains(strings.ToLower(err.Error()), "unique") {
-					continue
-				}
-				log.Printf("voucher insert: %v", err)
-				break
-			}
-			created++
+	// Generate `count` candidates upfront, dedupe in-memory (12-char codes
+	// from a 32-symbol alphabet have ~zero realistic collision rate, but
+	// the dedupe is cheap insurance), then bulk-insert in one tx.
+	// Pre-v0.103 each row was a separate fsync; 1000-voucher batches
+	// took several seconds. Now: ~1 fsync.
+	specs := make([]db.VoucherSpec, 0, count)
+	seen := make(map[string]struct{}, count)
+	for len(specs) < count {
+		code, err := voucher.New()
+		if err != nil {
+			log.Printf("voucher gen: %v", err)
 			break
+		}
+		if _, dup := seen[code]; dup {
+			continue
+		}
+		seen[code] = struct{}{}
+		specs = append(specs, db.VoucherSpec{
+			Code: code, Days: days, Label: label, Batch: batch, ExpiresAt: expires,
+		})
+	}
+	results, err := a.DB.CreateVouchersBulk(r.Context(), specs)
+	if err != nil {
+		log.Printf("voucher bulk generate: %v", err)
+		http.Redirect(w, r, "/admin/vouchers?err=db", http.StatusSeeOther)
+		return
+	}
+	created := 0
+	for _, ok := range results {
+		if ok {
+			created++
 		}
 	}
 	a.DB.Audit(r.Context(), "admin", "voucher_batch", batch,

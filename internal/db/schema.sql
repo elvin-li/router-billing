@@ -42,6 +42,12 @@ CREATE TABLE IF NOT EXISTS orders (
     user_id         INTEGER REFERENCES users(id) ON DELETE SET NULL,
     last_queried_at DATETIME,                  -- last upstream query (for fallback polling)
     paid_at         DATETIME,
+    -- qr_payload stores the upstream PSP's QR string (e.g. WeChat
+    -- code_url / Alipay qr_code). Authoritative for /api/pay/qr so the
+    -- handler doesn't have to trust a URL-supplied payload, which would
+    -- let any holder of a valid order_no render arbitrary QR images on
+    -- our domain (phishing-aid). v0.103.
+    qr_payload      TEXT NOT NULL DEFAULT '',
     created_at      DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 CREATE INDEX IF NOT EXISTS idx_orders_mac     ON orders(mac);
