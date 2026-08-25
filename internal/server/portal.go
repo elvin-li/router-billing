@@ -105,26 +105,45 @@ func (a *App) handleMe(w http.ResponseWriter, r *http.Request) {
 }
 
 // /pay/success — shown after polling sees status=paid.
+//
+// ?mac= is validated through NormalizeMAC (pre-v0.107 it was passed raw
+// into DB lookups), and the receipt link + expiry row are only surfaced
+// when there's a paid order for that MAC from the last 30 minutes or the
+// MAC is the requester's own device. Previously anyone who knew a
+// neighbor's MAC (broadcast on the LAN) could load
+// /pay/success?mac=<theirs> at any time to fetch their latest paid
+// order number — and from it the full /receipt (amount, plan, order/
+// trade numbers). The success page is only ever reached right after
+// paying, so the recency window costs legitimate users nothing.
 func (a *App) handlePaySuccess(w http.ResponseWriter, r *http.Request) {
-	mac := r.URL.Query().Get("mac")
+	detected := a.detectMAC(r)
+	mac := ""
+	if q := r.URL.Query().Get("mac"); q != "" {
+		if norm, ok := models.NormalizeMAC(q); ok {
+			mac = norm
+		}
+	}
 	if mac == "" {
-		mac = a.detectMAC(r)
+		mac = detected
 	}
-	var m *models.MAC
-	if mac != "" {
-		mm, _ := a.DB.GetMAC(r.Context(), mac)
-		m = mm
-	}
-	// Find the most recent paid order for this MAC so we can offer a receipt link.
+	// Find the most recent *recently* paid order for this MAC so we can
+	// offer a receipt link.
 	var receiptOrderNo string
 	if mac != "" {
+		cutoff := time.Now().Add(-30 * time.Minute)
 		orders, _ := a.DB.ListOrders(r.Context(), 50)
 		for _, o := range orders {
-			if o.Mac == mac && o.Status == models.OrderPaid {
+			if o.Mac == mac && o.Status == models.OrderPaid &&
+				o.PaidAt != nil && o.PaidAt.After(cutoff) {
 				receiptOrderNo = o.OrderNo
 				break
 			}
 		}
+	}
+	var m *models.MAC
+	if mac != "" && (receiptOrderNo != "" || mac == detected) {
+		mm, _ := a.DB.GetMAC(r.Context(), mac)
+		m = mm
 	}
 	a.render(w, "success.html", map[string]any{
 		"MAC":            mac,

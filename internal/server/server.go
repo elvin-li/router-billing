@@ -58,6 +58,9 @@ type App struct {
 
 	waitMu  sync.Mutex
 	waiters map[string][]chan struct{} // order_no → pending wait channels
+
+	// sseTick overrides the 5s SSE push cadence (tests only). 0 = default.
+	sseTick time.Duration
 }
 
 func NewApp(cfg *config.Config, dbx *db.DB, svc *service.MACService) (*App, error) {
