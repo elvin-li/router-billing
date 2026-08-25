@@ -134,3 +134,18 @@
     });
   }
 })();
+
+// Register the service worker — gives the portal page near-instant repaint
+// after first visit + asset cache survives WiFi disconnect. Failing
+// registration is silent: the page still works as a plain SPA.
+// (Was an inline <script> in portal.html; the CSP — script-src 'self',
+// no 'unsafe-inline' — blocks inline scripts, so it lives here.)
+(function () {
+  'use strict';
+  if ('serviceWorker' in navigator) {
+    window.addEventListener('load', () => {
+      navigator.serviceWorker.register('/sw.js', { scope: '/' })
+        .catch(() => { /* portal works without it */ });
+    });
+  }
+})();

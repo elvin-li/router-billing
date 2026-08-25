@@ -62,7 +62,7 @@
             <button class="btn primary tiny" type="submit">${d.active ? '续期' : '授权'}</button>
           </form>
           ${d.known ? `
-          <form method="post" action="/admin/macs/delete" onsubmit="return confirm('收回 ${escape(d.mac)} 的授权?')">
+          <form method="post" action="/admin/macs/delete" data-confirm="收回 ${escape(d.mac)} 的授权?">
             <input type="hidden" name="_csrf" value="${escape(tok)}">
             <input type="hidden" name="mac" value="${escape(d.mac)}">
             <button class="btn danger tiny" type="submit">收回</button>

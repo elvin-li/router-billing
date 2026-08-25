@@ -133,7 +133,7 @@
     <h1>充值卡打印</h1>
     <span class="count">{{if .Batch}}batch={{.Batch}} · {{end}}{{.Count}} 张可用</span>
     <a href="/admin/vouchers{{if .Batch}}?batch={{.Batch}}{{end}}" class="outline">返回</a>
-    <button onclick="window.print()">打印</button>
+    <button data-print>打印</button>
   </div>
 
   <div class="sheet">
@@ -155,5 +155,8 @@
       <p class="empty">本批没有可用的充值码（可能都已被兑换或作废）</p>
     {{end}}
   </div>
+  {{/* Confirm/print handlers run via ui.js data-* attributes — the CSP
+       (script-src 'self') blocks inline on*= attributes. */}}
+  <script src="/static/ui.js" defer></script>
 </body>
 </html>

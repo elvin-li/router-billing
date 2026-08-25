@@ -452,11 +452,18 @@ func TestPortalAnnouncesPWAAssets(t *testing.T) {
 	for _, want := range []string{
 		`rel="manifest"`,
 		`/static/manifest.json`,
-		`navigator.serviceWorker.register('/sw.js'`,
+		`/static/portal.js`,
 	} {
 		if !strings.Contains(body, want) {
 			t.Errorf("portal missing %q", want)
 		}
+	}
+	// The service-worker registration moved from an inline <script> (which
+	// the CSP script-src 'self' silently blocked — the SW never registered)
+	// into portal.js. Assert it actually lives there.
+	_, js := do(t, h, "GET", "/static/portal.js", nil, nil)
+	if !strings.Contains(js, `navigator.serviceWorker.register('/sw.js'`) {
+		t.Error("portal.js missing service-worker registration")
 	}
 }
 

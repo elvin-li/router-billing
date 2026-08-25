@@ -131,7 +131,7 @@
       {{if eq .OK "sms_log_trim"}}<div class="flash ok">sms_log 已立即裁剪 ✓</div>{{end}}
       <div style="display:flex; gap:8px; margin-bottom:10px;">
         <form method="post" action="/admin/maintenance/sms-log-trim" style="margin:0;"
-              onsubmit="return confirm('立即裁剪 sms_log，保留最新的 N 条？');">
+              data-confirm="立即裁剪 sms_log，保留最新的 N 条？">
           {{template "csrf" .}}
           <button class="btn outline tiny" type="submit" style="width:auto;">立即裁剪</button>
         </form>
@@ -162,5 +162,8 @@
     </section>
   </main>
 </div>
+  {{/* Confirm/print handlers run via ui.js data-* attributes — the CSP
+       (script-src 'self') blocks inline on*= attributes. */}}
+  <script src="/static/ui.js" defer></script>
 </body>
 </html>

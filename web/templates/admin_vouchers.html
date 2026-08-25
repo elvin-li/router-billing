@@ -111,7 +111,7 @@
               <td>
                 {{if .Unused}}
                 <form method="post" action="/admin/vouchers/batch/revoke"
-                      onsubmit="return confirm('作废 batch {{.Batch}} 下全部 {{.Unused}} 张未使用的码? 已兑换的码不会变。');"
+                      data-confirm="作废 batch {{.Batch}} 下全部 {{.Unused}} 张未使用的码? 已兑换的码不会变。"
                       style="display:inline;">
                   {{template "csrf" $}}
                   <input type="hidden" name="batch" value="{{.Batch}}">
@@ -151,7 +151,7 @@
               <td style="color:var(--text-soft);">{{if .ExpiresAt}}{{formatTime (deref .ExpiresAt)}}{{else}}永不{{end}}</td>
               <td class="row-actions">
                 {{if and (not .Revoked) (not .RedeemedAt)}}
-                <form method="post" action="/admin/vouchers/revoke" onsubmit="return confirm('作废 {{prettyCode .Code}}?')">
+                <form method="post" action="/admin/vouchers/revoke" data-confirm="作废 {{prettyCode .Code}}?">
                   {{template "csrf" $}}
                   <input type="hidden" name="code" value="{{.Code}}">
                   <button class="btn danger tiny" type="submit">作废</button>
@@ -168,5 +168,8 @@
     </section>
   </main>
 </div>
+  {{/* Confirm/print handlers run via ui.js data-* attributes — the CSP
+       (script-src 'self') blocks inline on*= attributes. */}}
+  <script src="/static/ui.js" defer></script>
 </body>
 </html>
