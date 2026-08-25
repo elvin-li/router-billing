@@ -1,5 +1,28 @@
 # Changelog
 
+## v0.97 — auditTargetHref recognizes real generated order numbers
+
+Extends v0.92/v0.95's smart-link function. The audit smart-link
+only matched order targets with an "ORD"/"ord" prefix — but
+`newOrderNo()` actually generates "B" + 14-digit UTC timestamp +
+8 hex chars (e.g. B20260825010203deadbeef). Result: every real
+production order audit row (order_refunded / order_canceled /
+pay) rendered as plain text since v0.92; only hand-crafted test
+fixtures ever got linked.
+
+The generated shape is matched strictly (exactly 23 chars,
+digit/hex position checks) so ordinary words starting with "B"
+never get misrouted. The order_no is also query-escaped in the
+generated href now.
+
+Precedence chain stays:
+  MAC → order (ORD prefix | generated shape) → phone → user_id
+
+8 race-clean test cases: generated-shape positive, 5 near-miss
+negatives (length/charset/prefix), query-escaping, plus a
+round-trip test pinning newOrderNo() output to the matcher so
+the two can't silently drift apart again.
+
 ## v0.96 — Fix: dashboard plan-sales table was silently empty
 
 Pre-v0.96 the /admin/dashboard "最近 30 天按套餐" table referenced
