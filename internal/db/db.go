@@ -141,6 +141,17 @@ func (d *DB) ListExpiringMACsWithoutRecentReminder(ctx context.Context, withinDa
 	return out, rows.Err()
 }
 
+// escapeLike escapes LIKE wildcards in user-supplied search text so a
+// query for a literal "%" or "_" doesn't silently become a
+// match-everything / match-any-char pattern. Every LIKE clause built
+// from user input must pair `escapeLike` with ` ESCAPE '\'`.
+func escapeLike(s string) string {
+	s = strings.ReplaceAll(s, `\`, `\\`)
+	s = strings.ReplaceAll(s, `%`, `\%`)
+	s = strings.ReplaceAll(s, `_`, `\_`)
+	return s
+}
+
 // SearchMACs returns MACs where MAC or label contains q (case-insensitive
 // LIKE). When q is empty, behaves like ListMACs. status (if non-empty)
 // restricts to that exact status. limit defaults to 200, capped at 1000.
@@ -153,8 +164,8 @@ func (d *DB) SearchMACs(ctx context.Context, q, status string, limit int) ([]mod
 	args := []any{}
 	if q != "" {
 		// SQLite LIKE is case-insensitive for ASCII by default.
-		sb.WriteString(` AND (mac LIKE ? OR label LIKE ?)`)
-		pat := "%" + q + "%"
+		sb.WriteString(` AND (mac LIKE ? ESCAPE '\' OR label LIKE ? ESCAPE '\')`)
+		pat := "%" + escapeLike(q) + "%"
 		args = append(args, pat, pat)
 	}
 	if status != "" {
@@ -357,14 +368,14 @@ func (d *DB) ExpireDueMACs(ctx context.Context) ([]string, error) {
 
 // ---------- Orders ----------
 
-const orderCols = `id, order_no, mac, plan, days, amount_cents, status, payment_method, trade_no, user_id, last_queried_at, paid_at, created_at`
+const orderCols = `id, order_no, mac, plan, days, amount_cents, status, payment_method, trade_no, user_id, last_queried_at, paid_at, qr_payload, created_at`
 
 func scanOrder(row interface{ Scan(...any) error }) (*models.Order, error) {
 	var o models.Order
 	var userID sql.NullInt64
 	var lastQ, paidAt sql.NullTime
 	if err := row.Scan(&o.ID, &o.OrderNo, &o.Mac, &o.Plan, &o.Days, &o.AmountCents, &o.Status,
-		&o.PaymentMethod, &o.TradeNo, &userID, &lastQ, &paidAt, &o.CreatedAt); err != nil {
+		&o.PaymentMethod, &o.TradeNo, &userID, &lastQ, &paidAt, &o.QRPayload, &o.CreatedAt); err != nil {
 		return nil, err
 	}
 	if userID.Valid {
@@ -446,8 +457,8 @@ func (d *DB) SearchOrdersFiltered(ctx context.Context, f OrderFilter) ([]models.
 	sb.WriteString(`SELECT ` + orderCols + ` FROM orders WHERE 1=1`)
 	args := []any{}
 	if f.Q != "" {
-		sb.WriteString(` AND (order_no LIKE ? OR mac LIKE ? OR trade_no LIKE ?)`)
-		pat := "%" + f.Q + "%"
+		sb.WriteString(` AND (order_no LIKE ? ESCAPE '\' OR mac LIKE ? ESCAPE '\' OR trade_no LIKE ? ESCAPE '\')`)
+		pat := "%" + escapeLike(f.Q) + "%"
 		args = append(args, pat, pat, pat)
 	}
 	if f.Status != "" {
@@ -495,6 +506,17 @@ func (d *DB) ListPendingOrdersToPoll(ctx context.Context, staleAfter time.Durati
 
 func (d *DB) MarkOrderQueried(ctx context.Context, orderNo string) error {
 	_, err := d.conn.ExecContext(ctx, `UPDATE orders SET last_queried_at = ? WHERE order_no = ?`, time.Now().UTC(), orderNo)
+	return err
+}
+
+// SetOrderQRPayload stores the upstream PSP's QR string on the order row.
+// Used immediately after Precreate so /api/pay/qr can render from the
+// authoritative server-side value instead of a URL-supplied parameter.
+// v0.103 security fix.
+func (d *DB) SetOrderQRPayload(ctx context.Context, orderNo, payload string) error {
+	_, err := d.conn.ExecContext(ctx,
+		`UPDATE orders SET qr_payload = ? WHERE order_no = ?`,
+		payload, orderNo)
 	return err
 }
 
@@ -1027,8 +1049,8 @@ func (d *DB) SearchUsers(ctx context.Context, q string, limit int) ([]models.Use
 			`SELECT `+userColumns+` FROM users ORDER BY created_at DESC LIMIT ?`, limit)
 	} else {
 		rows, err = d.conn.QueryContext(ctx,
-			`SELECT `+userColumns+` FROM users WHERE phone LIKE ? ORDER BY created_at DESC LIMIT ?`,
-			"%"+q+"%", limit)
+			`SELECT `+userColumns+` FROM users WHERE phone LIKE ? ESCAPE '\' ORDER BY created_at DESC LIMIT ?`,
+			"%"+escapeLike(q)+"%", limit)
 	}
 	if err != nil {
 		return nil, err
@@ -1230,12 +1252,19 @@ func (d *DB) UnusedBackupCodes(ctx context.Context, userID int64) ([]models.Back
 	return out, rows.Err()
 }
 
-// MarkBackupCodeUsed flips used_at on a specific row. Idempotent.
-func (d *DB) MarkBackupCodeUsed(ctx context.Context, id int64) error {
-	_, err := d.conn.ExecContext(ctx,
+// MarkBackupCodeUsed flips used_at on a specific row. Returns whether THIS
+// call consumed the code — false means someone else already used it (e.g.
+// two concurrent logins racing on the same code). Callers enforcing
+// single-use must require consumed=true, not just err==nil.
+func (d *DB) MarkBackupCodeUsed(ctx context.Context, id int64) (bool, error) {
+	res, err := d.conn.ExecContext(ctx,
 		`UPDATE user_backup_codes SET used_at = ? WHERE id = ? AND used_at IS NULL`,
 		time.Now().UTC(), id)
-	return err
+	if err != nil {
+		return false, err
+	}
+	n, err := res.RowsAffected()
+	return n > 0, err
 }
 
 // ClearBackupCodes wipes every row for userID. Called from ClearUserTOTP so
@@ -1636,6 +1665,66 @@ func (d *DB) CreateVoucher(ctx context.Context, code string, days int, label, ba
 	return &models.Voucher{ID: id, Code: code, Days: days, Label: label, Batch: batch, ExpiresAt: expiresAt}, nil
 }
 
+// VoucherSpec is one row destined for CreateVouchersBulk.
+type VoucherSpec struct {
+	Code      string
+	Days      int
+	Label     string
+	Batch     string
+	ExpiresAt *time.Time
+}
+
+// CreateVouchersBulk inserts every spec in a single SQLite transaction —
+// one fsync at COMMIT instead of one-per-row. A 1000-row import goes from
+// "noticeably slow" to "instant". Per-row UNIQUE collisions don't abort
+// the transaction (SQLite default: stmt-level error, tx survives), so a
+// duplicate paste in the middle of an import doesn't lose the rest.
+//
+// Returns a parallel []bool — true at index i means specs[i] was inserted
+// successfully, false means it failed (almost always UNIQUE collision).
+// The caller surfaces per-row outcomes to the operator (added=N failed=M).
+//
+// Used by both the admin voucher import (CSV paste) and bulk generate
+// flows. v0.103.
+func (d *DB) CreateVouchersBulk(ctx context.Context, specs []VoucherSpec) ([]bool, error) {
+	out := make([]bool, len(specs))
+	if len(specs) == 0 {
+		return out, nil
+	}
+	tx, err := d.conn.BeginTx(ctx, nil)
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback()
+
+	stmt, err := tx.PrepareContext(ctx,
+		`INSERT INTO vouchers (code, days, label, batch, expires_at) VALUES (?, ?, ?, ?, ?)`)
+	if err != nil {
+		return nil, err
+	}
+	defer stmt.Close()
+
+	for i, s := range specs {
+		var expr any
+		if s.ExpiresAt != nil {
+			expr = *s.ExpiresAt
+		}
+		if _, err := stmt.ExecContext(ctx, s.Code, s.Days, s.Label, s.Batch, expr); err != nil {
+			// SQLite reports UNIQUE/CHECK violations as stmt errors that
+			// don't abort the surrounding tx, so we record the failure
+			// and continue. Anything else (driver disconnect, full disk)
+			// will resurface at Commit and we'll bail.
+			out[i] = false
+			continue
+		}
+		out[i] = true
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 func (d *DB) GetVoucher(ctx context.Context, code string) (*models.Voucher, error) {
 	row := d.conn.QueryRowContext(ctx, `SELECT `+voucherCols+` FROM vouchers WHERE code = ?`, code)
 	v, err := scanVoucher(row)
@@ -1985,20 +2074,20 @@ func (d *DB) SearchAudit(ctx context.Context, f AuditFilter) ([]AuditEntry, erro
 	sb.WriteString(`SELECT id, at, actor, action, target, detail FROM audit_log WHERE 1=1`)
 	args := []any{}
 	if f.Actor != "" {
-		sb.WriteString(` AND actor LIKE ?`)
-		args = append(args, "%"+f.Actor+"%")
+		sb.WriteString(` AND actor LIKE ? ESCAPE '\'`)
+		args = append(args, "%"+escapeLike(f.Actor)+"%")
 	}
 	if f.Action != "" {
 		sb.WriteString(` AND action = ?`)
 		args = append(args, f.Action)
 	}
 	if f.Target != "" {
-		sb.WriteString(` AND target LIKE ?`)
-		args = append(args, "%"+f.Target+"%")
+		sb.WriteString(` AND target LIKE ? ESCAPE '\'`)
+		args = append(args, "%"+escapeLike(f.Target)+"%")
 	}
 	if f.Q != "" {
-		sb.WriteString(` AND detail LIKE ?`)
-		args = append(args, "%"+f.Q+"%")
+		sb.WriteString(` AND detail LIKE ? ESCAPE '\'`)
+		args = append(args, "%"+escapeLike(f.Q)+"%")
 	}
 	if f.Since != "" {
 		sb.WriteString(` AND date(at) >= date(?)`)

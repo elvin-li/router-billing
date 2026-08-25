@@ -7,6 +7,7 @@ import (
 	"html/template"
 	"log"
 	"net/http"
+	"net/url"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -131,7 +132,12 @@ func NewApp(cfg *config.Config, dbx *db.DB, svc *service.MACService) (*App, erro
 	}
 
 	tplGlob := filepath.Join(cfg.WebRoot, "templates", "*.html")
-	tpl, err := template.New("").Funcs(tplFuncs()).ParseGlob(tplGlob)
+	// missingkey=zero: when a template references {{.X}} and X isn't in the
+	// map (we pass map[string]any to many handlers via adminCtx), render the
+	// zero value ("" / 0 / nil) instead of the literal string "<no value>".
+	// Struct-field misses are unaffected — those have always been hard
+	// errors, which is what surfaced the v0.96 dashboard plan-sales bug.
+	tpl, err := template.New("").Option("missingkey=zero").Funcs(tplFuncs()).ParseGlob(tplGlob)
 	if err != nil {
 		return nil, fmt.Errorf("parse templates %s: %w", tplGlob, err)
 	}
@@ -348,7 +354,7 @@ func (a *App) Routes() http.Handler {
 		http.ServeFile(w, r, filepath.Join(staticDir, "sw.js"))
 	})
 
-	return a.securityHeaders(csrfMiddleware(logMiddleware(mux)))
+	return a.securityHeaders(a.realIPMiddleware(csrfMiddleware(logMiddleware(mux))))
 }
 
 func (a *App) Run(ctx context.Context) error {
@@ -432,11 +438,12 @@ func (a *App) purgeLoop(ctx context.Context) {
 }
 
 // auditTargetHref returns the smart drill-down URL for an audit target
-// string, or "" if the target doesn't fit a known shape. v0.92 / v0.95.
+// string, or "" if the target doesn't fit a known shape. v0.92 / v0.95 / v0.97.
 //
 // Shapes:
 //   - MAC (NormalizeMAC accepts it)                    → /admin/macs/detail?mac=...
-//   - "ORD" / "ord" prefix                             → /admin/orders/detail?order_no=...
+//   - "ORD" / "ord" prefix, or the generated shape
+//     newOrderNo() actually produces ("B"+timestamp+hex) → /admin/orders/detail?order_no=...
 //   - 11-digit starts-with-1 (CN mobile)               → /admin/sms-log?phone=...
 //   - pure digits, 1-9 chars (user_id from user_grant) → /admin/users/detail?id=N
 //   - anything else                                     → "" (plain text)
@@ -452,9 +459,12 @@ func auditTargetHref(target string) string {
 	if mac, ok := models.NormalizeMAC(target); ok {
 		return "/admin/macs/detail?mac=" + mac
 	}
-	// Order number — starts with "ORD" or "ord".
-	if strings.HasPrefix(target, "ORD") || strings.HasPrefix(target, "ord") {
-		return "/admin/orders/detail?order_no=" + target
+	// Order number — the "ORD"/"ord" prefix (imported/manual shapes) or
+	// the exact shape newOrderNo() generates. Pre-v0.97 only the ORD
+	// prefix matched, so every real production order target
+	// (order_refunded / order_canceled rows) rendered as plain text.
+	if strings.HasPrefix(target, "ORD") || strings.HasPrefix(target, "ord") || isGeneratedOrderNo(target) {
+		return "/admin/orders/detail?order_no=" + url.QueryEscape(target)
 	}
 	// All-digit shapes: 11-digit starts-with-1 → phone; 1-9 digits → user_id.
 	allDigits := true
@@ -473,6 +483,27 @@ func auditTargetHref(target string) string {
 		}
 	}
 	return ""
+}
+
+// isGeneratedOrderNo reports whether target matches the exact shape
+// newOrderNo() produces: "B" + 14-digit UTC timestamp + 8 lowercase-hex
+// chars (23 chars total). Kept strict so ordinary words starting with
+// "B" never get misrouted to the order-detail page.
+func isGeneratedOrderNo(target string) bool {
+	if len(target) != 23 || target[0] != 'B' {
+		return false
+	}
+	for _, c := range target[1:15] {
+		if c < '0' || c > '9' {
+			return false
+		}
+	}
+	for _, c := range target[15:] {
+		if (c < '0' || c > '9') && (c < 'a' || c > 'f') {
+			return false
+		}
+	}
+	return true
 }
 
 func tplFuncs() template.FuncMap {

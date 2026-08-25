@@ -73,10 +73,10 @@ func (a *App) handleUserLogin2FA(w http.ResponseWriter, r *http.Request) {
 		http.Redirect(w, r, "/user/login?err=2fa_expired", http.StatusSeeOther)
 		return
 	}
-	next := r.URL.Query().Get("next")
-	if next == "" {
-		next = "/user/me"
-	}
+	// v0.99: the raw query value was previously trusted as-is — a crafted
+	// login link could bounce a just-authenticated user to an external
+	// phishing domain. Same-site relative paths only.
+	next := safeNextPath(r.URL.Query().Get("next"), "/user/me")
 
 	if r.Method == http.MethodGet {
 		a.render(w, "user_2fa_login.html", a.userCtx(r, "2fa", map[string]any{
@@ -111,7 +111,12 @@ func (a *App) handleUserLogin2FA(w http.ResponseWriter, r *http.Request) {
 	raw := r.PostForm.Get("code")
 	totpCode := extractDigits(raw)
 	via := "totp"
-	ok := totp.Verify(user.TOTPSecret, totpCode, time.Now())
+	step, ok := totp.MatchingStep(user.TOTPSecret, totpCode, time.Now())
+	if ok && !totpConsumeStep(user.TOTPSecret, step) {
+		// Correct code but already accepted once — treat a replay exactly
+		// like a wrong code (RFC 6238 §5.2).
+		ok = false
+	}
 	if !ok && looksLikeBackupCode(raw) {
 		// Fallback path: the user lost their authenticator but kept the
 		// backup codes printout. Each code is single-use.
@@ -336,7 +341,13 @@ func (a *App) handleUser2FADisable(w http.ResponseWriter, r *http.Request) {
 		http.Redirect(w, r, "/user/2fa?err=bad_credentials", http.StatusSeeOther)
 		return
 	}
-	if !totp.Verify(user.TOTPSecret, code, time.Now()) {
+	step, codeOK := totp.MatchingStep(user.TOTPSecret, code, time.Now())
+	// One-time use: a code that already unlocked a login (or a previous
+	// disable attempt) can't be replayed here.
+	if codeOK && !totpConsumeStep(user.TOTPSecret, step) {
+		codeOK = false
+	}
+	if !codeOK {
 		a.DB.Audit(r.Context(), "user:"+user.Phone, "2fa_disable_failed", "", "reason=bad_code ip="+clientIP(r))
 		http.Redirect(w, r, "/user/2fa?err=2fa_failed", http.StatusSeeOther)
 		return

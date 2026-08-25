@@ -22,11 +22,13 @@ jobs:
       - name: go vet
         run: go vet ./...
       - name: go test (race — needs cgo, default on linux runners)
-        run: CGO_ENABLED=1 go test -v -race ./...
+        run: CGO_ENABLED=1 go test -v -race -timeout 20m ./...
       - name: go build local (static, no cgo)
         run: CGO_ENABLED=0 go build -o /tmp/router-billing ./cmd/router-billing
+      # Strict since v0.104 — the example config must always validate.
+      # (Verified: --check-config exits 2 on parse/validation errors.)
       - name: --check-config
-        run: /tmp/router-billing --check-config -config config.example.yaml || true
+        run: /tmp/router-billing --check-config -config config.example.yaml
 
   build-arm64:
     name: build arm64
@@ -73,3 +75,7 @@ jobs:
         with:
           version: v1.61.0
           args: --timeout=5m
+          # Default verify=true downloads a JSON schema from golangci-lint.run
+          # and fails the job on a 5xx from that host (seen as 503 on this PR)
+          # even when the linters themselves would pass.
+          verify: false

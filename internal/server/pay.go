@@ -7,7 +7,6 @@ import (
 	"io"
 	"log"
 	"net/http"
-	"net/url"
 	"strings"
 	"time"
 
@@ -68,6 +67,27 @@ func (a *App) handlePayCreate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Validate the provider BEFORE touching the database. Pre-v0.98 the
+	// pending order was inserted first, so every "unknown provider" or
+	// "provider disabled" request left an orphaned pending row behind
+	// (polled for 30 minutes, inflating the attention/pending counters).
+	provider := strings.ToLower(req.Provider)
+	switch provider {
+	case "wechat":
+		if a.WeChat == nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "微信支付未启用"})
+			return
+		}
+	case "alipay":
+		if a.Alipay == nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "支付宝支付未启用"})
+			return
+		}
+	default:
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "未知支付方式"})
+		return
+	}
+
 	// If the request carries a user session cookie, link the order to that user.
 	var userID *int64
 	if c, _ := r.Cookie(userCookieName); c != nil && c.Value != "" {
@@ -84,7 +104,7 @@ func (a *App) handlePayCreate(w http.ResponseWriter, r *http.Request) {
 		Days:          plan.Days,
 		AmountCents:   plan.PriceCents,
 		Status:        models.OrderPending,
-		PaymentMethod: strings.ToLower(req.Provider),
+		PaymentMethod: provider,
 		UserID:        userID,
 	}
 	if err := a.DB.CreateOrder(r.Context(), order); err != nil {
@@ -96,44 +116,56 @@ func (a *App) handlePayCreate(w http.ResponseWriter, r *http.Request) {
 	subject := fmt.Sprintf("路由器上网-%s-%s", plan.Label, mac)
 	var qrPayload string
 
-	switch order.PaymentMethod {
+	switch provider {
 	case "wechat":
-		if a.WeChat == nil {
-			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "微信支付未启用"})
-			return
-		}
 		res, err := a.WeChat.Precreate(r.Context(), orderNo, subject, plan.PriceCents)
 		if err != nil {
 			log.Printf("wechat precreate: %v", err)
+			a.cancelFailedPrecreate(r.Context(), orderNo)
 			writeJSON(w, http.StatusBadGateway, map[string]string{"error": "微信下单失败"})
 			return
 		}
 		qrPayload = res.QRCode
 	case "alipay":
-		if a.Alipay == nil {
-			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "支付宝支付未启用"})
-			return
-		}
 		res, err := a.Alipay.Precreate(r.Context(), orderNo, subject, plan.PriceCents)
 		if err != nil {
 			log.Printf("alipay precreate: %v", err)
+			a.cancelFailedPrecreate(r.Context(), orderNo)
 			writeJSON(w, http.StatusBadGateway, map[string]string{"error": "支付宝下单失败"})
 			return
 		}
 		qrPayload = res.QRCode
-	default:
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "未知支付方式"})
-		return
+	}
+
+	// Persist the upstream QR string on the order. /api/pay/qr reads from
+	// here; passing payload via URL query was the old shape and let any
+	// holder of a valid order_no render arbitrary QR content on our
+	// domain (open QR-encoder, phishing-aid). v0.103 closes that.
+	if err := a.DB.SetOrderQRPayload(r.Context(), orderNo, qrPayload); err != nil {
+		log.Printf("save qr_payload %s: %v", orderNo, err)
+		// Non-fatal — the QR JSON below still has the payload for the
+		// browser to render client-side; only the /api/pay/qr image
+		// fallback would 404.
 	}
 
 	writeJSON(w, http.StatusOK, payCreateResp{
 		OrderNo: orderNo,
 		QRCode:  qrPayload,
-		QRPNG:   fmt.Sprintf("/api/pay/qr?order_no=%s&payload=%s", orderNo, url.QueryEscape(qrPayload)),
+		QRPNG:   "/api/pay/qr?order_no=" + orderNo,
 		Amount:  fmt.Sprintf("%d.%02d", plan.PriceCents/100, plan.PriceCents%100),
 		Plan:    req.Plan,
 		Days:    plan.Days,
 	})
+}
+
+// cancelFailedPrecreate removes the pending row for an order whose upstream
+// precreate call never succeeded — the QR code was never shown, so nobody
+// can pay it. Leaving it pending would keep the 30-minute poll loop and the
+// admin "pending orders" counters busy with an order that cannot complete.
+func (a *App) cancelFailedPrecreate(ctx context.Context, orderNo string) {
+	if _, err := a.DB.CancelPendingOrder(ctx, orderNo); err != nil {
+		log.Printf("cancel failed-precreate order %s: %v", orderNo, err)
+	}
 }
 
 // GET /api/pay/status?order_no=...
