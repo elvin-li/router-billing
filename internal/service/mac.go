@@ -53,6 +53,22 @@ func (s *MACService) Extend(ctx context.Context, mac, label string, days int, us
 	return m, nil
 }
 
+// ExtendOwned extends a MAC only while it is still owned by ownerID, then
+// re-adds it to the firewall set. Returns (nil, nil) when the MAC no longer
+// exists or has been transferred to another user — callers treat that as
+// "skipped", not an error. Used by the user-grant fan-outs so a concurrent
+// device transfer can't be clobbered back to the granted user.
+func (s *MACService) ExtendOwned(ctx context.Context, mac, label string, days int, ownerID int64) (*models.MAC, error) {
+	m, err := s.DB.ExtendMACOwned(ctx, mac, label, days, ownerID)
+	if err != nil || m == nil {
+		return nil, err
+	}
+	if err := s.FW.Add(ctx, m.Mac); err != nil {
+		return nil, err
+	}
+	return m, nil
+}
+
 // Revoke marks blocked + drops from firewall set.
 func (s *MACService) Revoke(ctx context.Context, mac string) error {
 	if err := s.DB.SetMACStatus(ctx, mac, models.MACBlocked); err != nil {

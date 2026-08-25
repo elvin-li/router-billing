@@ -1508,9 +1508,17 @@ func (a *App) handleAPIUserGrant(w http.ResponseWriter, r *http.Request, actor s
 	}
 	out := make([]extendedMAC, 0, len(macs))
 	for i := range macs {
-		extended, err := a.MACSvc.Extend(r.Context(), macs[i].Mac, label, req.Days, &req.UserID)
+		// ExtendOwned (not Extend): the unconditional upsert would
+		// reassign user_id on a MAC transferred to a different user
+		// between the list above and this write. Ownership-guarded
+		// extend skips such rows instead of stealing them back.
+		extended, err := a.MACSvc.ExtendOwned(r.Context(), macs[i].Mac, label, req.Days, req.UserID)
 		if err != nil {
 			log.Printf("api user grant %d mac=%s: %v", req.UserID, macs[i].Mac, err)
+			continue
+		}
+		if extended == nil {
+			log.Printf("api user grant %d mac=%s: skipped (ownership changed)", req.UserID, macs[i].Mac)
 			continue
 		}
 		a.DB.Audit(r.Context(), actor, "grant", macs[i].Mac,
@@ -2040,9 +2048,16 @@ func (a *App) handleAPIUserGrantByPhone(w http.ResponseWriter, r *http.Request, 
 	}
 	out := make([]extendedMAC, 0, len(macs))
 	for i := range macs {
-		extended, err := a.MACSvc.Extend(r.Context(), macs[i].Mac, label, req.Days, &user.ID)
+		// Ownership-guarded extend — see handleAPIUserGrant. A device
+		// transferred away between the list and this write is skipped
+		// rather than re-extended and reassigned to this user.
+		extended, err := a.MACSvc.ExtendOwned(r.Context(), macs[i].Mac, label, req.Days, user.ID)
 		if err != nil {
 			log.Printf("api user grant-by-phone %s mac=%s: %v", phone, macs[i].Mac, err)
+			continue
+		}
+		if extended == nil {
+			log.Printf("api user grant-by-phone %s mac=%s: skipped (ownership changed)", phone, macs[i].Mac)
 			continue
 		}
 		a.DB.Audit(r.Context(), actor, "grant", macs[i].Mac,
