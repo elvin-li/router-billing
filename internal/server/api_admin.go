@@ -49,6 +49,27 @@ func (a *App) requireAPITokenWrite(h func(w http.ResponseWriter, r *http.Request
 	}
 }
 
+// requireAPITokenPrivileged rejects read-only tokens on EVERY method,
+// including GET. Used for read paths whose payload is strictly more
+// sensitive than what a monitoring token should hold — today that is
+// /api/admin/backup, which streams the raw SQLite file (plaintext session
+// tokens, password hashes, TOTP secrets, full voucher codes). A read-only
+// token that can fetch the backup is effectively a full-scope token, so
+// the read/write distinction must gate it.
+func (a *App) requireAPITokenPrivileged(h func(w http.ResponseWriter, r *http.Request, actor string)) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		tok := a.matchBearerOrUnauthorized(w, r)
+		if tok == nil {
+			return
+		}
+		if tok.ReadOnly {
+			writeJSON(w, http.StatusForbidden, map[string]string{"error": "token is read-only"})
+			return
+		}
+		h(w, r, "api:"+tokenLabel(tok))
+	}
+}
+
 // requireAPITokenRead accepts any token (read-only or full) for read paths.
 // Today this is functionally identical to requireAPITokenWrite for GET — it
 // exists so the route-table reads as documentation for which endpoint needs
