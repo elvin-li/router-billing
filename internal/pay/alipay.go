@@ -16,6 +16,7 @@ import (
 	"net/url"
 	"os"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -54,6 +55,16 @@ func NewAlipay(appID, privKeyPath, alipayPubKeyPath, notifyURL, gateway string) 
 	}, nil
 }
 
+// beijing is UTC+8. Alipay's openapi gateway requires the `timestamp`
+// request param to be 北京时间 (GMT+8) — sending the router's local time
+// (typically UTC on OpenWrt) is 8 hours off and gets rejected as an
+// invalid/stale timestamp.
+var beijing = time.FixedZone("GMT+8", 8*60*60)
+
+func aliTimestamp() string {
+	return time.Now().In(beijing).Format("2006-01-02 15:04:05")
+}
+
 // Precreate returns the qr_code string to render.
 func (a *Alipay) Precreate(ctx context.Context, outTradeNo, subject string, totalCents int) (*PrecreateResult, error) {
 	biz := map[string]any{
@@ -69,7 +80,7 @@ func (a *Alipay) Precreate(ctx context.Context, outTradeNo, subject string, tota
 		"format":      "JSON",
 		"charset":     "utf-8",
 		"sign_type":   "RSA2",
-		"timestamp":   time.Now().Format("2006-01-02 15:04:05"),
+		"timestamp":   aliTimestamp(),
 		"version":     "1.0",
 		"notify_url":  a.NotifyURL,
 		"biz_content": string(bizContent),
@@ -132,7 +143,7 @@ func (a *Alipay) Query(ctx context.Context, outTradeNo string) (*PaidNotice, boo
 		"format":      "JSON",
 		"charset":     "utf-8",
 		"sign_type":   "RSA2",
-		"timestamp":   time.Now().Format("2006-01-02 15:04:05"),
+		"timestamp":   aliTimestamp(),
 		"version":     "1.0",
 		"biz_content": string(bizContent),
 	}
@@ -169,6 +180,7 @@ func (a *Alipay) Query(ctx context.Context, outTradeNo string) (*PaidNotice, boo
 			OutTradeNo  string `json:"out_trade_no"`
 			TradeNo     string `json:"trade_no"`
 			TradeStatus string `json:"trade_status"`
+			TotalAmount string `json:"total_amount"`
 		} `json:"alipay_trade_query_response"`
 	}
 	if err := json.Unmarshal(body, &wrap); err != nil {
@@ -186,9 +198,10 @@ func (a *Alipay) Query(ctx context.Context, outTradeNo string) (*PaidNotice, boo
 		return nil, false, nil
 	}
 	return &PaidNotice{
-		OrderNo:  r.OutTradeNo,
-		TradeNo:  r.TradeNo,
-		Provider: "alipay",
+		OrderNo:     r.OutTradeNo,
+		TradeNo:     r.TradeNo,
+		Provider:    "alipay",
+		AmountCents: parseAmountCents(r.TotalAmount),
 	}, true, nil
 }
 
@@ -236,10 +249,45 @@ func (a *Alipay) DecodeNotify(form url.Values) (*PaidNotice, error) {
 		return nil, fmt.Errorf("trade_status=%s", tradeStatus)
 	}
 	return &PaidNotice{
-		OrderNo:  form.Get("out_trade_no"),
-		TradeNo:  form.Get("trade_no"),
-		Provider: "alipay",
+		OrderNo:     form.Get("out_trade_no"),
+		TradeNo:     form.Get("trade_no"),
+		Provider:    "alipay",
+		AmountCents: parseAmountCents(form.Get("total_amount")),
 	}, nil
+}
+
+// parseAmountCents converts an Alipay decimal-yuan string ("12.30") to
+// integer 分 without going through floats. Returns 0 ("amount unknown")
+// for anything malformed so callers skip the cross-check rather than
+// misreading the value.
+func parseAmountCents(s string) int {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return 0
+	}
+	intPart, frac, _ := strings.Cut(s, ".")
+	if intPart == "" {
+		intPart = "0"
+	}
+	yuan, err := strconv.Atoi(intPart)
+	if err != nil || yuan < 0 {
+		return 0
+	}
+	cents := yuan * 100
+	if len(frac) > 2 {
+		return 0
+	}
+	if frac != "" {
+		d, err := strconv.Atoi(frac)
+		if err != nil || d < 0 {
+			return 0
+		}
+		if len(frac) == 1 {
+			d *= 10
+		}
+		cents += d
+	}
+	return cents
 }
 
 // sign builds the RSA2 signature over the sorted "k=v&..." form.

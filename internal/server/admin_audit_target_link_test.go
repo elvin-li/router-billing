@@ -28,6 +28,17 @@ func TestAuditTargetHrefShapes(t *testing.T) {
 		// 10-digit pure number: not phone (not 11), not user_id (too long).
 		{"1234567890", ""},
 		{"23456789012", ""}, // 11 digits but doesn't start with 1
+		// v0.97: the shape newOrderNo() actually generates
+		// ("B" + 14-digit timestamp + 8 lowercase hex) links to the order.
+		{"B20260825010203deadbeef", "/admin/orders/detail?order_no=B20260825010203deadbeef"},
+		// Near-misses stay plain text.
+		{"B20260825010203deadbee", ""},   // 22 chars
+		{"B2026082501020Xdeadbeef", ""},  // non-digit in timestamp
+		{"B20260825010203DEADBEEF", ""},  // uppercase hex
+		{"C20260825010203deadbeef", ""},  // wrong prefix
+		{"B20260825010203deadbeef1", ""}, // 24 chars
+		// v0.97: order_no gets query-escaped in the href.
+		{"ORD 1&2", "/admin/orders/detail?order_no=ORD+1%262"},
 	}
 	for _, c := range cases {
 		t.Run(c.target, func(t *testing.T) {
@@ -58,6 +69,21 @@ func TestAdminAuditPageLinksTargets(t *testing.T) {
 	// Order target link present.
 	if !strings.Contains(body, `href="/admin/orders/detail?order_no=ORD-LINK-1"`) {
 		t.Error("order target should be linked to its detail page")
+	}
+}
+
+// Whatever newOrderNo() produces must be recognized — keeps the helper and
+// the generator from drifting apart again.
+func TestGeneratedOrderNoRoundTrip(t *testing.T) {
+	for i := 0; i < 5; i++ {
+		no := newOrderNo()
+		if !isGeneratedOrderNo(no) {
+			t.Fatalf("isGeneratedOrderNo(%q) = false; generator and matcher drifted", no)
+		}
+		want := "/admin/orders/detail?order_no=" + no
+		if got := auditTargetHref(no); got != want {
+			t.Fatalf("auditTargetHref(%q) = %q, want %q", no, got, want)
+		}
 	}
 }
 

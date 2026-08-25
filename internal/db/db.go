@@ -141,6 +141,17 @@ func (d *DB) ListExpiringMACsWithoutRecentReminder(ctx context.Context, withinDa
 	return out, rows.Err()
 }
 
+// escapeLike escapes LIKE wildcards in user-supplied search text so a
+// query for a literal "%" or "_" doesn't silently become a
+// match-everything / match-any-char pattern. Every LIKE clause built
+// from user input must pair `escapeLike` with ` ESCAPE '\'`.
+func escapeLike(s string) string {
+	s = strings.ReplaceAll(s, `\`, `\\`)
+	s = strings.ReplaceAll(s, `%`, `\%`)
+	s = strings.ReplaceAll(s, `_`, `\_`)
+	return s
+}
+
 // SearchMACs returns MACs where MAC or label contains q (case-insensitive
 // LIKE). When q is empty, behaves like ListMACs. status (if non-empty)
 // restricts to that exact status. limit defaults to 200, capped at 1000.
@@ -153,8 +164,8 @@ func (d *DB) SearchMACs(ctx context.Context, q, status string, limit int) ([]mod
 	args := []any{}
 	if q != "" {
 		// SQLite LIKE is case-insensitive for ASCII by default.
-		sb.WriteString(` AND (mac LIKE ? OR label LIKE ?)`)
-		pat := "%" + q + "%"
+		sb.WriteString(` AND (mac LIKE ? ESCAPE '\' OR label LIKE ? ESCAPE '\')`)
+		pat := "%" + escapeLike(q) + "%"
 		args = append(args, pat, pat)
 	}
 	if status != "" {
@@ -333,38 +344,45 @@ func (d *DB) ReplaceMAC(ctx context.Context, userID int64, oldMac, newMac, label
 }
 
 // ExpireDueMACs marks expired MACs and returns the ones newly expired.
+//
+// Single UPDATE ... RETURNING so the flip and the report are one atomic
+// statement. The previous SELECT-then-UPDATE pair had two races:
+//   - a MAC extended between the two statements stayed active (good) but
+//     was still in the returned list, so the caller revoked firewall
+//     access for a MAC that had just been renewed;
+//   - a MAC expiring between the two statements got flipped but was NOT
+//     in the returned list, so its revoke webhook/notify never fired —
+//     and two concurrent sweeps could both report the same MAC.
 func (d *DB) ExpireDueMACs(ctx context.Context) ([]string, error) {
-	rows, err := d.conn.QueryContext(ctx, `SELECT mac FROM macs WHERE status = 'active' AND expires_at <= CURRENT_TIMESTAMP`)
+	rows, err := d.conn.QueryContext(ctx, `
+		UPDATE macs SET status = 'expired', updated_at = CURRENT_TIMESTAMP
+		 WHERE status = 'active' AND expires_at <= CURRENT_TIMESTAMP
+		 RETURNING mac`)
 	if err != nil {
 		return nil, err
 	}
+	defer rows.Close()
 	var expired []string
 	for rows.Next() {
 		var m string
 		if err := rows.Scan(&m); err != nil {
-			rows.Close()
 			return nil, err
 		}
 		expired = append(expired, m)
 	}
-	rows.Close()
-	if len(expired) == 0 {
-		return nil, nil
-	}
-	_, err = d.conn.ExecContext(ctx, `UPDATE macs SET status = 'expired', updated_at = CURRENT_TIMESTAMP WHERE status = 'active' AND expires_at <= CURRENT_TIMESTAMP`)
-	return expired, err
+	return expired, rows.Err()
 }
 
 // ---------- Orders ----------
 
-const orderCols = `id, order_no, mac, plan, days, amount_cents, status, payment_method, trade_no, user_id, last_queried_at, paid_at, created_at`
+const orderCols = `id, order_no, mac, plan, days, amount_cents, status, payment_method, trade_no, user_id, last_queried_at, paid_at, qr_payload, created_at`
 
 func scanOrder(row interface{ Scan(...any) error }) (*models.Order, error) {
 	var o models.Order
 	var userID sql.NullInt64
 	var lastQ, paidAt sql.NullTime
 	if err := row.Scan(&o.ID, &o.OrderNo, &o.Mac, &o.Plan, &o.Days, &o.AmountCents, &o.Status,
-		&o.PaymentMethod, &o.TradeNo, &userID, &lastQ, &paidAt, &o.CreatedAt); err != nil {
+		&o.PaymentMethod, &o.TradeNo, &userID, &lastQ, &paidAt, &o.QRPayload, &o.CreatedAt); err != nil {
 		return nil, err
 	}
 	if userID.Valid {
@@ -446,8 +464,8 @@ func (d *DB) SearchOrdersFiltered(ctx context.Context, f OrderFilter) ([]models.
 	sb.WriteString(`SELECT ` + orderCols + ` FROM orders WHERE 1=1`)
 	args := []any{}
 	if f.Q != "" {
-		sb.WriteString(` AND (order_no LIKE ? OR mac LIKE ? OR trade_no LIKE ?)`)
-		pat := "%" + f.Q + "%"
+		sb.WriteString(` AND (order_no LIKE ? ESCAPE '\' OR mac LIKE ? ESCAPE '\' OR trade_no LIKE ? ESCAPE '\')`)
+		pat := "%" + escapeLike(f.Q) + "%"
 		args = append(args, pat, pat, pat)
 	}
 	if f.Status != "" {
@@ -498,6 +516,17 @@ func (d *DB) MarkOrderQueried(ctx context.Context, orderNo string) error {
 	return err
 }
 
+// SetOrderQRPayload stores the upstream PSP's QR string on the order row.
+// Used immediately after Precreate so /api/pay/qr can render from the
+// authoritative server-side value instead of a URL-supplied parameter.
+// v0.103 security fix.
+func (d *DB) SetOrderQRPayload(ctx context.Context, orderNo, payload string) error {
+	_, err := d.conn.ExecContext(ctx,
+		`UPDATE orders SET qr_payload = ? WHERE order_no = ?`,
+		payload, orderNo)
+	return err
+}
+
 func (d *DB) queryOrders(ctx context.Context, q string, args ...any) ([]models.Order, error) {
 	rows, err := d.conn.QueryContext(ctx, q, args...)
 	if err != nil {
@@ -517,6 +546,13 @@ func (d *DB) queryOrders(ctx context.Context, q string, args ...any) ([]models.O
 
 // MarkOrderPaid sets status=paid atomically; returns (transitioned, order, err).
 // Idempotent — re-calling for an already-paid order returns transitioned=false.
+//
+// `refunded` is a terminal state and is treated like already-paid: both
+// PSPs redeliver success notifications for up to ~24h, and pre-v0.106 a
+// redelivery (or a replayed capture) arriving AFTER an admin refund flipped
+// the order back to `paid` and re-granted the MAC days — the customer kept
+// the refund AND the access. Returning transitioned=false (no error) acks
+// the notification so the PSP stops retrying, without touching the order.
 func (d *DB) MarkOrderPaid(ctx context.Context, orderNo, tradeNo string) (bool, *models.Order, error) {
 	tx, err := d.conn.BeginTx(ctx, nil)
 	if err != nil {
@@ -532,12 +568,20 @@ func (d *DB) MarkOrderPaid(ctx context.Context, orderNo, tradeNo string) (bool, 
 	if err != nil {
 		return false, nil, err
 	}
-	if o.Status == models.OrderPaid {
+	if o.Status == models.OrderPaid || o.Status == models.OrderRefunded {
 		return false, o, nil
 	}
 	now := time.Now().UTC()
-	if _, err := tx.ExecContext(ctx, `UPDATE orders SET status = 'paid', trade_no = ?, paid_at = ? WHERE order_no = ?`, tradeNo, now, orderNo); err != nil {
+	// Guard the UPDATE on the status we just read so a concurrent transition
+	// (e.g. an admin refund racing this webhook) can't be overwritten.
+	res, err := tx.ExecContext(ctx,
+		`UPDATE orders SET status = 'paid', trade_no = ?, paid_at = ? WHERE order_no = ? AND status = ?`,
+		tradeNo, now, orderNo, string(o.Status))
+	if err != nil {
 		return false, nil, err
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return false, nil, fmt.Errorf("order %s changed state concurrently, not marking paid", orderNo)
 	}
 	if err := tx.Commit(); err != nil {
 		return false, nil, err
@@ -546,6 +590,25 @@ func (d *DB) MarkOrderPaid(ctx context.Context, orderNo, tradeNo string) (bool, 
 	o.TradeNo = tradeNo
 	o.PaidAt = &now
 	return true, o, nil
+}
+
+// RevertOrderToPending flips a paid order back to pending. Used ONLY by the
+// payment finalizer as compensation when the post-payment grant fails after
+// MarkOrderPaid already committed: leaving the order `paid` would consume
+// the one transitioned=true signal, so neither the PSP's retry nor our
+// poller would ever re-drive the MAC grant. Reverting lets the next
+// notify/poll retry the whole finalize. trade_no/paid_at are kept so the
+// gateway reference survives the round trip.
+func (d *DB) RevertOrderToPending(ctx context.Context, orderNo string) error {
+	res, err := d.conn.ExecContext(ctx,
+		`UPDATE orders SET status = 'pending' WHERE order_no = ? AND status = 'paid'`, orderNo)
+	if err != nil {
+		return err
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return fmt.Errorf("order %s not paid, cannot revert", orderNo)
+	}
+	return nil
 }
 
 // MarkOrderRefunded transitions a paid order to refunded and rolls back the
@@ -999,16 +1062,30 @@ func (d *DB) ConfirmUserTOTP(ctx context.Context, userID int64) error {
 // Also clears backup codes AND trusted devices so a future enrollment
 // starts from a clean slate — and so an admin reset doesn't leave behind
 // trust-tokens that would bypass the next enrollment.
+//
+// All three writes run in one transaction: a crash or error after the
+// secret wipe but before the trusted-device wipe would otherwise leave
+// stale trust-tokens that silently bypass the NEXT enrollment's 2FA.
 func (d *DB) ClearUserTOTP(ctx context.Context, userID int64) error {
-	if _, err := d.conn.ExecContext(ctx,
+	tx, err := d.conn.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
+	if _, err := tx.ExecContext(ctx,
 		`UPDATE users SET totp_secret = '', totp_pending = '', updated_at = ? WHERE id = ?`,
 		time.Now().UTC(), userID); err != nil {
 		return err
 	}
-	if err := d.ClearBackupCodes(ctx, userID); err != nil {
+	if _, err := tx.ExecContext(ctx,
+		`DELETE FROM user_backup_codes WHERE user_id = ?`, userID); err != nil {
 		return err
 	}
-	return d.DeleteAllTrustedDevices(ctx, userID)
+	if _, err := tx.ExecContext(ctx,
+		`DELETE FROM user_trusted_devices WHERE user_id = ?`, userID); err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
 func (d *DB) ListUsers(ctx context.Context, limit int) ([]models.User, error) {
@@ -1027,8 +1104,8 @@ func (d *DB) SearchUsers(ctx context.Context, q string, limit int) ([]models.Use
 			`SELECT `+userColumns+` FROM users ORDER BY created_at DESC LIMIT ?`, limit)
 	} else {
 		rows, err = d.conn.QueryContext(ctx,
-			`SELECT `+userColumns+` FROM users WHERE phone LIKE ? ORDER BY created_at DESC LIMIT ?`,
-			"%"+q+"%", limit)
+			`SELECT `+userColumns+` FROM users WHERE phone LIKE ? ESCAPE '\' ORDER BY created_at DESC LIMIT ?`,
+			"%"+escapeLike(q)+"%", limit)
 	}
 	if err != nil {
 		return nil, err
@@ -1045,25 +1122,51 @@ func (d *DB) SearchUsers(ctx context.Context, q string, limit int) ([]models.Use
 	return out, rows.Err()
 }
 
+// SuspendUser flips the suspended flag. Suspending also drops the user's
+// active sessions IN THE SAME transaction — previously the session delete
+// was a separate best-effort statement whose error was swallowed, so a
+// failed delete left a suspended user with a live session until it expired.
 func (d *DB) SuspendUser(ctx context.Context, id int64, suspended bool) error {
 	v := 0
 	if suspended {
 		v = 1
 	}
-	_, err := d.conn.ExecContext(ctx,
-		`UPDATE users SET suspended = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`, v, id)
-	if err == nil && suspended {
-		// also drop the user's active sessions so a suspended user can't keep using the app
-		_, _ = d.conn.ExecContext(ctx, `DELETE FROM sessions WHERE kind='user' AND user_id = ?`, id)
+	tx, err := d.conn.BeginTx(ctx, nil)
+	if err != nil {
+		return err
 	}
-	return err
+	defer func() { _ = tx.Rollback() }()
+	if _, err := tx.ExecContext(ctx,
+		`UPDATE users SET suspended = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`, v, id); err != nil {
+		return err
+	}
+	if suspended {
+		if _, err := tx.ExecContext(ctx,
+			`DELETE FROM sessions WHERE kind='user' AND user_id = ?`, id); err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
 }
 
-// DeleteUser removes a user. macs.user_id / orders.user_id are SET NULL by FK.
+// DeleteUser removes a user. macs.user_id / orders.user_id are SET NULL by
+// FK; trusted devices / backup codes / password resets CASCADE. Sessions
+// have no FK (token-keyed, kind-discriminated) so they're deleted in the
+// same transaction — atomic, and errors are no longer swallowed.
 func (d *DB) DeleteUser(ctx context.Context, id int64) error {
-	_, _ = d.conn.ExecContext(ctx, `DELETE FROM sessions WHERE kind='user' AND user_id = ?`, id)
-	_, err := d.conn.ExecContext(ctx, `DELETE FROM users WHERE id = ?`, id)
-	return err
+	tx, err := d.conn.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
+	if _, err := tx.ExecContext(ctx,
+		`DELETE FROM sessions WHERE kind='user' AND user_id = ?`, id); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM users WHERE id = ?`, id); err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
 // ---------- TOTP Trusted devices ----------
@@ -1296,13 +1399,15 @@ func (d *DB) GetActivePasswordReset(ctx context.Context, userID int64) (*models.
 // BumpPasswordResetAttempts atomically increments attempts. Returns the new
 // count so the caller can decide to expire the code (>= maxAttempts) and
 // audit-log the failure.
+//
+// Single UPDATE ... RETURNING — the previous UPDATE-then-SELECT pair let
+// two concurrent failed verifies both read the same post-increment value,
+// under-counting attempts and stretching the brute-force budget.
 func (d *DB) BumpPasswordResetAttempts(ctx context.Context, id int64) (int, error) {
-	if _, err := d.conn.ExecContext(ctx,
-		`UPDATE password_resets SET attempts = attempts + 1 WHERE id = ?`, id); err != nil {
-		return 0, err
-	}
 	var n int
-	if err := d.conn.QueryRowContext(ctx, `SELECT attempts FROM password_resets WHERE id = ?`, id).Scan(&n); err != nil {
+	err := d.conn.QueryRowContext(ctx,
+		`UPDATE password_resets SET attempts = attempts + 1 WHERE id = ? RETURNING attempts`, id).Scan(&n)
+	if err != nil {
 		return 0, err
 	}
 	return n, nil
@@ -1530,7 +1635,11 @@ func (d *DB) Attention(ctx context.Context) (AttentionCounts, error) {
 		{`SELECT COUNT(*) FROM macs WHERE status='active' AND expires_at > CURRENT_TIMESTAMP AND expires_at < datetime('now','+7 days')`, &a.ExpiringSoon},
 		{`SELECT COUNT(*) FROM orders WHERE status='pending' AND created_at < datetime('now','-10 minutes')`, &a.StalePending},
 		{`SELECT COUNT(*) FROM users WHERE suspended = 1`, &a.SuspendedUsers},
-		{`SELECT COUNT(*) FROM orders WHERE status='failed' AND date(created_at) = date('now')`, &a.FailedToday},
+		// created_at is Go-written text that SQLite's date() can't parse
+		// (returns NULL), so `date(created_at) = date('now')` matched
+		// nothing and FailedToday was permanently 0. Compare against
+		// start-of-day like DashboardSnapshot does.
+		{`SELECT COUNT(*) FROM orders WHERE status='failed' AND created_at >= datetime('now','start of day')`, &a.FailedToday},
 		// v0.59: 24h failure windows on the observability tables. Use
 		// sent_at since CURRENT_TIMESTAMP is what the DEFAULT computes —
 		// matches what the rows actually carry.
@@ -1634,6 +1743,66 @@ func (d *DB) CreateVoucher(ctx context.Context, code string, days int, label, ba
 	}
 	id, _ := res.LastInsertId()
 	return &models.Voucher{ID: id, Code: code, Days: days, Label: label, Batch: batch, ExpiresAt: expiresAt}, nil
+}
+
+// VoucherSpec is one row destined for CreateVouchersBulk.
+type VoucherSpec struct {
+	Code      string
+	Days      int
+	Label     string
+	Batch     string
+	ExpiresAt *time.Time
+}
+
+// CreateVouchersBulk inserts every spec in a single SQLite transaction —
+// one fsync at COMMIT instead of one-per-row. A 1000-row import goes from
+// "noticeably slow" to "instant". Per-row UNIQUE collisions don't abort
+// the transaction (SQLite default: stmt-level error, tx survives), so a
+// duplicate paste in the middle of an import doesn't lose the rest.
+//
+// Returns a parallel []bool — true at index i means specs[i] was inserted
+// successfully, false means it failed (almost always UNIQUE collision).
+// The caller surfaces per-row outcomes to the operator (added=N failed=M).
+//
+// Used by both the admin voucher import (CSV paste) and bulk generate
+// flows. v0.103.
+func (d *DB) CreateVouchersBulk(ctx context.Context, specs []VoucherSpec) ([]bool, error) {
+	out := make([]bool, len(specs))
+	if len(specs) == 0 {
+		return out, nil
+	}
+	tx, err := d.conn.BeginTx(ctx, nil)
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback()
+
+	stmt, err := tx.PrepareContext(ctx,
+		`INSERT INTO vouchers (code, days, label, batch, expires_at) VALUES (?, ?, ?, ?, ?)`)
+	if err != nil {
+		return nil, err
+	}
+	defer stmt.Close()
+
+	for i, s := range specs {
+		var expr any
+		if s.ExpiresAt != nil {
+			expr = *s.ExpiresAt
+		}
+		if _, err := stmt.ExecContext(ctx, s.Code, s.Days, s.Label, s.Batch, expr); err != nil {
+			// SQLite reports UNIQUE/CHECK violations as stmt errors that
+			// don't abort the surrounding tx, so we record the failure
+			// and continue. Anything else (driver disconnect, full disk)
+			// will resurface at Commit and we'll bail.
+			out[i] = false
+			continue
+		}
+		out[i] = true
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, err
+	}
+	return out, nil
 }
 
 func (d *DB) GetVoucher(ctx context.Context, code string) (*models.Voucher, error) {
@@ -1845,10 +2014,18 @@ func (d *DB) SnapshotToday(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	// paid_orders for today
+	// paid_orders for today. NOTE: paid_at is written by Go (MarkOrderPaid)
+	// and modernc.org/sqlite stores time.Time as "2006-01-02 15:04:05.999
+	// +0000 UTC" — a format SQLite's date() can NOT parse (returns NULL),
+	// so the old `date(paid_at) = date('now')` predicate matched nothing
+	// and every snapshot recorded paid_orders = 0. Lexicographic >= against
+	// datetime('now','start of day') works because the "YYYY-MM-DD
+	// HH:MM:SS" prefix is shared between the two formats.
 	var paidToday int
-	_ = d.conn.QueryRowContext(ctx,
-		`SELECT COUNT(*) FROM orders WHERE status='paid' AND date(paid_at) = date('now')`).Scan(&paidToday)
+	if err := d.conn.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM orders WHERE status='paid' AND paid_at >= datetime('now','start of day')`).Scan(&paidToday); err != nil {
+		return err
+	}
 	day := time.Now().UTC().Format("2006-01-02")
 	now := time.Now().UTC()
 	_, err = d.conn.ExecContext(ctx,
@@ -1985,20 +2162,20 @@ func (d *DB) SearchAudit(ctx context.Context, f AuditFilter) ([]AuditEntry, erro
 	sb.WriteString(`SELECT id, at, actor, action, target, detail FROM audit_log WHERE 1=1`)
 	args := []any{}
 	if f.Actor != "" {
-		sb.WriteString(` AND actor LIKE ?`)
-		args = append(args, "%"+f.Actor+"%")
+		sb.WriteString(` AND actor LIKE ? ESCAPE '\'`)
+		args = append(args, "%"+escapeLike(f.Actor)+"%")
 	}
 	if f.Action != "" {
 		sb.WriteString(` AND action = ?`)
 		args = append(args, f.Action)
 	}
 	if f.Target != "" {
-		sb.WriteString(` AND target LIKE ?`)
-		args = append(args, "%"+f.Target+"%")
+		sb.WriteString(` AND target LIKE ? ESCAPE '\'`)
+		args = append(args, "%"+escapeLike(f.Target)+"%")
 	}
 	if f.Q != "" {
-		sb.WriteString(` AND detail LIKE ?`)
-		args = append(args, "%"+f.Q+"%")
+		sb.WriteString(` AND detail LIKE ? ESCAPE '\'`)
+		args = append(args, "%"+escapeLike(f.Q)+"%")
 	}
 	if f.Since != "" {
 		sb.WriteString(` AND date(at) >= date(?)`)

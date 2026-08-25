@@ -27,6 +27,15 @@ func New(d *db.DB, fw firewall.API) *MACService {
 
 // GrantFromOrder adds days to MAC's expiry then puts it into the firewall set.
 // If the order is linked to a user, that user becomes the MAC's owner.
+//
+// Returns an error ONLY if the DB grant failed (i.e. nothing durable
+// happened and the caller may safely retry the whole grant). A firewall
+// failure after the DB committed is NOT an error: the DB is the source of
+// truth for the mac_paid set, so we attempt an immediate Resync and
+// otherwise log loudly. Pre-v0.106 the fw error bubbled up as a webhook
+// 500 whose PSP retries then no-oped (order already paid), so the failed
+// nft add was never retried anyway — and the paid signal/audit/notify were
+// all skipped.
 func (s *MACService) GrantFromOrder(ctx context.Context, o *models.Order) error {
 	label := fmt.Sprintf("paid-%s", o.Plan)
 	m, err := s.DB.UpsertMAC(ctx, o.Mac, label, o.Days, o.UserID)
@@ -34,8 +43,10 @@ func (s *MACService) GrantFromOrder(ctx context.Context, o *models.Order) error 
 		return fmt.Errorf("upsert mac: %w", err)
 	}
 	if err := s.FW.Add(ctx, m.Mac); err != nil {
-		log.Printf("warn: firewall add %s: %v", m.Mac, err)
-		return err
+		log.Printf("warn: firewall add %s: %v — attempting resync", m.Mac, err)
+		if rerr := s.Resync(ctx); rerr != nil {
+			log.Printf("ERROR: firewall resync after failed add %s: %v (paid MAC offline until next resync)", m.Mac, rerr)
+		}
 	}
 	log.Printf("granted %s for %d days (until %s) from order %s", m.Mac, o.Days, m.ExpiresAt.Format("2006-01-02"), o.OrderNo)
 	return nil
