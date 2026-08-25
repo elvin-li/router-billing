@@ -40,9 +40,10 @@ func (a *App) handleAdminBackup(w http.ResponseWriter, r *http.Request) {
 // nightly `curl -O -H "Authorization: Bearer $RB_TOKEN" .../api/admin/backup`.
 //
 // Read-only tokens are REJECTED (403) even though the method is GET.
-// The raw DB file contains plaintext session tokens (which mint live
-// admin/user cookies), password hashes, TOTP secrets, full unredeemed
-// voucher codes, and SMS message bodies — exactly the material every
+// The raw DB file contains password hashes, TOTP secrets, full unredeemed
+// voucher codes, and SMS message bodies (session and trusted-device
+// tokens are stored hashed since v0.113, but the rest stands) — the
+// material every
 // JSON read endpoint strips (apiUserSummary, apiVoucher code prefix,
 // apiSession without token). A read-only token that can download the
 // backup would be a full-scope token in disguise, so the route is gated

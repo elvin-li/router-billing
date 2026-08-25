@@ -14,6 +14,7 @@ import (
 //   - a second time on pages that also display the counters (dashboard,
 //     /admin/macs, /admin/health),
 //   - every 5s per connected SSE stats stream,
+//
 // all funneled through the single SQLite connection a low-end router runs.
 const attentionCacheTTL = 3 * time.Second
 
