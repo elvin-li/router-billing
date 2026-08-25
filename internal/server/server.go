@@ -42,6 +42,7 @@ type App struct {
 	adminLoginByUser  *rateLimiter // admin login, keyed by username (defeats IP rotation)
 	redeemLimiter     *rateLimiter // voucher redemption, keyed by IP
 	payCreateLimiter  *rateLimiter // payment intent creation, keyed by IP
+	twoFADisableLimit *rateLimiter // /user/2fa/disable attempts, keyed by user ID
 
 	// Forgot-password (SMS) — separate counters from login so a hostile actor
 	// can't burn the legitimate user's login budget by spamming reset requests.
@@ -78,6 +79,7 @@ func NewApp(cfg *config.Config, dbx *db.DB, svc *service.MACService) (*App, erro
 		adminLoginByUser:  newRateLimiter(5, 5*time.Minute),
 		redeemLimiter:     newRateLimiter(10, 10*time.Minute),
 		payCreateLimiter:  newRateLimiter(20, time.Minute),
+		twoFADisableLimit: newRateLimiter(5, 15*time.Minute),
 
 		pwResetIssueIPLimit:    newRateLimiter(6, 1*time.Hour),
 		pwResetIssuePhoneLimit: newRateLimiter(3, 1*time.Hour),

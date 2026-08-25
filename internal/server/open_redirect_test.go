@@ -79,6 +79,9 @@ func TestUser2FALoginNextOpenRedirectBlocked(t *testing.T) {
 	do(t, h, "POST", "/user/2fa/begin", url.Values{"_csrf": {csrf}}, jar)
 	code := validTOTPForUser(t, app, "13800139102")
 	do(t, h, "POST", "/user/2fa/confirm", url.Values{"_csrf": {csrf}, "code": {code}}, jar)
+	// Confirm consumed this timestep (one-time use); the login below
+	// legitimately reuses it inside the same 30s step.
+	resetTOTPReplay()
 
 	// Fresh browser: password → pending cookie.
 	res, _ := do(t, h, "POST", "/user/login",
