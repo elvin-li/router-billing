@@ -879,6 +879,7 @@ type rateLimiter struct {
 	hits   map[string][]time.Time
 	max    int
 	window time.Duration
+	gcAt   int // map size that triggers the next GC sweep (amortized O(1))
 }
 
 func newRateLimiter(max int, window time.Duration) *rateLimiter {
@@ -906,13 +907,28 @@ func (rl *rateLimiter) allow(key string) bool {
 	}
 	out = append(out, now)
 	rl.hits[key] = out
-	// Cheap gc: if the map gets large, drop oldest.
-	if len(rl.hits) > 4096 {
+	// GC sweep, amortized: sweeping on EVERY insert once large would be an
+	// O(n)-per-request full-map scan — a CPU burn under the same key flood
+	// the sweep defends against. Trigger by size threshold instead.
+	if len(rl.hits) > 4096 && len(rl.hits) >= rl.gcAt {
 		for k, v := range rl.hits {
 			if len(v) == 0 || v[len(v)-1].Before(cutoff) {
 				delete(rl.hits, k)
 			}
 		}
+		// Hard cap: expired-entry GC alone is unbounded when an attacker
+		// rotates source IPs (one IPv6 /64 = 2^64 fresh keys) faster than
+		// the window drains. Evicting live entries weakens rate limiting a
+		// little under such a flood, but OOMing the router is worse.
+		for k := range rl.hits {
+			if len(rl.hits) <= 4096 {
+				break
+			}
+			if k != key {
+				delete(rl.hits, k)
+			}
+		}
+		rl.gcAt = 2 * len(rl.hits)
 	}
 	return true
 }
