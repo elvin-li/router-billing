@@ -21,12 +21,15 @@ import (
 //
 //	table inet billing {
 //	    set mac_paid { type ether_addr; }
+//	    set wg_paid  { type ipv4_addr; flags timeout; }
 //	    chain pre      { type nat    hook prerouting priority -1;
 //	                     iifname "br-paid" ether saddr @mac_paid return
-//	                     iifname "br-paid" tcp dport 80 redirect to :8080
-//	                     iifname "br-paid" tcp dport 443 reject }
+//	                     iifname "br-paid" ip daddr @wg_paid return
+//	                     iifname "br-paid" tcp dport 80 redirect to :8080 }
 //	    chain forward  { type filter hook forward    priority -1;
 //	                     iifname "br-paid" ether saddr @mac_paid return
+//	                     iifname "br-paid" ip daddr @wg_paid return
+//	                     iifname "br-paid" tcp dport 443 reject with tcp reset
 //	                     iifname "br-paid" drop }
 //	}
 type Manager struct {
