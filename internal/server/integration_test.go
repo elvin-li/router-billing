@@ -962,7 +962,7 @@ func TestRedeemRateLimit(t *testing.T) {
 		if res.StatusCode != 303 {
 			t.Fatalf("attempt %d: %d", i, res.StatusCode)
 		}
-		loc := res.Header.Get("Location")
+		loc := strings.ToLower(res.Header.Get("Location"))
 		if strings.Contains(loc, "尝试过于频繁") || strings.Contains(loc, "%e5%b0%9d") {
 			t.Errorf("attempt %d should not be rate-limited yet: %s", i, loc)
 		}
@@ -970,8 +970,9 @@ func TestRedeemRateLimit(t *testing.T) {
 	// 4th hit gets the rate-limit redirect.
 	res, _ := do(t, h, "POST", "/redeem",
 		url.Values{"code": {"AAAAAAAAAA22"}, "mac": {"aa:bb:cc:dd:ee:ff"}}, nil)
-	loc := res.Header.Get("Location")
-	// URL-encoded "尝试" prefix
+	// URL-encoded "尝试" prefix (case-insensitive: v0.100 switched from
+	// http.Redirect's implicit lowercase escaping to url.QueryEscape).
+	loc := strings.ToLower(res.Header.Get("Location"))
 	if !strings.Contains(loc, "%e5%b0%9d%e8%af%95") {
 		t.Errorf("4th attempt should be rate-limited; got %s", loc)
 	}

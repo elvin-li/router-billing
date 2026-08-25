@@ -73,10 +73,10 @@ func (a *App) handleUserLogin2FA(w http.ResponseWriter, r *http.Request) {
 		http.Redirect(w, r, "/user/login?err=2fa_expired", http.StatusSeeOther)
 		return
 	}
-	next := r.URL.Query().Get("next")
-	if next == "" {
-		next = "/user/me"
-	}
+	// v0.99: the raw query value was previously trusted as-is — a crafted
+	// login link could bounce a just-authenticated user to an external
+	// phishing domain. Same-site relative paths only.
+	next := safeNextPath(r.URL.Query().Get("next"), "/user/me")
 
 	if r.Method == http.MethodGet {
 		a.render(w, "user_2fa_login.html", a.userCtx(r, "2fa", map[string]any{
