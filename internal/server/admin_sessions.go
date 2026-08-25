@@ -52,7 +52,7 @@ func (a *App) handleAdminSessionRevoke(w http.ResponseWriter, r *http.Request) {
 		http.Redirect(w, r, "/admin/sessions?err=internal", http.StatusSeeOther)
 		return
 	}
-	a.DB.Audit(r.Context(), "admin", "session_revoke", maskTok(tok), "ip="+a.clientIP(r))
+	a.DB.Audit(r.Context(), "admin", "session_revoke", maskTok(tok), "ip="+clientIP(r))
 	http.Redirect(w, r, "/admin/sessions?ok=1", http.StatusSeeOther)
 }
 
@@ -90,7 +90,7 @@ func (a *App) handleAdminSessionPanic(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	a.DB.Audit(r.Context(), "admin", "panic_logout", "",
-		"admin_killed="+mustItoa(adminKilled)+" user_killed="+mustItoa(userKilled)+" ip="+a.clientIP(r))
+		"admin_killed="+mustItoa(adminKilled)+" user_killed="+mustItoa(userKilled)+" ip="+clientIP(r))
 	http.Redirect(w, r, "/admin/sessions?ok=panic", http.StatusSeeOther)
 }
 
@@ -117,7 +117,7 @@ func (a *App) handleAdminSessionRevokeAllAdmin(w http.ResponseWriter, r *http.Re
 		return
 	}
 	a.DB.Audit(r.Context(), "admin", "session_revoke_all_admin", "",
-		mustItoa(n)+" sessions killed; ip="+a.clientIP(r))
+		mustItoa(n)+" sessions killed; ip="+clientIP(r))
 	http.Redirect(w, r, "/admin/sessions?ok=1", http.StatusSeeOther)
 }
 

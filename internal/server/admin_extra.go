@@ -92,7 +92,7 @@ func (a *App) handleAdminAuditNote(w http.ResponseWriter, r *http.Request) {
 			actor = "admin:" + sess.Subject
 		}
 	}
-	a.DB.Audit(r.Context(), actor, "manual_note", "", note+" ip="+a.clientIP(r))
+	a.DB.Audit(r.Context(), actor, "manual_note", "", note+" ip="+clientIP(r))
 	http.Redirect(w, r, "/admin/audit?ok=note", http.StatusSeeOther)
 }
 

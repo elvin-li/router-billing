@@ -61,10 +61,10 @@ func (a *App) handleAdminTestWebhook(w http.ResponseWriter, r *http.Request) {
 		http.Redirect(w, r, "/admin/maintenance?err=webhook_not_configured", http.StatusSeeOther)
 		return
 	}
-	a.Notifier.Send(notifyTestEvent("admin", a.clientIP(r)))
-	log.Printf("admin test-webhook → %s ip=%s", a.Cfg.Webhook.URL, a.clientIP(r))
+	a.Notifier.Send(notifyTestEvent("admin", clientIP(r)))
+	log.Printf("admin test-webhook → %s ip=%s", a.Cfg.Webhook.URL, clientIP(r))
 	a.DB.Audit(r.Context(), "admin", "webhook_test", "",
-		"url="+a.Cfg.Webhook.URL+" ip="+a.clientIP(r))
+		"url="+a.Cfg.Webhook.URL+" ip="+clientIP(r))
 	http.Redirect(w, r, "/admin/maintenance?ok=webhook_test", http.StatusSeeOther)
 }
 
@@ -100,12 +100,12 @@ func (a *App) handleAdminOptimizeNow(w http.ResponseWriter, r *http.Request) {
 	if _, err := a.DB.Exec(r.Context(), "PRAGMA optimize"); err != nil {
 		log.Printf("admin optimize-now: %v", err)
 		a.DB.Audit(r.Context(), "admin", "optimize_now_failed", "",
-			"err="+err.Error()+" ip="+a.clientIP(r))
+			"err="+err.Error()+" ip="+clientIP(r))
 		http.Redirect(w, r, "/admin/maintenance?err=optimize_failed", http.StatusSeeOther)
 		return
 	}
 	a.DB.Audit(r.Context(), "admin", "optimize_now", "",
-		fmt.Sprintf("ms=%d ip=%s", time.Since(start).Milliseconds(), a.clientIP(r)))
+		fmt.Sprintf("ms=%d ip=%s", time.Since(start).Milliseconds(), clientIP(r)))
 	http.Redirect(w, r,
 		fmt.Sprintf("/admin/maintenance?ok=optimize_now&ms=%d", time.Since(start).Milliseconds()),
 		http.StatusSeeOther)
@@ -133,7 +133,7 @@ func (a *App) handleAdminExpireNow(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		log.Printf("admin expire-now: %v", err)
 		a.DB.Audit(ctx, "admin", "expire_now_failed", "",
-			"err="+err.Error()+" ip="+a.clientIP(r))
+			"err="+err.Error()+" ip="+clientIP(r))
 		http.Redirect(w, r, "/admin/maintenance?err=expire_failed", http.StatusSeeOther)
 		return
 	}
@@ -141,7 +141,7 @@ func (a *App) handleAdminExpireNow(w http.ResponseWriter, r *http.Request) {
 		log.Printf("admin expire-now resync: %v", rerr)
 	}
 	a.DB.Audit(ctx, "admin", "expire_now", "",
-		fmt.Sprintf("expired=%d ip=%s", len(expired), a.clientIP(r)))
+		fmt.Sprintf("expired=%d ip=%s", len(expired), clientIP(r)))
 	http.Redirect(w, r,
 		fmt.Sprintf("/admin/maintenance?ok=expire_now&expired=%d", len(expired)),
 		http.StatusSeeOther)
@@ -162,12 +162,12 @@ func (a *App) handleAdminAuditTrim(w http.ResponseWriter, r *http.Request) {
 	if err := a.DB.PurgeAuditLog(r.Context(), keep); err != nil {
 		log.Printf("admin audit-trim: %v", err)
 		a.DB.Audit(r.Context(), "admin", "audit_trim_failed", "",
-			"err="+err.Error()+" ip="+a.clientIP(r))
+			"err="+err.Error()+" ip="+clientIP(r))
 		http.Redirect(w, r, "/admin/audit?err=trim_failed", http.StatusSeeOther)
 		return
 	}
 	a.DB.Audit(r.Context(), "admin", "audit_trim", "",
-		fmt.Sprintf("keep=%d ip=%s", keep, a.clientIP(r)))
+		fmt.Sprintf("keep=%d ip=%s", keep, clientIP(r)))
 	http.Redirect(w, r, "/admin/audit?ok=audit_trim", http.StatusSeeOther)
 }
 
@@ -184,12 +184,12 @@ func (a *App) handleAdminSMSLogTrim(w http.ResponseWriter, r *http.Request) {
 	if err := a.DB.PurgeSMSLog(r.Context(), keep); err != nil {
 		log.Printf("admin sms-log-trim: %v", err)
 		a.DB.Audit(r.Context(), "admin", "sms_log_trim_failed", "",
-			"err="+err.Error()+" ip="+a.clientIP(r))
+			"err="+err.Error()+" ip="+clientIP(r))
 		http.Redirect(w, r, "/admin/sms-log?err=trim_failed", http.StatusSeeOther)
 		return
 	}
 	a.DB.Audit(r.Context(), "admin", "sms_log_trim", "",
-		fmt.Sprintf("keep=%d ip=%s", keep, a.clientIP(r)))
+		fmt.Sprintf("keep=%d ip=%s", keep, clientIP(r)))
 	http.Redirect(w, r, "/admin/sms-log?ok=sms_log_trim", http.StatusSeeOther)
 }
 
@@ -205,11 +205,11 @@ func (a *App) handleAdminWebhookLogTrim(w http.ResponseWriter, r *http.Request) 
 	if err := a.DB.PurgeWebhookDeliveries(r.Context(), keep); err != nil {
 		log.Printf("admin webhook-log-trim: %v", err)
 		a.DB.Audit(r.Context(), "admin", "webhook_log_trim_failed", "",
-			"err="+err.Error()+" ip="+a.clientIP(r))
+			"err="+err.Error()+" ip="+clientIP(r))
 		http.Redirect(w, r, "/admin/webhook-log?err=trim_failed", http.StatusSeeOther)
 		return
 	}
 	a.DB.Audit(r.Context(), "admin", "webhook_log_trim", "",
-		fmt.Sprintf("keep=%d ip=%s", keep, a.clientIP(r)))
+		fmt.Sprintf("keep=%d ip=%s", keep, clientIP(r)))
 	http.Redirect(w, r, "/admin/webhook-log?ok=webhook_log_trim", http.StatusSeeOther)
 }

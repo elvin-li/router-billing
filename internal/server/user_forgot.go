@@ -97,7 +97,7 @@ func (a *App) handleUserForgotPassword(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "CSRF token invalid — please refresh the page and retry", http.StatusForbidden)
 		return
 	}
-	if !a.pwResetIssueIPLimit.allow(a.clientIP(r)) {
+	if !a.pwResetIssueIPLimit.allow(clientIP(r)) {
 		a.renderForgot(w, r, 1, "", "rate_limited")
 		return
 	}
@@ -145,7 +145,7 @@ func (a *App) handleUserForgotPassword(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		a.DB.Audit(r.Context(), "user:"+user.Phone, "password_reset_request",
-			"", "provider="+a.SMS.Name()+" ip="+a.clientIP(r))
+			"", "provider="+a.SMS.Name()+" ip="+clientIP(r))
 	} else {
 		// Don't leak whether the phone exists — pretend we sent.
 		log.Printf("forgot-password: phone %s not found / suspended — silent success", phone)
@@ -178,7 +178,7 @@ func (a *App) handleUserForgotPasswordVerify(w http.ResponseWriter, r *http.Requ
 		a.renderForgot(w, r, 2, phone, "bad_phone")
 		return
 	}
-	if !a.pwResetVerifyIPLimit.allow(a.clientIP(r)) {
+	if !a.pwResetVerifyIPLimit.allow(clientIP(r)) {
 		a.renderForgot(w, r, 2, phone, "rate_limited")
 		return
 	}
@@ -203,8 +203,13 @@ func (a *App) handleUserForgotPasswordVerify(w http.ResponseWriter, r *http.Requ
 		return
 	}
 	if user == nil || user.Suspended {
-		// Uniform response — also matches the silent-success branch above.
-		a.renderForgot(w, r, 2, phone, "bad_code")
+		// Uniform response with the row==nil branch below. Answering
+		// "bad_code" here (as pre-v0.106) while a real-but-idle account got
+		// "expired" let anyone probe /verify with a made-up code and learn
+		// whether a phone is registered — no SMS ever sent. Both no-account
+		// and no-active-reset now say "expired", and neither path runs
+		// bcrypt, so the timing is uniform too.
+		a.renderForgot(w, r, 2, phone, "expired")
 		return
 	}
 	row, err := a.DB.GetActivePasswordReset(r.Context(), user.ID)
@@ -220,7 +225,7 @@ func (a *App) handleUserForgotPasswordVerify(w http.ResponseWriter, r *http.Requ
 
 	if bcrypt.CompareHashAndPassword([]byte(row.CodeHash), []byte(code)) != nil {
 		n, _ := a.DB.BumpPasswordResetAttempts(r.Context(), row.ID)
-		a.DB.Audit(r.Context(), "user:"+user.Phone, "password_reset_failed", "", "attempts="+itoa(n)+" ip="+a.clientIP(r))
+		a.DB.Audit(r.Context(), "user:"+user.Phone, "password_reset_failed", "", "attempts="+itoa(n)+" ip="+clientIP(r))
 		if n >= pwResetMaxAttempts {
 			_ = a.DB.DeletePasswordReset(r.Context(), row.ID)
 			a.renderForgot(w, r, 2, phone, "too_many_attempts")
@@ -248,7 +253,7 @@ func (a *App) handleUserForgotPasswordVerify(w http.ResponseWriter, r *http.Requ
 	if err := a.DB.DeleteAllTrustedDevices(r.Context(), user.ID); err != nil {
 		log.Printf("forgot-verify drop trusted devices %d: %v", user.ID, err)
 	}
-	a.DB.Audit(r.Context(), "user:"+user.Phone, "password_reset", "", "via=sms ip="+a.clientIP(r))
+	a.DB.Audit(r.Context(), "user:"+user.Phone, "password_reset", "", "via=sms ip="+clientIP(r))
 	http.Redirect(w, r, "/user/login?ok=password_reset", http.StatusSeeOther)
 }
 

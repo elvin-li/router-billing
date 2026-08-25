@@ -337,6 +337,51 @@ isolation, csvCell unit matrix + macs/audit/sms-log export round-trips
 through encoding/csv, cancel-stale malformed-JSON 400 with order
 untouched.
 
+## v0.106 — Auth hardening: TOTP one-time use, backup-code race, XFF rate-limit bypass, admin-2FA CSRF, reset enumeration
+
+Five distinct fixes across login / 2FA / forgot-password, each with
+regression tests:
+
+1. **TOTP codes are now one-time use** (RFC 6238 §5.2). A 6-digit code
+   used to stay valid for its whole ±1-step window (~90 s) — anyone
+   who saw the victim type it (shoulder-surf, phishing relay) could
+   immediately reuse it to open a second session, or to pass the
+   2FA-disable check. `totp.MatchingStep` reports the timestep a code
+   matched and the server keeps a per-secret high-water mark; a replay
+   is treated exactly like a wrong code. Applies to user login 2FA,
+   admin login 2FA, and user 2FA disable.
+
+2. **Backup-code double spend under concurrency.**
+   `MarkBackupCodeUsed` never reported whether the conditional UPDATE
+   actually landed, so two logins racing on the same code could both
+   read it as unused and both pass. It now returns a consumed flag and
+   `verifyAndConsumeBackupCode` requires it — exactly one racer wins.
+
+3. **X-Forwarded-For no longer defeats per-IP rate limits.**
+   `clientIP` trusted the FIRST XFF entry from anyone; a direct client
+   could stamp a fresh fake IP per request and walk through every
+   per-IP limiter (login, register, forgot-password issue/verify) and
+   forge the ip= recorded in audit rows. The header is now ignored
+   unless the request arrives from `security.trusted_proxies` (new
+   config, single IPs or CIDRs, default empty = never trust), and when
+   trusted we take the LAST entry — the one the proxy appended — never
+   client-supplied leading entries. Deployments behind nginx/Caddy
+   should list the proxy address to keep per-client keying.
+
+4. **/admin/login/2fa POST now CSRF-checked** like its user-side
+   counterpart (checked before the attempt counter, so a cross-site
+   form can't silently burn the 5-attempt budget and lock the admin
+   out of a pending login). Template carries the `_csrf` field.
+
+5. **Forgot-password verify no longer enumerates accounts.** Probing
+   `/user/forgot-password/verify` with a made-up code answered
+   验证码错误 for unregistered phones but 已过期 for registered ones —
+   a registration oracle that never sent an SMS. Both now answer
+   已过期, and neither path runs bcrypt so timing is uniform as well.
+   Related: `/user/login` now burns a dummy bcrypt comparison on
+   unknown phones so response timing doesn't reveal registration
+   either.
+
 ## v0.105 — Password change / reset now kills other sessions + trusted devices
 
 Changing password from `/user/me` previously left every other

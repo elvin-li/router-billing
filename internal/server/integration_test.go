@@ -617,15 +617,13 @@ func TestSecureCookieSetWhenBehindTLS(t *testing.T) {
 func TestAdminLoginRateLimitByUsername(t *testing.T) {
 	app := setupTestApp(t)
 	app.adminLoginByUser = newRateLimiter(3, time.Hour)
-	// This test rotates X-Forwarded-For to isolate the per-username
-	// limiter from the per-IP one — that only works when the app is
-	// configured to trust proxy headers (v0.105).
-	app.Cfg.Security.TrustProxyHeaders = true
 	h := app.Routes()
 
 	// 3 attempts with wrong password but the SAME username are allowed
-	// (failures, but not rate-limited). Different X-Forwarded-For each time
-	// to defeat the IP-keyed limiter and isolate the per-username one.
+	// (failures, but not rate-limited). X-Forwarded-For is ignored without
+	// trusted_proxies (v0.106) so all four attempts share one IP key — the
+	// default IP budget (8/5min) stays below its cap and the 4th failure
+	// can only come from the per-username limiter.
 	for i := 0; i < 3; i++ {
 		form := url.Values{"username": {"admin"}, "password": {"bad"}}
 		req := httptest.NewRequest("POST", "/admin/login", strings.NewReader(form.Encode()))
@@ -758,7 +756,9 @@ func TestAdminLogin2FAFullFlow(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	res, _ = do(t, h, "POST", "/admin/login/2fa", url.Values{"code": {code}}, jar)
+	resetTOTPReplay() // other tests share this well-known secret
+	res, _ = do(t, h, "POST", "/admin/login/2fa",
+		url.Values{"code": {code}, "_csrf": {jar[csrfCookieName]}}, jar)
 	if res.StatusCode != 303 || !strings.Contains(res.Header.Get("Location"), "/admin/dashboard") {
 		t.Fatalf("2fa stage: status=%d loc=%s", res.StatusCode, res.Header.Get("Location"))
 	}
@@ -790,7 +790,8 @@ func TestAdminLogin2FAWrongCodeRejected(t *testing.T) {
 		url.Values{"username": {"admin"}, "password": {"admin-pw"}}, nil)
 	jar := cookieJar(res)
 
-	res, body := do(t, h, "POST", "/admin/login/2fa", url.Values{"code": {"000000"}}, jar)
+	res, body := do(t, h, "POST", "/admin/login/2fa",
+		url.Values{"code": {"000000"}, "_csrf": {jar[csrfCookieName]}}, jar)
 	if res.StatusCode != 200 {
 		t.Fatalf("wrong code: status=%d", res.StatusCode)
 	}
@@ -813,18 +814,50 @@ func TestAdminLogin2FALocksAfterFiveAttempts(t *testing.T) {
 
 	// 5 wrong attempts → still inline error (status 200).
 	for i := 0; i < 5; i++ {
-		res, _ = do(t, h, "POST", "/admin/login/2fa", url.Values{"code": {"000000"}}, jar)
+		res, _ = do(t, h, "POST", "/admin/login/2fa",
+			url.Values{"code": {"000000"}, "_csrf": {jar[csrfCookieName]}}, jar)
 		if res.StatusCode != 200 {
 			t.Errorf("attempt %d: status=%d (want 200 inline)", i, res.StatusCode)
 		}
 	}
 	// 6th: pending session killed; redirect to /admin/login.
-	res, _ = do(t, h, "POST", "/admin/login/2fa", url.Values{"code": {"000000"}}, jar)
+	res, _ = do(t, h, "POST", "/admin/login/2fa",
+		url.Values{"code": {"000000"}, "_csrf": {jar[csrfCookieName]}}, jar)
 	if res.StatusCode != 303 {
 		t.Fatalf("6th attempt: status=%d", res.StatusCode)
 	}
 	if !strings.Contains(res.Header.Get("Location"), "2fa_locked") {
 		t.Errorf("expected 2fa_locked redirect; got %s", res.Header.Get("Location"))
+	}
+}
+
+func TestAdminLogin2FAPostRequiresCSRF(t *testing.T) {
+	app := setupTestApp(t)
+	app.Cfg.Admin.TOTPSecret = "JBSWY3DPEHPK3PXP"
+	h := app.Routes()
+
+	res, _ := do(t, h, "POST", "/admin/login",
+		url.Values{"username": {"admin"}, "password": {"admin-pw"}}, nil)
+	jar := cookieJar(res)
+
+	// A POST without the _csrf value (the shape a cross-site form would
+	// have) must be rejected outright — and must NOT burn one of the five
+	// 2FA attempts.
+	res2, _ := do(t, h, "POST", "/admin/login/2fa", url.Values{"code": {"000000"}}, jar)
+	if res2.StatusCode != 403 {
+		t.Fatalf("missing csrf: status=%d, want 403", res2.StatusCode)
+	}
+
+	// The pending session is still alive and a proper token still works.
+	code, err := totp.Code("JBSWY3DPEHPK3PXP", time.Now().Unix())
+	if err != nil {
+		t.Fatal(err)
+	}
+	resetTOTPReplay() // TestAdminLogin2FAFullFlow shares this secret
+	res3, _ := do(t, h, "POST", "/admin/login/2fa",
+		url.Values{"code": {code}, "_csrf": {jar[csrfCookieName]}}, jar)
+	if res3.StatusCode != 303 || cookieJar(res3)[adminCookieName] == "" {
+		t.Errorf("valid csrf + code should log in; status=%d", res3.StatusCode)
 	}
 }
 

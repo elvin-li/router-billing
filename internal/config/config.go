@@ -81,18 +81,15 @@ type Security struct {
 	// wire up cron. 0 (default) = disabled. Clamped to [1, 720] (1h .. 30d).
 	AutoCancelStaleOrderHours int `yaml:"auto_cancel_stale_order_hours,omitempty"`
 
-	// TrustProxyHeaders: when true, the server trusts the X-Forwarded-For
-	// header for client-IP attribution (rate limiting + audit logs). Only
-	// enable this when a reverse proxy you control sits in front of the
-	// service AND that proxy overwrites (not appends to) X-Forwarded-For.
-	//
-	// Default false: the typical deployment is the binary listening
-	// directly on the router, where every LAN client talks straight to
-	// us — there, X-Forwarded-For is attacker-controlled input, and
-	// trusting it lets a client rotate the header to bypass every
-	// IP-keyed rate limit (voucher brute force, login floods, payment
-	// intent floods) and forge audit-log IPs.
-	TrustProxyHeaders bool `yaml:"trust_proxy_headers,omitempty"`
+	// TrustedProxies lists reverse-proxy addresses (single IPs or CIDRs,
+	// e.g. "127.0.0.1" / "10.0.0.0/8") whose X-Forwarded-For header may be
+	// believed for the client IP. Requests arriving from anywhere else
+	// have the header ignored — otherwise any direct client could rotate
+	// a fake X-Forwarded-For to sidestep every per-IP rate limit and to
+	// forge the IPs recorded in the audit log. Empty (default) = never
+	// trust the header; deployments behind nginx/Caddy should list the
+	// proxy here to keep per-client rate-limit keying.
+	TrustedProxies []string `yaml:"trusted_proxies,omitempty"`
 }
 
 // AutoCancelStaleOrders returns the clamped hours window or 0 (disabled).

@@ -30,7 +30,7 @@ func openProbeDB(path string) (*sql.DB, error) {
 // `PRAGMA wal_checkpoint(TRUNCATE)` flushes everything back into the main file
 // so the byte copy is self-consistent.
 func (a *App) handleAdminBackup(w http.ResponseWriter, r *http.Request) {
-	a.streamBackup(w, r, "admin", a.clientIP(r))
+	a.streamBackup(w, r, "admin", clientIP(r))
 }
 
 // GET /api/admin/backup  Bearer <write-token>
@@ -55,7 +55,7 @@ func (a *App) handleAPIBackup(w http.ResponseWriter, r *http.Request, actor stri
 		writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "GET only"})
 		return
 	}
-	a.streamBackup(w, r, actor, a.clientIP(r))
+	a.streamBackup(w, r, actor, clientIP(r))
 }
 
 // streamBackup is the shared body — checkpoint + stream + audit row.

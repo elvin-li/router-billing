@@ -1384,12 +1384,19 @@ func (d *DB) UnusedBackupCodes(ctx context.Context, userID int64) ([]models.Back
 	return out, rows.Err()
 }
 
-// MarkBackupCodeUsed flips used_at on a specific row. Idempotent.
-func (d *DB) MarkBackupCodeUsed(ctx context.Context, id int64) error {
-	_, err := d.conn.ExecContext(ctx,
+// MarkBackupCodeUsed flips used_at on a specific row. Returns whether THIS
+// call consumed the code — false means someone else already used it (e.g.
+// two concurrent logins racing on the same code). Callers enforcing
+// single-use must require consumed=true, not just err==nil.
+func (d *DB) MarkBackupCodeUsed(ctx context.Context, id int64) (bool, error) {
+	res, err := d.conn.ExecContext(ctx,
 		`UPDATE user_backup_codes SET used_at = ? WHERE id = ? AND used_at IS NULL`,
 		time.Now().UTC(), id)
-	return err
+	if err != nil {
+		return false, err
+	}
+	n, err := res.RowsAffected()
+	return n > 0, err
 }
 
 // ClearBackupCodes wipes every row for userID. Called from ClearUserTOTP so

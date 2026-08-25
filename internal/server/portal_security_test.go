@@ -16,27 +16,8 @@ import (
 )
 
 // ---------- clientIP / X-Forwarded-For trust ----------
-
-func TestClientIPIgnoresXFFByDefault(t *testing.T) {
-	app := setupTestApp(t)
-
-	req := httptest.NewRequest("GET", "/portal", nil)
-	req.RemoteAddr = "192.0.2.50:12345"
-	req.Header.Set("X-Forwarded-For", "203.0.113.99")
-	if got := app.clientIP(req); got != "192.0.2.50" {
-		t.Errorf("default config must use RemoteAddr; got %q", got)
-	}
-
-	app.Cfg.Security.TrustProxyHeaders = true
-	if got := app.clientIP(req); got != "203.0.113.99" {
-		t.Errorf("trusted-proxy config must use XFF; got %q", got)
-	}
-	// First hop of a multi-entry header.
-	req.Header.Set("X-Forwarded-For", "198.51.100.7, 10.0.0.1")
-	if got := app.clientIP(req); got != "198.51.100.7" {
-		t.Errorf("XFF first hop; got %q", got)
-	}
-}
+// (Direct clientIP/realIPMiddleware semantics are covered in security_test.go;
+// here we assert the end-to-end rate-limit property through the full router.)
 
 // A client rotating X-Forwarded-For must NOT get a fresh rate-limit
 // bucket per request. Pre-v0.105 the header was trusted unconditionally,

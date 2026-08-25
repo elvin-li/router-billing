@@ -116,7 +116,7 @@ func (a *App) handleUserTrustedDeviceRevoke(w http.ResponseWriter, r *http.Reque
 		return
 	}
 	a.DB.Audit(r.Context(), "user:"+user.Phone, "2fa_trusted_device_revoked",
-		strconv.FormatInt(deviceID, 10), "ip="+a.clientIP(r))
+		strconv.FormatInt(deviceID, 10), "ip="+clientIP(r))
 	http.Redirect(w, r, "/user/2fa?ok=device_revoked", http.StatusSeeOther)
 }
 
@@ -140,7 +140,7 @@ func (a *App) handleUserTrustedDeviceRevokeAll(w http.ResponseWriter, r *http.Re
 	// Also clear the cookie on this browser so its next login challenges.
 	clearTrustedCookie(w, r)
 	a.DB.Audit(r.Context(), "user:"+user.Phone, "2fa_trusted_devices_revoked_all",
-		"", "ip="+a.clientIP(r))
+		"", "ip="+clientIP(r))
 	http.Redirect(w, r, "/user/2fa?ok=devices_revoked", http.StatusSeeOther)
 }
 
