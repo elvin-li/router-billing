@@ -10,6 +10,7 @@ import (
 	"log"
 	"net/http"
 	"net/url"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -215,10 +216,10 @@ func (a *App) requireAdmin(h http.HandlerFunc) http.HandlerFunc {
 // admins can spot work-needed pages without clicking through.
 func (a *App) adminCtx(r *http.Request, page string, extra map[string]any) map[string]any {
 	// Sidebar attention badges. Best-effort — if the DB query errors, the
-	// badge silently disappears rather than 500-ing the page. The counts
-	// are already cheap (handled by Attention()) so this isn't a perf hit
-	// per render.
-	att, _ := a.DB.Attention(r.Context())
+	// badge silently disappears rather than 500-ing the page. Served from
+	// the short-TTL cache so every page render doesn't refire the 6-COUNT
+	// query set on the router's single SQLite connection.
+	att := a.attention(r.Context())
 
 	out := map[string]any{
 		"Version": a.Version,
@@ -284,7 +285,7 @@ func (a *App) handleAdminMACs(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		log.Printf("stats: %v", err)
 	}
-	att, _ := a.DB.Attention(r.Context())
+	att := a.attention(r.Context())
 	planSales, _ := a.DB.PlanSalesSince(r.Context(), 30)
 	a.render(w, "admin_macs.html", a.adminCtx(r, "macs", map[string]any{
 		"MACs":      macs,
@@ -409,12 +410,9 @@ func sortDevices(d []deviceView) {
 			return 3
 		}
 	}
-	// insertion sort — small lists, stable
-	for i := 1; i < len(d); i++ {
-		for j := i; j > 0 && rank(d[j]) < rank(d[j-1]); j-- {
-			d[j], d[j-1] = d[j-1], d[j]
-		}
-	}
+	// Stable so devices within the same rank keep their sighting order
+	// (most-recently-seen first, as built by the caller).
+	sort.SliceStable(d, func(i, j int) bool { return rank(d[i]) < rank(d[j]) })
 }
 
 // GET /admin/users/detail?id=<id>
@@ -487,7 +485,7 @@ func (a *App) handleAdminUserDetail(w http.ResponseWriter, r *http.Request) {
 func (a *App) handleAdminDashboard(w http.ResponseWriter, r *http.Request) {
 	stats, _ := a.DB.Stats(r.Context())
 	snap, _ := a.DB.DashboardSnapshot(r.Context())
-	att, _ := a.DB.Attention(r.Context())
+	att := a.attention(r.Context())
 	planSales, _ := a.DB.PlanSalesSince(r.Context(), 30)
 	recent, _ := a.DB.SearchAudit(r.Context(), db.AuditFilter{Limit: 10})
 

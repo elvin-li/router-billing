@@ -642,7 +642,7 @@ func (a *App) handleAPIDashboard(w http.ResponseWriter, r *http.Request, _ strin
 		return
 	}
 	snap, _ := a.DB.DashboardSnapshot(r.Context())
-	att, _ := a.DB.Attention(r.Context())
+	att := a.attention(r.Context())
 	writeJSON(w, http.StatusOK, map[string]any{
 		"snapshot": map[string]int{
 			"today_revenue_cents":        snap.TodayRevenueCents,

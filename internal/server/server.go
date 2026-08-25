@@ -64,6 +64,11 @@ type App struct {
 	flashMu sync.Mutex
 	flashes map[string]flashEntry
 
+	// Short-TTL cache for the attention counters (see attention_cache.go).
+	attMu  sync.Mutex
+	attVal db.AttentionCounts
+	attAt  time.Time
+
 	// trustedProxies is parsed once from config security.trusted_proxies.
 	// clientIP only honors X-Forwarded-For when the TCP peer is in here.
 	trustedProxies []*net.IPNet
