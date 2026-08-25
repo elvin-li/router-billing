@@ -1,5 +1,103 @@
 # Changelog
 
+## v0.107 — Firewall/portal correctness: 22.03 apply failure, walled-garden 25h death, List drops a MAC, paid-zone router exposure
+
+Correctness pass over the MAC whitelist, the captive-portal redirect
+and the paid/free SSID split. Everything below was verified against a
+live kernel (nft 1.0.9, the OpenWrt 23.05 userspace).
+
+A. (HIGH) firewall-billing.sh failed WHOLESALE on OpenWrt 22.03. The
+`tcp dport 443 reject` sat in the nat/prerouting chain, but kernels
+before 5.11 only allow the reject statement in input/forward/output
+(nft_reject validate; prerouting was added in commit 117ca1f8920c) —
+and 22.03 ships kernel 5.10. The kernel refuses the whole `nft -f`
+transaction at commit time, so apply produced ZERO billing rules and
+every Paid_WiFi device was online for free — the exact failure mode
+v0.104 fixed for the `fwd` keyword, reintroduced one hook down.
+(`nft -c`/"verified parsing" can't catch it: the EOPNOTSUPP comes from
+the kernel at commit.) The 443 reject now lives in the forward chain
+(valid on every kernel this project supports) as `reject with tcp
+reset`, which is also the correct signal for captive-portal probes.
+HTTP redirect stays in prerouting; behavior for clients is unchanged.
+
+B. (HIGH) The walled garden silently died after 25 hours of daemon
+uptime. Elements carry a 25h timeout, but the kernel does NOT refresh
+an element's expiry when it is re-added — and the resolver only pushed
+IPs it hadn't seen before. Stable payment-server IPs (WeChat/Alipay
+resolve very consistently) therefore expired out of the set and were
+never re-added: unpaid devices could no longer reach the payment
+servers, i.e. nobody could pay, until the daemon restarted. The
+resolver now pushes the FULL resolved list every refresh cycle and the
+new Manager.SyncWalledGardenIPs rebuilds the set atomically (one
+`nft -f -` transaction) with fresh 25h timeouts. IPs are validated as
+plain IPv4 before they enter the nft script — DNS answers are
+attacker-influenced input. A total DNS outage leaves the set alone
+(drains via timeout) instead of wiping it.
+
+C. (HIGH) nftables List() dropped the first MAC of every listing (the
+same bug PR #5 fixed on its branch, independently confirmed here
+against real nft output). The text parser cut from the TABLE's opening
+brace, split on commas and truncated tokens at the first space, so the
+first element — glued to "set mac_paid { … elements = {" — was always
+discarded. Any consumer reconciling DB↔firewall from List would
+conclude that MAC was offline. List now parses `nft -j` JSON with the
+same parser Counters uses.
+
+D. (MED) Sync (nft backend) was flush-then-add as two separate nft
+processes: every resync briefly exposed an EMPTY whitelist (paid users
+redirected to the portal mid-session), and an error between the two
+calls left it empty until the next resync. Both operations are now one
+`nft -f -` netlink batch — readers see old or new membership, never
+the gap, and a failed transaction keeps the old set. The ipset backend
+had the same flaw (`ipset restore` replays lines, it is not a
+transaction, despite the comment): it now stages into `mac_paid_swp`
+and uses `swap`, which IS atomic; the live set is never flushed.
+
+E. (MED, security) The fw4 paid zone was created with input=ACCEPT,
+exposing every service on the router itself — dropbear/SSH, LuCI,
+anything listening — to unpaid strangers on the open SSID. The
+explicit Allow-DHCP/DNS/Portal rules that have always been generated
+alongside it only make sense with input=REJECT, which is what the zone
+now gets; the three allows keep DHCP, DNS and the portal working.
+Re-running the uci-defaults script (which an ipk upgrade does
+automatically) migrates existing ACCEPT zones; manual installs can run
+`sh /etc/uci-defaults/99-router-billing-ssid` or flip
+`uci set firewall.@zone[N].input='REJECT'` by hand.
+
+F. (MED) opkg upgrades opened a free-internet window: prerm runs on
+upgrade too (remove-then-install) and purged the whole billing table,
+so redirect/drop rules were gone while the new package unpacked. prerm
+now skips the purge when opkg signals PKG_UPGRADE=1; real removals
+still purge.
+
+G. setup-secure-ssid.sh's "SSID exists, update the key" path had never
+worked: `awk -F'[].[]' {print $2}` extracts the literal "@wifi-iface",
+not the section index, so the subsequent `uci set` always errored out
+under `set -e`. Now extracted with an anchored sed capture (the
+uninstall.sh how-to had the same field bug, plus it deleted sections
+in ascending index order — deletions shift later indices — now
+descending). The key is also recorded into wifi-keys.txt like
+install.sh does.
+
+H. ipk installs brought the Free SSID up OPEN: only install.sh
+generated FREE_KEY, but the uci-defaults script runs with an empty
+environment from postinst / first boot. It now generates the key
+itself when it is about to create the SSID without one, and records it
+in /etc/router-billing/wifi-keys.txt (0600), same as install.sh.
+
+I. Hardening: paid SSIDs get AP client isolation (isolate=1 — the open
+paid network is all strangers; the free/friends SSID stays isolate=0);
+config.yaml is installed 0600 instead of 0644 (it holds the admin
+bcrypt hash and WeChat/Alipay merchant keys) by both install.sh and
+the ipk build, and install.sh tightens existing installs.
+
+New regression tests: real nft-1.0.9 JSON List output keeps the first
+MAC; sync payloads are single transactions (flush-only when empty);
+walled-garden payload validates/rejects IPv6, garbage and nft-script
+injection; the resolver re-pushes the full list every cycle and leaves
+the set alone on DNS outage; the ipset restore script stages+swaps and
+never touches the live set directly.
+
 ## v0.106 — Payment hardening: refund-replay resurrection, amount cross-check, lost grants
 
 Money/security pass over the payment finalize path.
