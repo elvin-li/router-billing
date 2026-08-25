@@ -2050,6 +2050,26 @@ func (d *DB) RedeemVoucher(ctx context.Context, code, mac string, userID *int64)
 	return v, nil
 }
 
+// UnredeemVoucher is the compensation for a redemption whose follow-up MAC
+// grant never became durable: it puts the voucher back to unused so the
+// customer can retry instead of losing the code. Guarded by code + the MAC
+// the caller just redeemed it for, so it can only undo that specific
+// redemption — it can never clear an older, legitimate redemption by a
+// different device. Mirrors RevertOrderToPending on the pay path.
+func (d *DB) UnredeemVoucher(ctx context.Context, code, mac string) error {
+	res, err := d.conn.ExecContext(ctx,
+		`UPDATE vouchers SET redeemed_at = NULL, redeemed_by_mac = NULL, redeemed_user_id = NULL
+		 WHERE code = ? AND redeemed_by_mac = ? AND redeemed_at IS NOT NULL`,
+		code, mac)
+	if err != nil {
+		return err
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return fmt.Errorf("voucher %s has no redemption by %s to undo", code, mac)
+	}
+	return nil
+}
+
 // Voucher errors.
 var (
 	ErrVoucherNotFound = errors.New("充值码不存在")

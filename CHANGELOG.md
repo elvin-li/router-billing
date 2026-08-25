@@ -1,6 +1,8 @@
 # Changelog
 
-## v0.109 — User logout CSRF hardening
+## v0.109 — User logout CSRF + payment/voucher correctness
+
+### User logout CSRF hardening
 
 Deep-review follow-up closing a CSRF-logout vector that the v0.108 admin
 logout hardening left open on the user side. No product features.
@@ -16,6 +18,45 @@ logged-in user out. This is the exact vector v0.108 fixed for
 POST-only with a CSRF token (GET bounces to `/user/me` with the session
 intact), and the account page renders logout as a POST form carrying the
 CSRF field.
+
+### Payment/voucher correctness: redeem burn compensation, refund/finalize serialization
+
+Deep pass over the money paths (orders, refunds, voucher redemption).
+Two real bugs, both of the "value consumed but not delivered" family
+that v0.106 already closed on the pay-finalize path.
+
+A. (HIGH) A redeemed voucher could be burned with nothing granted.
+`POST /redeem` consumed the code (`RedeemVoucher`) and then applied the
+days via `MACSvc.Extend` — which (a) ran on the request context, so a
+browser disconnect between "consumed" and "granted" aborted the grant,
+and (b) failed hard on a firewall-only error even though the DB grant
+had committed. Either way the customer's code stayed consumed:
+"授权失败请联系管理员", no automatic recovery — the exact hole the pay
+path fixed in v0.106 with `RevertOrderToPending`, missed on redeem.
+Now: the grant runs under `context.WithoutCancel`, uses the new
+`GrantFromVoucher` (same contract as `GrantFromOrder`: error only when
+nothing durable happened; firewall failures log + resync but don't
+fail a durable grant), and on a real grant failure the new
+`UnredeemVoucher` compensation puts the code back to unused (guarded
+by code + redeeming MAC so it can only undo that specific redemption)
+and tells the user to retry.
+
+B. Refunds could interleave with payment finalization. `finalizeOrder`
+serializes on `pollMu`, but both refund handlers (admin UI and the
+programmatic `/api/admin/orders/refund` meant for chargeback
+automation) called `MarkOrderRefunded` directly. A refund landing
+between `MarkOrderPaid` and `GrantFromOrder` saw status=paid, rolled
+back days that had not been granted yet, and then the grant landed
+anyway — a refunded order that kept its access (and, on the
+grant-failure branch, a `RevertOrderToPending` that could no longer
+fire). All refunds now go through `App.refundOrder`, which takes
+`pollMu` so a refund waits for any in-flight finalize and only rolls
+back a fully-granted order.
+
+Regression tests: firewall-down redeem still succeeds (DB is source of
+truth), grant-blocked redeem un-redeems the code and the retry works
+(simulated with a SQLite trigger on `macs`), `UnredeemVoucher` guard
+semantics, and refund blocking on `pollMu` until finalize completes.
 
 ## v0.108 — Background-job reliability follow-up: hung-webhook backstop, fsync'd backups
 

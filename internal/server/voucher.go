@@ -1,6 +1,7 @@
 package server
 
 import (
+	"context"
 	"encoding/csv"
 	"errors"
 	"fmt"
@@ -409,18 +410,34 @@ func (a *App) handleRedeem(w http.ResponseWriter, r *http.Request) {
 		http.Redirect(w, r, "/redeem?code="+url.QueryEscape(codeRaw)+"&err="+url.QueryEscape(redeemErrLabel(err)), http.StatusSeeOther)
 		return
 	}
-	// Apply the time to the MAC.
-	m, err := a.MACSvc.Extend(r.Context(), mac, "voucher:"+v.Batch, v.Days, userID)
+	// The voucher is consumed from here on — this is money in flight, same
+	// as a paid order inside finalizeOrder. Don't let a browser disconnect
+	// abort between "consumed" and "granted" (r.Context() cancels on
+	// disconnect; pre-v0.109 that burned the code with nothing granted).
+	ctx := context.WithoutCancel(r.Context())
+	// Apply the time to the MAC. GrantFromVoucher errors ONLY when the DB
+	// grant failed (nothing durable) — a firewall-only failure is resynced
+	// internally, not surfaced, so a redeemed code is never reported as a
+	// failure after days were actually granted.
+	m, err := a.MACSvc.GrantFromVoucher(ctx, mac, "voucher:"+v.Batch, v.Days, userID)
 	if err != nil {
-		log.Printf("redeem extend %s: %v", mac, err)
-		http.Redirect(w, r, "/redeem?code="+url.QueryEscape(codeRaw)+"&err="+url.QueryEscape("授权失败请联系管理员"), http.StatusSeeOther)
+		log.Printf("redeem grant %s (voucher %s): %v", mac, code, err)
+		// Compensate: put the voucher back to unused so the customer can
+		// retry instead of losing the code (pay path's RevertOrderToPending
+		// equivalent).
+		if uerr := a.DB.UnredeemVoucher(ctx, code, mac); uerr != nil {
+			log.Printf("CRITICAL: voucher %s consumed but grant failed (%v) and un-redeem failed (%v) — needs manual grant", code, err, uerr)
+			http.Redirect(w, r, "/redeem?code="+url.QueryEscape(codeRaw)+"&err="+url.QueryEscape("授权失败请联系管理员"), http.StatusSeeOther)
+			return
+		}
+		http.Redirect(w, r, "/redeem?code="+url.QueryEscape(codeRaw)+"&err="+url.QueryEscape("授权失败，充值码未消耗，请重试"), http.StatusSeeOther)
 		return
 	}
 	actor := "user-anon"
 	if userID != nil {
 		actor = fmt.Sprintf("user:%d", *userID)
 	}
-	a.DB.Audit(r.Context(), actor, "redeem", mac, "voucher="+code)
+	a.DB.Audit(ctx, actor, "redeem", mac, "voucher="+code)
 	uid := int64(0)
 	if userID != nil {
 		uid = *userID

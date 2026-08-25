@@ -412,6 +412,19 @@ func (a *App) finalizeOrder(ctx context.Context, n *pay.PaidNotice) error {
 	return nil
 }
 
+// refundOrder is the single entry point for marking an order refunded. It
+// takes pollMu so a refund serializes with finalizeOrder: without the lock,
+// a refund (especially via the programmatic /api/admin/orders/refund used
+// by chargeback automation) could interleave between MarkOrderPaid and
+// GrantFromOrder inside finalize — it would see status=paid, roll back days
+// that had not been granted yet, and then the grant would land anyway,
+// leaving a refunded order with its access intact.
+func (a *App) refundOrder(ctx context.Context, orderNo, reason string) (*models.MAC, error) {
+	a.pollMu.Lock()
+	defer a.pollMu.Unlock()
+	return a.DB.MarkOrderRefunded(ctx, orderNo, reason)
+}
+
 // newOrderNo returns "B" + UTC timestamp + 64 bits of crypto-random hex
 // (31 chars total, within WeChat's 32-char out_trade_no cap). The order_no
 // doubles as the bearer token for /api/pay/status, /api/pay/wait and
