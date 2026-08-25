@@ -337,6 +337,22 @@ func (a *App) startUserSession(w http.ResponseWriter, r *http.Request, u *models
 }
 
 func (a *App) handleUserLogout(w http.ResponseWriter, r *http.Request) {
+	// POST-only: SameSite=Lax cookies DO ride along on top-level cross-site
+	// GET navigations (and on speculative link prefetches some browsers
+	// issue), so a hostile <a href=".../user/logout"> — or an eager
+	// prefetcher — could sign the user out. GET now bounces back to the
+	// account page with the session intact. Mirrors the /admin/logout
+	// hardening; the user side was left as a plain GET link.
+	if r.Method != http.MethodPost {
+		http.Redirect(w, r, "/user/me", http.StatusSeeOther)
+		return
+	}
+	// This route sits outside requireUser (logging out with an expired
+	// session must still clear the cookie), so check CSRF here directly.
+	if !verifyCSRF(r) {
+		http.Error(w, "CSRF token invalid — please refresh the page and retry", http.StatusForbidden)
+		return
+	}
 	if c, _ := r.Cookie(userCookieName); c != nil {
 		_ = a.DB.DeleteSession(r.Context(), c.Value)
 	}

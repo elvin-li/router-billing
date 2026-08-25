@@ -1,5 +1,22 @@
 # Changelog
 
+## v0.109 — User logout CSRF hardening
+
+Deep-review follow-up closing a CSRF-logout vector that the v0.108 admin
+logout hardening left open on the user side. No product features.
+
+A. (MEDIUM) `/user/logout` ended the session on ANY method — including a
+plain GET — and performed no CSRF check, and `user_me.html` triggered it
+via a bare `<a href="/user/logout">` link. Because our session cookies
+are SameSite=Lax, cookies ride along on top-level cross-site GET
+navigations and on the speculative link-prefetches some browsers issue,
+so a hostile `<a>`/`<img>` or an eager prefetcher could silently sign a
+logged-in user out. This is the exact vector v0.108 fixed for
+`/admin/logout`; the user path had been missed. `/user/logout` is now
+POST-only with a CSRF token (GET bounces to `/user/me` with the session
+intact), and the account page renders logout as a POST form carrying the
+CSRF field.
+
 ## v0.108 — Background-job reliability follow-up: hung-webhook backstop, fsync'd backups
 
 Deep-review follow-up to the v0.107 jobs merge, closing residual gaps
