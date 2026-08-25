@@ -75,3 +75,7 @@ jobs:
         with:
           version: v1.61.0
           args: --timeout=5m
+          # Default verify=true downloads a JSON schema from golangci-lint.run
+          # and fails the job on a 5xx from that host (seen as 503 on this PR)
+          # even when the linters themselves would pass.
+          verify: false
