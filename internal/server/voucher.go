@@ -297,11 +297,11 @@ func (a *App) handleAdminVoucherBatchRevoke(w http.ResponseWriter, r *http.Reque
 // downloaded a previous export and filtered "status=redeemed" in Excel
 // can now ask for that directly. The filter happens in Go (since the
 // DB doesn't store the derived status column) — list size is capped
-// at 1000 by the underlying ListVouchers so the in-memory pass is fine.
+// at 10000 by the underlying ListVouchers so the in-memory pass is fine.
 func (a *App) handleAdminVouchersExport(w http.ResponseWriter, r *http.Request) {
 	batch := r.URL.Query().Get("batch")
 	wantStatus := strings.TrimSpace(r.URL.Query().Get("status"))
-	list, err := a.DB.ListVouchers(r.Context(), batch, 1000)
+	list, err := a.DB.ListVouchers(r.Context(), batch, 10000)
 	if err != nil {
 		http.Error(w, "db", http.StatusInternalServerError)
 		return

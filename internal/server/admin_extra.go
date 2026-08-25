@@ -547,7 +547,7 @@ func (a *App) handleAdminExportOrders(w http.ResponseWriter, r *http.Request) {
 		orders, err = a.DB.ListOrders(r.Context(), 5000)
 	} else {
 		orders, err = a.DB.SearchOrdersFiltered(r.Context(), db.OrderFilter{
-			Q: q, Status: status, Since: since, Until: until, UserID: userID, Limit: 1000,
+			Q: q, Status: status, Since: since, Until: until, UserID: userID, Limit: 5000,
 		})
 	}
 	if err != nil {

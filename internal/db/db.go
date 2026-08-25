@@ -156,11 +156,10 @@ func escapeLike(s string) string {
 
 // SearchMACs returns MACs where MAC or label contains q (case-insensitive
 // LIKE). When q is empty, behaves like ListMACs. status (if non-empty)
-// restricts to that exact status. limit defaults to 200, capped at 1000.
+// restricts to that exact status. limit defaults to 200, capped at
+// maxQueryLimit.
 func (d *DB) SearchMACs(ctx context.Context, q, status string, limit int) ([]models.MAC, error) {
-	if limit <= 0 || limit > 1000 {
-		limit = 200
-	}
+	limit = clampLimit(limit, 200)
 	var sb strings.Builder
 	sb.WriteString(`SELECT ` + macCols + ` FROM macs WHERE 1=1`)
 	args := []any{}
@@ -545,10 +544,28 @@ func (d *DB) GetOrder(ctx context.Context, orderNo string) (*models.Order, error
 	return o, nil
 }
 
-func (d *DB) ListOrders(ctx context.Context, limit int) ([]models.Order, error) {
-	if limit <= 0 || limit > 500 {
-		limit = 100
+// maxQueryLimit is the hard ceiling any caller-supplied row limit is
+// clamped to. It matches the audit/sms/webhook CSV exports' documented
+// 10000-row compliance-dump cap. Callers asking for more than the old
+// small caps (500/1000) used to be silently RESET to the tiny default —
+// the orders/users/MACs CSV exports passed 5000 and got 100/200 rows
+// back, quietly truncating the very files operators keep as records.
+const maxQueryLimit = 10000
+
+// clampLimit applies the shared limit policy: non-positive → def,
+// anything above maxQueryLimit → maxQueryLimit, otherwise as requested.
+func clampLimit(limit, def int) int {
+	if limit <= 0 {
+		return def
 	}
+	if limit > maxQueryLimit {
+		return maxQueryLimit
+	}
+	return limit
+}
+
+func (d *DB) ListOrders(ctx context.Context, limit int) ([]models.Order, error) {
+	limit = clampLimit(limit, 100)
 	return d.queryOrders(ctx, `SELECT `+orderCols+` FROM orders ORDER BY created_at DESC LIMIT ?`, limit)
 }
 
@@ -582,7 +599,7 @@ type OrderFilter struct {
 	Since  string // YYYY-MM-DD UTC; only orders created on/after this date
 	Until  string // YYYY-MM-DD UTC; only orders created on/before this date
 	UserID int64  // 0 = no filter; non-zero filters to exactly that user_id
-	Limit  int    // default 200, cap 1000
+	Limit  int    // default 200, cap maxQueryLimit
 }
 
 // SearchOrders is the legacy 3-arg shim — kept so existing callers don't
@@ -595,10 +612,7 @@ func (d *DB) SearchOrders(ctx context.Context, q, status string, limit int) ([]m
 // status, and a created_at date range. Date strings use YYYY-MM-DD shape
 // (matches the HTML date-input format) interpreted in UTC.
 func (d *DB) SearchOrdersFiltered(ctx context.Context, f OrderFilter) ([]models.Order, error) {
-	limit := f.Limit
-	if limit <= 0 || limit > 1000 {
-		limit = 200
-	}
+	limit := clampLimit(f.Limit, 200)
 	var sb strings.Builder
 	sb.WriteString(`SELECT ` + orderCols + ` FROM orders WHERE 1=1`)
 	args := []any{}
@@ -1254,9 +1268,7 @@ func (d *DB) ListUsers(ctx context.Context, limit int) ([]models.User, error) {
 
 // SearchUsers returns users whose phone CONTAINS the query string.
 func (d *DB) SearchUsers(ctx context.Context, q string, limit int) ([]models.User, error) {
-	if limit <= 0 || limit > 500 {
-		limit = 100
-	}
+	limit = clampLimit(limit, 100)
 	var rows *sql.Rows
 	var err error
 	if q == "" {
@@ -1989,9 +2001,7 @@ func (d *DB) GetVoucher(ctx context.Context, code string) (*models.Voucher, erro
 }
 
 func (d *DB) ListVouchers(ctx context.Context, batch string, limit int) ([]models.Voucher, error) {
-	if limit <= 0 || limit > 1000 {
-		limit = 500
-	}
+	limit = clampLimit(limit, 500)
 	q := `SELECT ` + voucherCols + ` FROM vouchers`
 	args := []any{}
 	if batch != "" {
@@ -2356,9 +2366,7 @@ type AuditFilter struct {
 }
 
 func (d *DB) SearchAudit(ctx context.Context, f AuditFilter) ([]AuditEntry, error) {
-	if f.Limit <= 0 || f.Limit > 1000 {
-		f.Limit = 200
-	}
+	f.Limit = clampLimit(f.Limit, 200)
 	var sb strings.Builder
 	sb.WriteString(`SELECT id, at, actor, action, target, detail FROM audit_log WHERE 1=1`)
 	args := []any{}
@@ -2544,10 +2552,7 @@ func (d *DB) RecentSMSLogs(ctx context.Context, limit int) ([]SMSLogEntry, error
 
 // SearchSMSLogs returns rows newest-first matching the optional filter.
 func (d *DB) SearchSMSLogs(ctx context.Context, f SMSLogFilter) ([]SMSLogEntry, error) {
-	limit := f.Limit
-	if limit <= 0 || limit > 1000 {
-		limit = 100
-	}
+	limit := clampLimit(f.Limit, 100)
 	var sb strings.Builder
 	sb.WriteString(`SELECT id, sent_at, provider, phone, message, success, error_msg FROM sms_log WHERE 1=1`)
 	args := []any{}
@@ -2665,10 +2670,7 @@ func (d *DB) RecentWebhookDeliveries(ctx context.Context, limit int, onlyFailed 
 
 // SearchWebhookDeliveries returns rows newest-first matching the filter.
 func (d *DB) SearchWebhookDeliveries(ctx context.Context, f WebhookDeliveryFilter) ([]WebhookDeliveryEntry, error) {
-	limit := f.Limit
-	if limit <= 0 || limit > 1000 {
-		limit = 100
-	}
+	limit := clampLimit(f.Limit, 100)
 	var sb strings.Builder
 	sb.WriteString(`SELECT id, sent_at, event_type, mac, attempt, status_code, success, duration_ms, error_msg FROM webhook_deliveries WHERE 1=1`)
 	args := []any{}
