@@ -1,5 +1,40 @@
 # Changelog
 
+## v0.116 — 深挖轮 2：管理端 CSV 导出静默截断修复 + 剩余子系统全覆盖复查
+
+v0.115 之后的第二轮独立全库审计（重点覆盖此前审计较少的面：
+sms/config/models/walledgarden/firewall-ipset/db-migrate/backup/
+notify/arp/openwrt 部署脚本/api_admin/SSE 流/模板 XSS 面），发
+现并修复一个真实缺陷。
+
+A. (MEDIUM, 静默数据丢失) 管理端 CSV 导出全线被 DB 层静默截
+断：各导出 handler（orders/users/macs/audit/sms-log/
+webhook-log/vouchers）向 DB 层请求 1000–10000 行，但
+`internal/db` 各查询函数的防御性 clamp 把「超过小阈值（100/
+200/1000）的 limit」直接重置回小默认值——例如
+`ListOrders(5000)` 实际只返回 100 行、`SearchUsers(…, 5000)`
+只返回 200 行。导出文件看起来正常、无任何警告，管理员拿到的
+对账/备份数据不完整（超过 100 单的月度对账即受影响）。修复：
+DB 层引入统一的 `clampLimit(limit, def)`（非正数→默认值，上
+限统一 10000），`ListOrders`/`SearchMACs`/`SearchUsers`/
+`ListVouchers`/`SearchAudit`/`SearchSMSLogs`/
+`SearchWebhookDeliveries`/`SearchOrdersFiltered` 全部改用；
+orders 导出上限提到 5000、vouchers 导出提到 10000。回归测试
+（`admin_export_limits_test.go`）对 6 类导出各插入超过旧阈值
+的行数并断言 CSV 行数不再截断。
+
+其余复查确认无缺陷（不改动）：Aliyun SMS 签名/并发安全与
+Console ring buffer、config 校验全链（bcrypt/totp/token 长
+度/时长负值/SMS provider 白名单）、schedule 跨午夜与 ISO 周
+日、walled garden 公网过滤/字面 IP/缓存 TTL、ipset
+build-aside-and-swap 原子替换、迁移的 user_version 门控 token
+哈希化、backup VACUUM INTO + fsync + .tmp 清扫、notify 单
+worker 的 re-enqueue 退避 + panic 恢复 + nil client 防御、
+模板无 template.HTML/JS 注入面、api_admin 三层 token 权限与
+1MiB 全局 body cap（csrfMiddleware 对含 /api 在内的全部路由
+生效）、SSE 流每 tick 复查会话存活、attention 3s 缓存的锁窗
+口正确。全量 `go test ./...` 与 `go test -race ./...` 绿。
+
 ## v0.115 — 深挖轮：微信回调 nonce panic、限流器内存/CPU 上限、竞态测试修复
 
 v0.114 之后再做一轮全子系统深挖（支付回调解密、限流器资源上
