@@ -1,5 +1,57 @@
 # Changelog
 
+## v0.115 — 深挖轮：微信回调 nonce panic、限流器内存/CPU 上限、竞态测试修复
+
+v0.114 之后再做一轮全子系统深挖（支付回调解密、限流器资源上
+限、只读 token 三层权限、QR 端点、日程复活、walled garden DNS
+缓存、nft 超时、date() 统计、到期扫描原子性、CI/ipk/install.sh
+权限），发现并修复三个真实缺陷。
+
+A. (MEDIUM, 远程 panic DoS) `WeChat.DecodeNotify` 把通知体里攻
+击者可控的 `resource.nonce` 直接传给 `aead.Open`——Go 的 GCM
+在 nonce 长度不等于 12 字节时是 **panic** 而不是返回错误，且
+`/notify/wx` 的头部验签是软失败（平台证书拉取失败时仅记日志、
+继续走 AES-GCM 体认证），所以任何人 POST 一个 nonce 长度异常
+的 JSON 就能触发 panic（net/http 恢复后中断该连接并刷整页栈日
+志）。现在解密前校验 `len(nonce) == aead.NonceSize()`，不符返
+回 `ErrInvalidPayload`；`refreshPlatformCerts` 的证书解密同样
+加防（虽走 TLS 可信通道，防御性跳过坏条目）。回归测试覆盖
+空/过短/过长三种 nonce。顺带：`--check-config` 现在校验
+`pay.wechat.api_v3_key` 必须恰 32 字节（AES-256 要求），否则
+以前要到第一笔回调才在 `aes.NewCipher` 报错。
+
+B. (MEDIUM, 资源耗尽 DoS) IP 键控限流器（登录/找回密码等共 5
+个实例）的 hits map 只清理**过期**条目——窗口期内的活跃 key
+无上限。攻击者轮换 IPv6 源地址（一个 /64 有 2^64 个可用地址）
+以 1000 req/s 灌一小时即 360 万条目（数百 MB），足以打爆内存
+受限的路由器。两处修复：map 超过 8192 时硬性驱逐回 4096（在
+那个量级本来就是洪水，牺牲一点限流精度换不 OOM）；同时把原来
+「超过 4096 后每次插入都全表扫描」的 GC 改为按大小阈值摊销触
+发——修复前那本身就是 O(n)/请求的 CPU 燃烧点（回归测试从
+3.3s 降到 0.02s）。5 万唯一 key 洪水回归测试断言 map 恒
+≤8192。
+
+C. (LOW, 假红 CI) `TestAdminTestWebhookEnqueuesEvent` 的捕获
+服务器先递增 hits 再写 lastBody，而等待方把 hits≥1 当作
+「body 已就绪」——-race 调度下主 goroutine 可在两步之间读到
+空 body；且单次 `r.Body.Read` 本就可能只读到部分分块。改为
+`io.ReadAll` 全量读取后再递增计数。该测试在本轮全量 -race 中
+实际失败过一次，非理论问题。
+
+其余复查确认无缺陷（不改动）：`/api/pay/qr` 仅编码 DB 中
+qr_payload（开放编码器已在 v0.105 关闭）、SSID/voucher QR 均
+在 admin 门禁后、只读 token 的 Read/Write/Privileged 三层
+（备份流属 Privileged）、`/api/admin/sessions` 不回 token、
+voucher 列表只回 4 字符前缀、日程复活已有
+TestScheduleEnforceDoesNotResurrectConcurrentRevoke 覆盖、
+`audit_log.at` 由 SQLite CURRENT_TIMESTAMP 写入故 `date(at)`
+可解析（不属 v0.107 那类 Go 格式回归）、`ExpireDueMACs` 为单
+条原子 UPDATE...RETURNING、walled garden DNS 失败缓存/公网过
+滤/IPv6 映射剥离均有测试、nft/ipset 全部 exec 路径带 5s 超
+时、install.sh 密钥文件用 `install -m 0600 /dev/null` 预建无
+权限窗口、CI 含 -race/ipk 结构与 0600 校验/aarch64 断言/
+Docker 健康检查。全量 `go test -race ./...` 绿。
+
 ## v0.114 — 合并收尾 + 全库复audit：VACUUM 快照 fsync、导出文件名注入
 
 v0.113 合并落地后的收尾轮：先把 PR #14 (merge-audit-hardening)
