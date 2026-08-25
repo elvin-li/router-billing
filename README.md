@@ -126,8 +126,8 @@ OpenWrt（aarch64）上运行的 MAC 地址计费认证系统。**只对收费 S
                 │                     else tcp 80 → :8080 (portal)  │
                 │                          tcp 443 → reject         │
                 │                                                   │
-                │  chain fwd  (filter): ∈ mac_paid → forward        │
-                │                       else drop                   │
+                │  chain forward (filter): ∈ mac_paid → 放行        │
+                │                          else drop                │
                 └────────────────────────┬──────────────────────────┘
                                          │
                        ┌─────────────────┴────────────────┐

@@ -26,10 +26,10 @@
         <span>需要关注 <strong>{{.Attention.Total}}</strong> 项</span>
       </div>
       <div class="attention-grid">
-        {{if .Attention.ExpiringSoon}}<a class="attention-item" href="/admin/macs"><strong>{{.Attention.ExpiringSoon}}</strong> 个 MAC 7 天内到期</a>{{end}}
-        {{if .Attention.StalePending}}<a class="attention-item" href="/admin/orders"><strong>{{.Attention.StalePending}}</strong> 个订单超 10 分钟未支付</a>{{end}}
+        {{if .Attention.ExpiringSoon}}<a class="attention-item" href="/admin/macs?status=active"><strong>{{.Attention.ExpiringSoon}}</strong> 个 MAC 7 天内到期</a>{{end}}
+        {{if .Attention.StalePending}}<a class="attention-item" href="/admin/orders?status=pending"><strong>{{.Attention.StalePending}}</strong> 个订单超 10 分钟未支付</a>{{end}}
         {{if .Attention.SuspendedUsers}}<a class="attention-item" href="/admin/users"><strong>{{.Attention.SuspendedUsers}}</strong> 个用户已停用</a>{{end}}
-        {{if .Attention.FailedToday}}<a class="attention-item" href="/admin/orders"><strong>{{.Attention.FailedToday}}</strong> 笔订单今日失败</a>{{end}}
+        {{if .Attention.FailedToday}}<a class="attention-item" href="/admin/orders?status=failed"><strong>{{.Attention.FailedToday}}</strong> 笔订单今日失败</a>{{end}}
       </div>
     </div>
     {{end}}

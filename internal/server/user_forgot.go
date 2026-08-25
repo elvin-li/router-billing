@@ -245,6 +245,9 @@ func (a *App) handleUserForgotPasswordVerify(w http.ResponseWriter, r *http.Requ
 	if _, err := a.DB.DeleteSessionsByUserID(r.Context(), user.ID); err != nil {
 		log.Printf("forgot-verify drop sessions %d: %v", user.ID, err)
 	}
+	if err := a.DB.DeleteAllTrustedDevices(r.Context(), user.ID); err != nil {
+		log.Printf("forgot-verify drop trusted devices %d: %v", user.ID, err)
+	}
 	a.DB.Audit(r.Context(), "user:"+user.Phone, "password_reset", "", "via=sms ip="+clientIP(r))
 	http.Redirect(w, r, "/user/login?ok=password_reset", http.StatusSeeOther)
 }

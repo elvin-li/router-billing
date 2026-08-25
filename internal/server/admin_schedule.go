@@ -52,8 +52,14 @@ func (a *App) handleAdminMACScheduleSave(w http.ResponseWriter, r *http.Request)
 		if err := a.DB.SetMACSchedule(r.Context(), mac, ""); err != nil {
 			log.Printf("clear schedule %s: %v", mac, err)
 		}
-		// Re-add to firewall (no restriction → should be in)
-		_ = a.MACSvc.FW.Add(r.Context(), mac)
+		// Re-add to firewall (no restriction → should be in) — but ONLY
+		// when the row is actually entitled to be online. Pre-v0.108 this
+		// Add was unconditional, so clearing a schedule on a blocked or
+		// expired MAC silently put it back into the paid set until the
+		// next resync.
+		if m, _ := a.DB.GetMAC(r.Context(), mac); macEligibleForFirewall(m) {
+			_ = a.MACSvc.FW.Add(r.Context(), mac)
+		}
 		a.DB.Audit(r.Context(), "admin", "schedule_clear", mac, "")
 		http.Redirect(w, r, "/admin/macs?ok=1", http.StatusSeeOther)
 		return
@@ -90,9 +96,24 @@ func (a *App) handleAdminMACScheduleSave(w http.ResponseWriter, r *http.Request)
 
 func (a *App) applyOneSchedule(mac string, sched models.MacSchedule) {
 	ctx := backgroundCtx()
+	// Never let a schedule write resurrect a blocked/expired MAC: the
+	// minute-tick enforcer only iterates ListActiveMACs, but this
+	// immediate-apply path used to Add unconditionally, so saving an
+	// "active hours" window on an ineligible MAC granted it access.
+	m, err := a.DB.GetMAC(ctx, mac)
+	if err != nil || !macEligibleForFirewall(m) {
+		_ = a.MACSvc.FW.Remove(ctx, mac)
+		return
+	}
 	if sched.Active(timeNow()) {
 		_ = a.MACSvc.FW.Add(ctx, mac)
 	} else {
 		_ = a.MACSvc.FW.Remove(ctx, mac)
 	}
+}
+
+// macEligibleForFirewall mirrors the WHERE clause Resync builds the set
+// from (ListActiveMACs): status=active AND unexpired. nil-safe.
+func macEligibleForFirewall(m *models.MAC) bool {
+	return m != nil && m.Status == models.MACActive && m.ExpiresAt.After(timeNow())
 }

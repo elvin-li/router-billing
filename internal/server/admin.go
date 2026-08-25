@@ -45,7 +45,12 @@ type deviceView struct {
 
 func (a *App) handleAdminLogin(w http.ResponseWriter, r *http.Request) {
 	if r.Method == http.MethodGet {
-		a.render(w, "admin_login.html", map[string]any{"Error": ""})
+		// Surface the ?err= codes the 2FA flow redirects back with.
+		// Pre-v0.108 they were ignored, so "your pending 2FA session
+		// expired" bounced admins to a blank form with no explanation.
+		a.render(w, "admin_login.html", map[string]any{
+			"Error": adminLoginErrLabel(r.URL.Query().Get("err")),
+		})
 		return
 	}
 	if r.Method != http.MethodPost {
@@ -170,6 +175,21 @@ func (a *App) maybeAlertAdminLogin(r *http.Request, username string) {
 }
 
 func (a *App) handleAdminLogout(w http.ResponseWriter, r *http.Request) {
+	// POST-only: SameSite=Lax cookies DO ride along on top-level cross-site
+	// GET navigations (and on speculative link prefetches some browsers
+	// issue), so a hostile <a href=".../admin/logout"> — or an eager
+	// prefetcher walking the sidebar — could sign the admin out. GET now
+	// bounces to the dashboard with the session intact.
+	if r.Method != http.MethodPost {
+		http.Redirect(w, r, "/admin/dashboard", http.StatusSeeOther)
+		return
+	}
+	// This route sits outside requireAdmin (logging out with an expired
+	// session must still clear the cookie), so check CSRF here directly.
+	if !verifyCSRF(r) {
+		http.Error(w, "CSRF token invalid — please refresh the page and retry", http.StatusForbidden)
+		return
+	}
 	c, _ := r.Cookie(adminCookieName)
 	if c != nil {
 		_ = a.DB.DeleteSession(r.Context(), c.Value)
@@ -241,6 +261,22 @@ func (a *App) adminCtx(r *http.Request, page string, extra map[string]any) map[s
 	return out
 }
 
+// adminLoginErrLabel maps the login page's ?err= codes onto user-facing
+// text. Unknown codes render as nothing (never echo attacker-chosen query
+// strings on the unauthenticated login page).
+func adminLoginErrLabel(code string) string {
+	switch code {
+	case "2fa_expired":
+		return "二步验证会话已过期，请重新登录"
+	case "2fa_locked":
+		return "验证码错误次数过多，请重新登录"
+	case "2fa_misconfigured":
+		return "二步验证配置异常，请检查 config 中的 totp_secret"
+	default:
+		return ""
+	}
+}
+
 func errLabel(code string) string {
 	switch code {
 	case "":
@@ -263,6 +299,22 @@ func errLabel(code string) string {
 		return "退款失败：请查看服务日志"
 	case "revoked":
 		return ""
+	// v0.108: codes that previously fell through to the raw string —
+	// admins saw literal "bad_key" / "not_found" flashes.
+	case "bad_key":
+		return "套餐 key 只能包含字母 / 数字 / - / _（最长 32 字符）"
+	case "label_too_long":
+		return "显示名过长（最多 64 字符）"
+	case "days_too_large":
+		return "天数过大（最多 3650 天）"
+	case "price_too_large":
+		return "价格过大（超过 ¥100,000 — 请检查是否多打了零）"
+	case "not_found":
+		return "未找到对应记录"
+	case "bad_mac":
+		return "MAC 格式不正确"
+	case "db":
+		return "数据库错误，请重试"
 	default:
 		return code
 	}
@@ -680,6 +732,7 @@ func (a *App) handleAdminUserResetPassword(w http.ResponseWriter, r *http.Reques
 	}
 	// Invalidate any existing sessions so the old password is gone.
 	_, _ = a.DB.Exec(r.Context(), `DELETE FROM sessions WHERE kind='user' AND user_id = ?`, id)
+	_ = a.DB.DeleteAllTrustedDevices(r.Context(), id)
 
 	// If SMS is configured AND the admin checked "send via SMS", deliver
 	// the temp password to the user's phone instead of returning it in
@@ -995,12 +1048,19 @@ func (a *App) handleAdminMACDetail(w http.ResponseWriter, r *http.Request) {
 	// v0.73: last-seen from the device-sightings table so support can tell
 	// "is this device online right now?" without flipping to /admin/devices.
 	sighting, _ := a.DB.GetSightingForMAC(r.Context(), normalized)
+	// v0.108: a sighting row records the LAST time the device was seen —
+	// it exists forever once written. The template used to show a green
+	// "在线" pill whenever the row existed, which lied for any device
+	// gone for weeks. Only claim "online" inside the same 10-minute
+	// window /admin/devices treats as live.
+	sightingOnline := sighting != nil && time.Since(sighting.LastSeen) <= 10*time.Minute
 	a.render(w, "admin_mac_detail.html", a.adminCtx(r, "macs", map[string]any{
-		"MAC":      m,
-		"Owner":    owner,
-		"Orders":   orders,
-		"Timeline": timeline,
-		"Sighting": sighting,
+		"MAC":            m,
+		"Owner":          owner,
+		"Orders":         orders,
+		"Timeline":       timeline,
+		"Sighting":       sighting,
+		"SightingOnline": sightingOnline,
 	}))
 }
 
@@ -1225,6 +1285,13 @@ func (a *App) handleAdminMACNotes(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *App) handleAdminResync(w http.ResponseWriter, r *http.Request) {
+	// POST-only: verifyCSRF skips non-POST requests, so accepting GET here
+	// meant a cross-site <img src=/admin/resync> could trigger a firewall
+	// rebuild with the admin's SameSite=Lax cookie riding along.
+	if r.Method != http.MethodPost {
+		http.Error(w, "method", http.StatusMethodNotAllowed)
+		return
+	}
 	if err := a.MACSvc.Resync(r.Context()); err != nil {
 		log.Printf("admin resync: %v", err)
 		a.DB.Audit(r.Context(), "admin", "firewall_resync_failed", "", "err="+err.Error()+" ip="+clientIP(r))

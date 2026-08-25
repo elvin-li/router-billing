@@ -238,13 +238,19 @@ func (a *App) handleAdminExportMACs(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		// Post-filter q + status in memory (bounded by user's MAC count).
+		// Case-insensitive to match the SQL LIKE path used when no
+		// user_id is set — pre-v0.108 a lowercase "aa:bb" query matched
+		// there but not here (MACs are stored uppercase).
 		if qSearch != "" || statusFilter != "" {
+			qLower := strings.ToLower(qSearch)
 			filtered := macs[:0]
 			for _, m := range macs {
 				if statusFilter != "" && string(m.Status) != statusFilter {
 					continue
 				}
-				if qSearch != "" && !strings.Contains(m.Mac, qSearch) && !strings.Contains(m.Label, qSearch) {
+				if qSearch != "" &&
+					!strings.Contains(strings.ToLower(m.Mac), qLower) &&
+					!strings.Contains(strings.ToLower(m.Label), qLower) {
 					continue
 				}
 				filtered = append(filtered, m)
@@ -498,7 +504,12 @@ func (a *App) handleAdminExportAudit(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.Header().Set("Content-Type", "text/csv; charset=utf-8")
-	w.Header().Set("Content-Disposition", `attachment; filename="audit.csv"`)
+	filename := "audit.csv"
+	if q.Get("actor") != "" || q.Get("action") != "" || q.Get("target") != "" ||
+		q.Get("q") != "" || q.Get("since") != "" || q.Get("until") != "" {
+		filename = "audit-filtered.csv"
+	}
+	w.Header().Set("Content-Disposition", `attachment; filename="`+filename+`"`)
 	cw := csv.NewWriter(w)
 	defer cw.Flush()
 	_ = cw.Write([]string{"id", "at", "actor", "action", "target", "detail"})
@@ -542,7 +553,13 @@ func (a *App) handleAdminExportOrders(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.Header().Set("Content-Type", "text/csv; charset=utf-8")
-	w.Header().Set("Content-Disposition", `attachment; filename="orders.csv"`)
+	// Filename flags active filters — matches the macs/users/sms/webhook
+	// export pattern so the download is self-describing.
+	filename := "orders.csv"
+	if q != "" || status != "" || since != "" || until != "" || userID > 0 {
+		filename = "orders-filtered.csv"
+	}
+	w.Header().Set("Content-Disposition", `attachment; filename="`+filename+`"`)
 	cw := csv.NewWriter(w)
 	defer cw.Flush()
 	_ = cw.Write([]string{"order_no", "mac", "plan", "days", "amount_cents", "status", "method", "trade_no", "user_id", "paid_at", "created_at"})
