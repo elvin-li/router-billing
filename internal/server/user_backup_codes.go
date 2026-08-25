@@ -171,6 +171,6 @@ func (a *App) handleUser2FARegenerateCodes(w http.ResponseWriter, r *http.Reques
 		http.Redirect(w, r, "/user/2fa?err=internal", http.StatusSeeOther)
 		return
 	}
-	a.DB.Audit(r.Context(), "user:"+user.Phone, "2fa_backup_codes_regenerated", "", "ip="+clientIP(r))
+	a.DB.Audit(r.Context(), "user:"+user.Phone, "2fa_backup_codes_regenerated", "", "ip="+a.clientIP(r))
 	a.renderBackupCodesOnce(w, r, user, codes)
 }

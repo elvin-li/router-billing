@@ -192,8 +192,10 @@ to the detail column.
   don't pin to 802.11 4-way handshake identity, since that would tie us
   to specific hostapd versions. Mitigation: encrypted paid SSID + admin
   visibility into duplicate IPs on the same MAC.
-- **No 2FA on admin yet.** Future work; the multi-admin + bcrypt config
-  is the floor.
+- ~~**No 2FA on admin yet.**~~ Since implemented: `/admin/2fa` offers
+  TOTP enrollment mirroring the user flow, with a login-time gate at
+  `/admin/login/2fa`. The multi-admin + bcrypt config remains the floor
+  for installs that don't enroll.
 - **No anti-replay for /redeem from the same IP within the rate-limit
   budget.** The 31^12 code space is large enough that 10 guesses /
   10 minutes effectively makes brute force a multi-billion-year exercise.

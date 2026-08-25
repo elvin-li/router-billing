@@ -617,6 +617,10 @@ func TestSecureCookieSetWhenBehindTLS(t *testing.T) {
 func TestAdminLoginRateLimitByUsername(t *testing.T) {
 	app := setupTestApp(t)
 	app.adminLoginByUser = newRateLimiter(3, time.Hour)
+	// This test rotates X-Forwarded-For to isolate the per-username
+	// limiter from the per-IP one — that only works when the app is
+	// configured to trust proxy headers (v0.105).
+	app.Cfg.Security.TrustProxyHeaders = true
 	h := app.Routes()
 
 	// 3 attempts with wrong password but the SAME username are allowed
@@ -962,7 +966,7 @@ func TestRedeemRateLimit(t *testing.T) {
 		if res.StatusCode != 303 {
 			t.Fatalf("attempt %d: %d", i, res.StatusCode)
 		}
-		loc := res.Header.Get("Location")
+		loc := strings.ToLower(res.Header.Get("Location"))
 		if strings.Contains(loc, "尝试过于频繁") || strings.Contains(loc, "%e5%b0%9d") {
 			t.Errorf("attempt %d should not be rate-limited yet: %s", i, loc)
 		}
@@ -970,8 +974,9 @@ func TestRedeemRateLimit(t *testing.T) {
 	// 4th hit gets the rate-limit redirect.
 	res, _ := do(t, h, "POST", "/redeem",
 		url.Values{"code": {"AAAAAAAAAA22"}, "mac": {"aa:bb:cc:dd:ee:ff"}}, nil)
-	loc := res.Header.Get("Location")
-	// URL-encoded "尝试" prefix
+	// URL-encoded "尝试" prefix (case-insensitive: v0.100 switched from
+	// http.Redirect's implicit lowercase escaping to url.QueryEscape).
+	loc := strings.ToLower(res.Header.Get("Location"))
 	if !strings.Contains(loc, "%e5%b0%9d%e8%af%95") {
 		t.Errorf("4th attempt should be rate-limited; got %s", loc)
 	}

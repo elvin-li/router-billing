@@ -80,6 +80,19 @@ type Security struct {
 	// /api/admin/orders/cancel-stale; this saves operators having to
 	// wire up cron. 0 (default) = disabled. Clamped to [1, 720] (1h .. 30d).
 	AutoCancelStaleOrderHours int `yaml:"auto_cancel_stale_order_hours,omitempty"`
+
+	// TrustProxyHeaders: when true, the server trusts the X-Forwarded-For
+	// header for client-IP attribution (rate limiting + audit logs). Only
+	// enable this when a reverse proxy you control sits in front of the
+	// service AND that proxy overwrites (not appends to) X-Forwarded-For.
+	//
+	// Default false: the typical deployment is the binary listening
+	// directly on the router, where every LAN client talks straight to
+	// us — there, X-Forwarded-For is attacker-controlled input, and
+	// trusting it lets a client rotate the header to bypass every
+	// IP-keyed rate limit (voucher brute force, login floods, payment
+	// intent floods) and forge audit-log IPs.
+	TrustProxyHeaders bool `yaml:"trust_proxy_headers,omitempty"`
 }
 
 // AutoCancelStaleOrders returns the clamped hours window or 0 (disabled).

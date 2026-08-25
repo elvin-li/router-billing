@@ -105,26 +105,45 @@ func (a *App) handleMe(w http.ResponseWriter, r *http.Request) {
 }
 
 // /pay/success — shown after polling sees status=paid.
+//
+// ?mac= is validated through NormalizeMAC (pre-v0.105 it was passed raw
+// into DB lookups), and the receipt link + expiry row are only surfaced
+// when there's a paid order for that MAC from the last 30 minutes or the
+// MAC is the requester's own device. Pre-v0.105 anyone who knew a
+// neighbor's MAC (broadcast on the LAN) could load
+// /pay/success?mac=<theirs> at any time to fetch their latest paid
+// order number — and from it the full /receipt (amount, plan, order/
+// trade numbers). The success page is only ever reached right after
+// paying, so the recency window costs legitimate users nothing.
 func (a *App) handlePaySuccess(w http.ResponseWriter, r *http.Request) {
-	mac := r.URL.Query().Get("mac")
+	detected := a.detectMAC(r)
+	mac := ""
+	if q := r.URL.Query().Get("mac"); q != "" {
+		if norm, ok := models.NormalizeMAC(q); ok {
+			mac = norm
+		}
+	}
 	if mac == "" {
-		mac = a.detectMAC(r)
+		mac = detected
 	}
-	var m *models.MAC
-	if mac != "" {
-		mm, _ := a.DB.GetMAC(r.Context(), mac)
-		m = mm
-	}
-	// Find the most recent paid order for this MAC so we can offer a receipt link.
+	// Find the most recent *recently* paid order for this MAC so we can
+	// offer a receipt link.
 	var receiptOrderNo string
 	if mac != "" {
+		cutoff := time.Now().Add(-30 * time.Minute)
 		orders, _ := a.DB.ListOrders(r.Context(), 50)
 		for _, o := range orders {
-			if o.Mac == mac && o.Status == models.OrderPaid {
+			if o.Mac == mac && o.Status == models.OrderPaid &&
+				o.PaidAt != nil && o.PaidAt.After(cutoff) {
 				receiptOrderNo = o.OrderNo
 				break
 			}
 		}
+	}
+	var m *models.MAC
+	if mac != "" && (receiptOrderNo != "" || mac == detected) {
+		mm, _ := a.DB.GetMAC(r.Context(), mac)
+		m = mm
 	}
 	a.render(w, "success.html", map[string]any{
 		"MAC":            mac,
@@ -134,6 +153,12 @@ func (a *App) handlePaySuccess(w http.ResponseWriter, r *http.Request) {
 }
 
 // /api/pay/qr?order_no=... — returns the QR as PNG so the browser <img> can show it.
+//
+// The QR payload comes from the order row, NOT from the URL — pre-v0.103
+// we accepted ?payload=... directly which made this endpoint an open QR
+// encoder for anyone holding any valid order_no (e.g. stamp a phishing
+// URL into a QR served from our domain). Now we read o.QRPayload, which
+// was stored at /api/pay/create time.
 func (a *App) handlePayQR(w http.ResponseWriter, r *http.Request) {
 	orderNo := r.URL.Query().Get("order_no")
 	if orderNo == "" {
@@ -145,12 +170,16 @@ func (a *App) handlePayQR(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "order not found", http.StatusNotFound)
 		return
 	}
-	payload := r.URL.Query().Get("payload")
-	if payload == "" {
-		http.Error(w, "missing payload", http.StatusBadRequest)
+	// Mid-upgrade safety net: a pending order created by an old binary
+	// won't have qr_payload populated. The /api/pay/create response in
+	// new-server clients carries the QR payload directly so the page can
+	// render client-side; this fallback path 404s cleanly rather than
+	// echoing a URL-supplied string.
+	if o.QRPayload == "" {
+		http.Error(w, "qr unavailable for this order", http.StatusNotFound)
 		return
 	}
-	code, err := qr.Encode(payload, qr.M)
+	code, err := qr.Encode(o.QRPayload, qr.M)
 	if err != nil {
 		http.Error(w, "qr encode: "+err.Error(), http.StatusInternalServerError)
 		return
@@ -168,13 +197,30 @@ func (a *App) handlePayQR(w http.ResponseWriter, r *http.Request) {
 
 // --- helpers ---
 
+// render executes the named template into a bytes.Buffer first, then copies
+// the buffer to w only on success. This matters because ExecuteTemplate may
+// emit some bytes before erroring out (e.g. on a typo'd struct field
+// halfway through a table). With a direct ResponseWriter the user got
+//
+//	HTTP 200 + "<table>...<td>month</td><td>internal\n"
+//
+// — partial HTML, an implicit 200 from the first Write, and the failed
+// http.Error(500) silently downgraded to a Write of "internal\n" (plus
+// "superfluous WriteHeader" log spam). Buffering means template errors
+// always produce a clean 500 with no leaked partial output.
+//
+// Headers are set after Execute succeeds so that on error the user gets
+// the text/plain content-type that http.Error provides.
 func (a *App) render(w http.ResponseWriter, name string, data any) {
-	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	w.Header().Set("Cache-Control", "no-store")
-	if err := a.tpl.ExecuteTemplate(w, name, data); err != nil {
+	var buf bytes.Buffer
+	if err := a.tpl.ExecuteTemplate(&buf, name, data); err != nil {
 		log.Printf("render %s: %v", name, err)
 		http.Error(w, "internal", http.StatusInternalServerError)
+		return
 	}
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	w.Header().Set("Cache-Control", "no-store")
+	_, _ = w.Write(buf.Bytes())
 }
 
 func writeJSON(w http.ResponseWriter, code int, body any) {
