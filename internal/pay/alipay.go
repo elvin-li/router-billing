@@ -169,6 +169,7 @@ func (a *Alipay) Query(ctx context.Context, outTradeNo string) (*PaidNotice, boo
 			OutTradeNo  string `json:"out_trade_no"`
 			TradeNo     string `json:"trade_no"`
 			TradeStatus string `json:"trade_status"`
+			TotalAmount string `json:"total_amount"`
 		} `json:"alipay_trade_query_response"`
 	}
 	if err := json.Unmarshal(body, &wrap); err != nil {
@@ -185,10 +186,12 @@ func (a *Alipay) Query(ctx context.Context, outTradeNo string) (*PaidNotice, boo
 	if r.TradeStatus != "TRADE_SUCCESS" && r.TradeStatus != "TRADE_FINISHED" {
 		return nil, false, nil
 	}
+	cents, _ := yuanToCents(r.TotalAmount)
 	return &PaidNotice{
-		OrderNo:  r.OutTradeNo,
-		TradeNo:  r.TradeNo,
-		Provider: "alipay",
+		OrderNo:     r.OutTradeNo,
+		TradeNo:     r.TradeNo,
+		Provider:    "alipay",
+		AmountCents: cents,
 	}, true, nil
 }
 
@@ -235,10 +238,12 @@ func (a *Alipay) DecodeNotify(form url.Values) (*PaidNotice, error) {
 	if tradeStatus != "TRADE_SUCCESS" && tradeStatus != "TRADE_FINISHED" {
 		return nil, fmt.Errorf("trade_status=%s", tradeStatus)
 	}
+	cents, _ := yuanToCents(form.Get("total_amount"))
 	return &PaidNotice{
-		OrderNo:  form.Get("out_trade_no"),
-		TradeNo:  form.Get("trade_no"),
-		Provider: "alipay",
+		OrderNo:     form.Get("out_trade_no"),
+		TradeNo:     form.Get("trade_no"),
+		Provider:    "alipay",
+		AmountCents: cents,
 	}, nil
 }
 

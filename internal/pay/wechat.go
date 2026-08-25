@@ -161,6 +161,9 @@ func (w *WeChat) Query(ctx context.Context, outTradeNo string) (*PaidNotice, boo
 		OutTradeNo    string `json:"out_trade_no"`
 		TransactionID string `json:"transaction_id"`
 		TradeState    string `json:"trade_state"`
+		Amount        struct {
+			Total int `json:"total"`
+		} `json:"amount"`
 	}
 	if err := json.Unmarshal(body, &q); err != nil {
 		return nil, false, fmt.Errorf("wechat query: parse: %w", err)
@@ -169,9 +172,10 @@ func (w *WeChat) Query(ctx context.Context, outTradeNo string) (*PaidNotice, boo
 		return nil, false, nil
 	}
 	return &PaidNotice{
-		OrderNo:  q.OutTradeNo,
-		TradeNo:  q.TransactionID,
-		Provider: "wechat",
+		OrderNo:     q.OutTradeNo,
+		TradeNo:     q.TransactionID,
+		Provider:    "wechat",
+		AmountCents: q.Amount.Total,
 	}, true, nil
 }
 
@@ -411,9 +415,10 @@ func (w *WeChat) DecodeNotify(body []byte) (*PaidNotice, error) {
 		return nil, fmt.Errorf("trade_state=%s", res.TradeState)
 	}
 	return &PaidNotice{
-		OrderNo:  res.OutTradeNo,
-		TradeNo:  res.TransactionID,
-		Provider: "wechat",
+		OrderNo:     res.OutTradeNo,
+		TradeNo:     res.TransactionID,
+		Provider:    "wechat",
+		AmountCents: res.Amount.Total,
 	}, nil
 }
 

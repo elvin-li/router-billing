@@ -236,7 +236,7 @@ func (a *App) queryOrder(ctx context.Context, o models.Order) {
 	if !paid {
 		return
 	}
-	if err := a.finalizeOrder(ctx, notice.OrderNo, notice.TradeNo); err != nil {
+	if err := a.finalizeOrder(ctx, notice); err != nil {
 		log.Printf("pay-query finalize %s: %v", notice.OrderNo, err)
 	}
 }
@@ -295,7 +295,7 @@ func (a *App) handleNotifyWeChat(w http.ResponseWriter, r *http.Request) {
 		_ = json.NewEncoder(w).Encode(map[string]string{"code": "FAIL", "message": err.Error()})
 		return
 	}
-	if err := a.finalizeOrder(r.Context(), notice.OrderNo, notice.TradeNo); err != nil {
+	if err := a.finalizeOrder(r.Context(), notice); err != nil {
 		log.Printf("wechat finalize %s: %v", notice.OrderNo, err)
 		w.WriteHeader(http.StatusInternalServerError)
 		_ = json.NewEncoder(w).Encode(map[string]string{"code": "FAIL", "message": err.Error()})
@@ -321,7 +321,7 @@ func (a *App) handleNotifyAlipay(w http.ResponseWriter, r *http.Request) {
 		_, _ = w.Write([]byte("failure"))
 		return
 	}
-	if err := a.finalizeOrder(r.Context(), notice.OrderNo, notice.TradeNo); err != nil {
+	if err := a.finalizeOrder(r.Context(), notice); err != nil {
 		log.Printf("alipay finalize %s: %v", notice.OrderNo, err)
 		_, _ = w.Write([]byte("failure"))
 		return
@@ -330,7 +330,9 @@ func (a *App) handleNotifyAlipay(w http.ResponseWriter, r *http.Request) {
 }
 
 // finalizeOrder marks the order paid and grants the MAC. Idempotent.
-func (a *App) finalizeOrder(ctx context.Context, orderNo, tradeNo string) error {
+func (a *App) finalizeOrder(ctx context.Context, notice *pay.PaidNotice) error {
+	orderNo, tradeNo := notice.OrderNo, notice.TradeNo
+
 	// Detach from request cancellation: this is called from webhook /
 	// status / long-poll handlers, and a client disconnect between
 	// MarkOrderPaid and GrantFromOrder would leave a paid order whose
@@ -340,6 +342,28 @@ func (a *App) finalizeOrder(ctx context.Context, orderNo, tradeNo string) error 
 
 	a.pollMu.Lock()
 	defer a.pollMu.Unlock()
+
+	// Cross-check the provider-reported amount against what we charged
+	// BEFORE flipping the order to paid. Signatures prove who sent the
+	// notification, not that the amount matches our order — a partial
+	// payment / currency edge case / upstream bug must not grant full
+	// time. AmountCents==0 means the provider payload had no parseable
+	// amount (never the case for a real CNY payment), so skip the check
+	// rather than dead-lock legitimate money.
+	if notice.AmountCents > 0 {
+		o, err := a.DB.GetOrder(ctx, orderNo)
+		if err != nil {
+			return err
+		}
+		if o == nil {
+			return fmt.Errorf("order %s not found", orderNo)
+		}
+		if o.Status == models.OrderPending && o.AmountCents != notice.AmountCents {
+			a.DB.Audit(ctx, "webhook:"+notice.Provider, "pay_amount_mismatch", o.Mac,
+				fmt.Sprintf("order=%s expected=%d got=%d trade=%s", orderNo, o.AmountCents, notice.AmountCents, tradeNo))
+			return fmt.Errorf("order %s amount mismatch: expected %d got %d", orderNo, o.AmountCents, notice.AmountCents)
+		}
+	}
 
 	transitioned, order, err := a.DB.MarkOrderPaid(ctx, orderNo, tradeNo)
 	if err != nil {
