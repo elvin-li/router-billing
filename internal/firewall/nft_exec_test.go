@@ -1,0 +1,218 @@
+package firewall
+
+import (
+	"context"
+	"errors"
+	"os"
+	"path/filepath"
+	"reflect"
+	"testing"
+)
+
+// stubNft writes a shell script that impersonates the nft binary and returns
+// its path. Lets us exercise run/runOut + output parsing without nftables.
+func stubNft(t *testing.T, script string) string {
+	t.Helper()
+	p := filepath.Join(t.TempDir(), "nft")
+	if err := os.WriteFile(p, []byte("#!/bin/sh\n"+script+"\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	return p
+}
+
+func stubbedManager(t *testing.T, script string) *Manager {
+	t.Helper()
+	m := New("inet", "billing", "mac_paid", "br-paid")
+	m.NftBin = stubNft(t, script)
+	return m
+}
+
+// Real `nft -a list set inet billing mac_paid` output wraps the set in the
+// table declaration — the first "{" in the output is the TABLE brace, not the
+// elements brace. List must not lose elements to that wrapper.
+func TestListParsesRealNftOutput(t *testing.T) {
+	m := stubbedManager(t, `cat <<'EOF'
+table inet billing { # handle 5
+	set mac_paid { # handle 1
+		type ether_addr
+		counter
+		elements = { aa:bb:cc:dd:ee:ff counter packets 4 bytes 260,
+			     11:22:33:44:55:66 counter packets 0 bytes 0 }
+	}
+}
+EOF`)
+	got, err := m.List(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"AA:BB:CC:DD:EE:FF", "11:22:33:44:55:66"}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("List:\n got  %+v\n want %+v", got, want)
+	}
+}
+
+// A single-element set has no commas at all — the whole elements body is one
+// token glued to the table/set preamble. Regression guard for the parser
+// dropping it entirely.
+func TestListSingleElement(t *testing.T) {
+	m := stubbedManager(t, `cat <<'EOF'
+table inet billing {
+	set mac_paid {
+		type ether_addr
+		elements = { aa:bb:cc:dd:ee:ff }
+	}
+}
+EOF`)
+	got, err := m.List(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"AA:BB:CC:DD:EE:FF"}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("List:\n got  %+v\n want %+v", got, want)
+	}
+}
+
+// Empty set: nft prints the set definition without an elements clause.
+func TestListEmptySet(t *testing.T) {
+	m := stubbedManager(t, `cat <<'EOF'
+table inet billing {
+	set mac_paid {
+		type ether_addr
+	}
+}
+EOF`)
+	got, err := m.List(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 0 {
+		t.Errorf("empty set should list nothing; got %+v", got)
+	}
+}
+
+func TestListPropagatesExecError(t *testing.T) {
+	m := stubbedManager(t, `echo "Error: No such file or directory" >&2; exit 1`)
+	if _, err := m.List(context.Background()); err == nil {
+		t.Error("List should surface nft failure")
+	}
+}
+
+// EnsureSet first tries `{ type ether_addr; counter; }`; on old kernels that
+// reject the counter flag it must fall back to the plain set.
+func TestEnsureSetFallsBackWithoutCounter(t *testing.T) {
+	m := stubbedManager(t, `case "$*" in
+  *counter*) echo "Error: syntax error, unexpected counter" >&2; exit 1;;
+esac
+exit 0`)
+	if err := m.EnsureSet(context.Background()); err != nil {
+		t.Errorf("EnsureSet should fall back to plain set: %v", err)
+	}
+}
+
+func TestEnsureSetTreatsExistingSetAsSuccess(t *testing.T) {
+	m := stubbedManager(t, `case "$*" in
+  "add table"*) exit 0;;
+  *) echo "Error: set already exists" >&2; exit 1;;
+esac`)
+	if err := m.EnsureSet(context.Background()); err != nil {
+		t.Errorf("existing set should not error: %v", err)
+	}
+}
+
+func TestEnsureSetSurfacesRealFailure(t *testing.T) {
+	m := stubbedManager(t, `echo "Error: Operation not permitted" >&2; exit 1`)
+	if err := m.EnsureSet(context.Background()); err == nil {
+		t.Error("hard nft failure should propagate")
+	}
+}
+
+// Add/Remove are documented idempotent: duplicate add and missing delete are
+// swallowed, anything else propagates.
+func TestAddRemoveIdempotency(t *testing.T) {
+	ctx := context.Background()
+
+	dup := stubbedManager(t, `echo "Error: Could not process rule: File exists" >&2; exit 1`)
+	if err := dup.Add(ctx, "AA:BB:CC:DD:EE:FF"); err != nil {
+		t.Errorf("duplicate add should be nil: %v", err)
+	}
+
+	missing := stubbedManager(t, `echo "Error: Could not process rule: No such file or directory" >&2; exit 1`)
+	if err := missing.Remove(ctx, "AA:BB:CC:DD:EE:FF"); err != nil {
+		t.Errorf("removing absent element should be nil: %v", err)
+	}
+
+	hard := stubbedManager(t, `echo "Error: Operation not permitted" >&2; exit 1`)
+	if err := hard.Add(ctx, "AA:BB:CC:DD:EE:FF"); err == nil {
+		t.Error("hard add failure should propagate")
+	}
+	if err := hard.Remove(ctx, "AA:BB:CC:DD:EE:FF"); err == nil {
+		t.Error("hard remove failure should propagate")
+	}
+}
+
+func TestCountersViaExec(t *testing.T) {
+	m := stubbedManager(t, `cat <<'EOF'
+{"nftables":[{"metainfo":{}},{"set":{"family":"inet","table":"billing","name":"mac_paid","type":"ether_addr","elem":[{"elem":{"val":"aa:bb:cc:dd:ee:ff","counter":{"packets":9,"bytes":512}}}]}}]}
+EOF`)
+	got, err := m.Counters(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	c, ok := got["AA:BB:CC:DD:EE:FF"]
+	if !ok || c.Packets != 9 || c.Bytes != 512 {
+		t.Errorf("Counters = %+v", got)
+	}
+}
+
+func TestWalledGardenOpsViaExec(t *testing.T) {
+	ctx := context.Background()
+	// Success path.
+	ok := stubbedManager(t, `exit 0`)
+	if err := ok.EnsureWalledGardenSet(ctx, "wg_paid"); err != nil {
+		t.Errorf("EnsureWalledGardenSet: %v", err)
+	}
+	if err := ok.AddWalledGardenIPs(ctx, "wg_paid", []string{"1.1.1.1", "2.2.2.2"}); err != nil {
+		t.Errorf("AddWalledGardenIPs: %v", err)
+	}
+	if err := ok.RemoveWalledGardenIPs(ctx, "wg_paid", []string{"1.1.1.1"}); err != nil {
+		t.Errorf("RemoveWalledGardenIPs: %v", err)
+	}
+	// Empty slices are no-ops (never exec).
+	boom := stubbedManager(t, `exit 1`)
+	if err := boom.AddWalledGardenIPs(ctx, "wg_paid", nil); err != nil {
+		t.Errorf("empty add should be no-op: %v", err)
+	}
+	if err := boom.RemoveWalledGardenIPs(ctx, "wg_paid", nil); err != nil {
+		t.Errorf("empty remove should be no-op: %v", err)
+	}
+	// Idempotency on duplicates / missing.
+	dup := stubbedManager(t, `echo "Error: File exists" >&2; exit 1`)
+	if err := dup.AddWalledGardenIPs(ctx, "wg_paid", []string{"1.1.1.1"}); err != nil {
+		t.Errorf("duplicate wg add should be nil: %v", err)
+	}
+	miss := stubbedManager(t, `echo "Error: No such file or directory" >&2; exit 1`)
+	if err := miss.RemoveWalledGardenIPs(ctx, "wg_paid", []string{"1.1.1.1"}); err != nil {
+		t.Errorf("missing wg remove should be nil: %v", err)
+	}
+}
+
+func TestErrorClassifiers(t *testing.T) {
+	if isExistsError(nil) || isNotFoundError(nil) {
+		t.Error("nil error must classify as neither")
+	}
+	for _, msg := range []string{"nft add: File exists", "Error: set already exists"} {
+		if !isExistsError(errors.New(msg)) {
+			t.Errorf("%q should be an exists-error", msg)
+		}
+	}
+	for _, msg := range []string{"No such file or directory", "element does not exist", "set not found"} {
+		if !isNotFoundError(errors.New(msg)) {
+			t.Errorf("%q should be a not-found error", msg)
+		}
+	}
+	if isExistsError(errors.New("Operation not permitted")) ||
+		isNotFoundError(errors.New("Operation not permitted")) {
+		t.Error("unrelated errors must not be swallowed")
+	}
+}

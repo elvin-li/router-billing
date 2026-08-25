@@ -290,28 +290,52 @@ func (m *Manager) List(ctx context.Context) ([]string, error) {
 	if err != nil {
 		return nil, err
 	}
-	// Parse "elements = { AA:BB:..., CC:... }"
-	open := strings.Index(out, "{")
-	close := strings.LastIndex(out, "}")
-	if open < 0 || close < 0 || close <= open {
-		return nil, nil
+	return parseNftListOutput(out), nil
+}
+
+// parseNftListOutput extracts the MACs from `nft list set` output, which
+// wraps the set in the table declaration:
+//
+//	table inet billing { # handle 5
+//	    set mac_paid { # handle 1
+//	        type ether_addr
+//	        elements = { aa:bb:... counter packets 4 bytes 260, 11:22:... }
+//	    }
+//	}
+//
+// The parse must anchor on the "elements" clause — the first "{" in the
+// output belongs to the table, so a first-brace/last-brace scan glues the
+// first MAC onto the set preamble and loses it.
+func parseNftListOutput(out string) []string {
+	idx := strings.Index(out, "elements")
+	if idx < 0 {
+		return nil
 	}
-	body := out[open+1 : close]
+	open := strings.Index(out[idx:], "{")
+	if open < 0 {
+		return nil
+	}
+	open += idx
+	length := strings.Index(out[open:], "}")
+	if length < 0 {
+		return nil
+	}
+	body := out[open+1 : open+length]
 	var macs []string
 	for _, tok := range strings.Split(body, ",") {
 		tok = strings.TrimSpace(tok)
 		if tok == "" {
 			continue
 		}
-		// strip "# handle N" comments
-		if idx := strings.Index(tok, " "); idx > 0 {
-			tok = tok[:idx]
+		// strip trailing "counter packets N bytes N" / "# handle N"
+		if i := strings.IndexAny(tok, " \t"); i > 0 {
+			tok = tok[:i]
 		}
 		if validMAC(tok) {
 			macs = append(macs, strings.ToUpper(tok))
 		}
 	}
-	return macs, nil
+	return macs
 }
 
 // run executes nft with args and returns the stderr-tagged error.
