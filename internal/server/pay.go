@@ -2,6 +2,8 @@ package server
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -9,8 +11,6 @@ import (
 	"net/http"
 	"strings"
 	"time"
-
-	"github.com/google/uuid"
 
 	"router-billing/internal/models"
 	"router-billing/internal/notify"
@@ -49,6 +49,8 @@ func (a *App) handlePayCreate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var req payCreateReq
+	// A create request is three short strings; anything bigger is abuse.
+	r.Body = http.MaxBytesReader(w, r.Body, 4<<10)
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		http.Error(w, "bad json", http.StatusBadRequest)
 		return
@@ -240,7 +242,7 @@ func (a *App) queryOrder(ctx context.Context, o models.Order) {
 	if !paid {
 		return
 	}
-	if err := a.finalizeOrder(ctx, notice.OrderNo, notice.TradeNo); err != nil {
+	if err := a.finalizeOrder(ctx, notice); err != nil {
 		log.Printf("pay-query finalize %s: %v", notice.OrderNo, err)
 	}
 }
@@ -299,7 +301,7 @@ func (a *App) handleNotifyWeChat(w http.ResponseWriter, r *http.Request) {
 		_ = json.NewEncoder(w).Encode(map[string]string{"code": "FAIL", "message": err.Error()})
 		return
 	}
-	if err := a.finalizeOrder(r.Context(), notice.OrderNo, notice.TradeNo); err != nil {
+	if err := a.finalizeOrder(r.Context(), notice); err != nil {
 		log.Printf("wechat finalize %s: %v", notice.OrderNo, err)
 		w.WriteHeader(http.StatusInternalServerError)
 		_ = json.NewEncoder(w).Encode(map[string]string{"code": "FAIL", "message": err.Error()})
@@ -315,6 +317,8 @@ func (a *App) handleNotifyAlipay(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "disabled", http.StatusServiceUnavailable)
 		return
 	}
+	// Real Alipay notifications are ~2KB of form fields; cap like /notify/wx.
+	r.Body = http.MaxBytesReader(w, r.Body, 64*1024)
 	if err := r.ParseForm(); err != nil {
 		http.Error(w, "form", http.StatusBadRequest)
 		return
@@ -325,7 +329,7 @@ func (a *App) handleNotifyAlipay(w http.ResponseWriter, r *http.Request) {
 		_, _ = w.Write([]byte("failure"))
 		return
 	}
-	if err := a.finalizeOrder(r.Context(), notice.OrderNo, notice.TradeNo); err != nil {
+	if err := a.finalizeOrder(r.Context(), notice); err != nil {
 		log.Printf("alipay finalize %s: %v", notice.OrderNo, err)
 		_, _ = w.Write([]byte("failure"))
 		return
@@ -333,19 +337,59 @@ func (a *App) handleNotifyAlipay(w http.ResponseWriter, r *http.Request) {
 	_, _ = w.Write([]byte("success"))
 }
 
-// finalizeOrder marks the order paid and grants the MAC. Idempotent.
-func (a *App) finalizeOrder(ctx context.Context, orderNo, tradeNo string) error {
+// finalizeOrder marks the order paid and grants the MAC. Idempotent —
+// redelivered notifications and poller/webhook races are no-ops, and a
+// notification for a refunded order is acked without resurrecting it.
+func (a *App) finalizeOrder(ctx context.Context, n *pay.PaidNotice) error {
 	a.pollMu.Lock()
 	defer a.pollMu.Unlock()
+
+	// Money is committed at this point: don't let a browser disconnect
+	// (the /status and /wait paths pass request contexts) abort finalize
+	// halfway between "marked paid" and "granted".
+	ctx = context.WithoutCancel(ctx)
+
+	orderNo, tradeNo := n.OrderNo, n.TradeNo
+
+	// Cross-check the PSP-confirmed amount against what the order was
+	// created for. The providers verify authenticity (signature / AES-GCM),
+	// but this catches out_trade_no confusion across apps/channels and any
+	// upstream partial-amount edge case before it turns into granted days.
+	if n.AmountCents > 0 {
+		o, err := a.DB.GetOrder(ctx, orderNo)
+		if err != nil {
+			return err
+		}
+		if o == nil {
+			return fmt.Errorf("order %s not found", orderNo)
+		}
+		if o.AmountCents != n.AmountCents {
+			a.DB.Audit(ctx, "webhook:"+n.Provider, "pay_amount_mismatch", o.Mac,
+				fmt.Sprintf("order=%s expected=%d got=%d trade=%s", orderNo, o.AmountCents, n.AmountCents, tradeNo))
+			return fmt.Errorf("%w: order %s expects %d分, notice says %d分",
+				pay.ErrBadAmount, orderNo, o.AmountCents, n.AmountCents)
+		}
+	}
 
 	transitioned, order, err := a.DB.MarkOrderPaid(ctx, orderNo, tradeNo)
 	if err != nil {
 		return err
 	}
 	if !transitioned {
+		if order != nil && order.Status == models.OrderRefunded {
+			log.Printf("pay notify for refunded order %s ignored (trade=%s)", orderNo, tradeNo)
+		}
 		return nil
 	}
 	if err := a.MACSvc.GrantFromOrder(ctx, order); err != nil {
+		// The grant never became durable (UpsertMAC failed; firewall-only
+		// failures don't error). Put the order back to pending so the PSP
+		// retry / poller re-drives the whole finalize — otherwise the one
+		// transitioned=true signal is consumed and the customer paid for
+		// nothing with no automatic recovery.
+		if rerr := a.DB.RevertOrderToPending(ctx, orderNo); rerr != nil {
+			log.Printf("CRITICAL: order %s paid but grant failed (%v) and revert failed (%v) — needs manual grant", orderNo, err, rerr)
+		}
 		return err
 	}
 	// Wake any browser long-polling /api/pay/wait for this order.
@@ -368,7 +412,14 @@ func (a *App) finalizeOrder(ctx context.Context, orderNo, tradeNo string) error 
 	return nil
 }
 
+// newOrderNo returns "B" + UTC timestamp + 64 bits of crypto-random hex
+// (31 chars total, within WeChat's 32-char out_trade_no cap). The order_no
+// doubles as the bearer token for /api/pay/status, /api/pay/wait and
+// /receipt, and the timestamp prefix is guessable — the previous 8-hex
+// (32-bit) suffix was thin for something that unlocks a MAC + price + status
+// oracle. 64 random bits makes enumeration infeasible.
 func newOrderNo() string {
-	u := strings.ReplaceAll(uuid.NewString(), "-", "")
-	return "B" + time.Now().UTC().Format("20060102150405") + u[:8]
+	var b [8]byte
+	_, _ = rand.Read(b[:])
+	return "B" + time.Now().UTC().Format("20060102150405") + hex.EncodeToString(b[:])
 }

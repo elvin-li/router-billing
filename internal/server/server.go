@@ -486,11 +486,13 @@ func auditTargetHref(target string) string {
 }
 
 // isGeneratedOrderNo reports whether target matches the exact shape
-// newOrderNo() produces: "B" + 14-digit UTC timestamp + 8 lowercase-hex
-// chars (23 chars total). Kept strict so ordinary words starting with
-// "B" never get misrouted to the order-detail page.
+// newOrderNo() produces: "B" + 14-digit UTC timestamp + lowercase-hex
+// suffix — 16 chars since v0.105 (31 total), 8 chars before (23 total;
+// still matched so pre-v0.105 audit rows keep linking). Kept strict so
+// ordinary words starting with "B" never get misrouted to the
+// order-detail page.
 func isGeneratedOrderNo(target string) bool {
-	if len(target) != 23 || target[0] != 'B' {
+	if (len(target) != 23 && len(target) != 31) || target[0] != 'B' {
 		return false
 	}
 	for _, c := range target[1:15] {
