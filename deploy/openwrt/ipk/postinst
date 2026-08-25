@@ -9,9 +9,11 @@ if [ -x /etc/uci-defaults/99-router-billing-ssid ]; then
         rm -f /etc/uci-defaults/99-router-billing-ssid || true
 fi
 
-# Apply nftables rules
+# Apply nftables rules. Non-fatal but loud — a swallowed failure here
+# means no portal redirect and free internet for every Paid_WiFi device.
 if [ -x /usr/share/router-billing/firewall-billing.sh ]; then
-    /usr/share/router-billing/firewall-billing.sh apply || true
+    /usr/share/router-billing/firewall-billing.sh apply || \
+        echo "router-billing: WARNING firewall apply failed — billing rules missing" >&2
 fi
 
 # Enable + start the service

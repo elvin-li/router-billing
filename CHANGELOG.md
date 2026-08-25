@@ -1,5 +1,271 @@
 # Changelog
 
+## v0.106 — Admin API: backup scope escalation, grant ownership clobber, CSV formula injection
+
+Four admin-API security fixes:
+
+A. /api/admin/backup accepted READ-ONLY Bearer tokens. The raw SQLite
+file contains plaintext session tokens (which mint live admin/user
+cookies), password hashes, TOTP secrets, full unredeemed voucher
+codes, and SMS message bodies — exactly the material every JSON read
+endpoint deliberately strips. A leaked monitoring token was therefore
+a full-scope token in disguise. The route now goes through
+requireAPITokenPrivileged, which rejects readonly tokens with 403 on
+every method. Off-router backup automation must use a non-readonly
+token (which it should have anyway — it holds the whole DB).
+
+B. /api/admin/users/grant and /api/admin/users/grant-by-phone listed a
+user's MACs and then extended each one through the unconditional
+UpsertMAC path, which OVERWRITES macs.user_id. A device transferred
+to a different user between the list and the per-MAC write (user-side
+replace/claim flow) was silently re-extended AND reassigned back to
+the granted user. New db.ExtendMACOwned / MACSvc.ExtendOwned guard
+the update with WHERE user_id = ? in a single statement; a row whose
+ownership changed is skipped (logged, excluded from macs_extended),
+never stolen.
+
+C. CSV exports (/admin/export/{macs,orders,users,audit,sms-log,
+webhook-log}.csv + /admin/vouchers/export.csv) wrote user-influenced
+text raw. MAC labels are settable by END USERS via /user/macs/label;
+audit detail, SMS bodies, and gateway error strings carry external
+text too. A label like =HYPERLINK(...) or a DDE payload executes when
+the admin opens the export in Excel/LibreOffice. All text cells now
+pass through csvCell, which prefixes ' when the first non-space byte
+is one of = + - @ TAB CR. Timestamps/ids/normalized MACs are
+unaffected.
+
+D. /api/admin/orders/cancel-stale silently discarded JSON decode
+errors, so a malformed body ({"older_than_hours":"48"} — string, not
+int) fell back to the 24h default and canceled a MORE aggressive
+window than the caller asked for. Empty body still means the
+documented 24h default; malformed non-empty JSON is now a 400 with
+zero cancellations.
+
+Tests: readonly backup 403 (+ no DB bytes, no audit row, 401 without
+token), ExtendOwned skip/extend matrix + grant-by-phone end-to-end
+isolation, csvCell unit matrix + macs/audit/sms-log export round-trips
+through encoding/csv, cancel-stale malformed-JSON 400 with order
+untouched.
+
+## v0.105 — Password change / reset now kills other sessions + trusted devices
+
+Changing password from `/user/me` previously left every other
+`rb_user` session alive. A stolen cookie stayed logged in after the
+victim rotated the password. The change now keeps only the browser
+that submitted the form (`DeleteUserSessionsExcept`) and wipes
+`user_trusted_devices` so a remembered 2FA skip cannot outlive the
+old password.
+
+The same trusted-device wipe now also runs on SMS forgot-password
+verify and on admin reset-password (admin already deleted sessions).
+
+## v0.104 — OpenWrt: firewall-billing.sh was a parse error on nftables 1.0.x
+
+Critical ops fix. The nftables filter chain was named `fwd`, which
+became a reserved keyword in nftables 1.0.x (OpenWrt 22.03+ / 23.05
+ship 1.0.2 / 1.0.8). On those routers the ENTIRE firewall script was
+a parse error — and both init.d and the ipk postinst wrapped the
+apply call in `|| true`, so the failure was completely silent: no
+portal redirect, no drop rule, every Paid_WiFi device online for
+free. Reproduced against nftables 1.0.9 (parse error), verified
+fixed (parses + rules land).
+
+Also fixed while in there:
+
+- apply is now actually idempotent. Rules declared inside a
+  `table { chain { ... } }` block get APPENDED on every apply, so
+  each service restart added 7 duplicate rules. Chains are now
+  declared empty, flushed, and re-added — verified the rule set is
+  identical (4 pre + 3 forward) after repeated applies, and that
+  mac_paid set elements survive re-apply (whitelist preserved).
+- Legacy `fwd` chain (from installs whose nft still parsed it) is
+  deleted on apply so traffic isn't evaluated by two hooks.
+- init.d start and ipk postinst no longer swallow apply failures
+  silently — still non-fatal, but they log to logread/stderr with
+  an explicit "billing rules missing" warning.
+- CI: `--check-config config.example.yaml` is now strict (the
+  `|| true` is gone). Verified: exits 0 on the example config, 2 on
+  parse/validation errors — the example config can no longer drift
+  out of validity unnoticed.
+- README architecture diagram + firewall.Manager doc comment updated
+  to the `forward` chain name. Go code never referenced the chain
+  (it only manages the mac_paid set) — no binary behavior change.
+
+## v0.103 — Security: /api/pay/qr open QR encoder closed; 1000x voucher bulk import
+
+(Incorporates the standalone fix/payqr-and-bulk-vouchers branch.)
+
+A. /api/pay/qr took its payload directly from the URL ?payload=...
+parameter — fetching the order row only to nil-check it. Anyone
+holding any valid order_no could use the endpoint as a free QR
+generator serving phishing URLs from our domain. Now the upstream
+PSP's QR string is stored on orders.qr_payload at create time and
+the handler renders exclusively from the row; the URL parameter is
+ignored. Legacy orders without a stored payload get a clean 404.
+
+- schema.sql + migrate.go: orders.qr_payload TEXT NOT NULL DEFAULT ''
+- db.SetOrderQRPayload(ctx, orderNo, payload)
+- QRPNG URL no longer carries the payload param
+
+B. Voucher bulk import/generate did one implicit transaction (=1
+fsync) per row — a 1000-row batch was several seconds even on SSD,
+worse on router flash. db.CreateVouchersBulk wraps all inserts in
+one transaction with a prepared statement (~1 fsync per import).
+UNIQUE collisions fail only their own row (SQLite stmt-level error
+semantics), so a duplicate paste mid-import doesn't lose the rest.
+
+7 race-clean tests: URL payload must not be load-bearing (identical
+PNG bytes with/without attacker payload), legacy order 404s, bulk
+all-success / partial-duplicate / empty / expires_at round-trip.
+
+## v0.102 — render() buffers output; missingkey=zero; all-pages smoke test
+
+render() previously executed templates straight into the
+ResponseWriter. When ExecuteTemplate emits some bytes and *then*
+errors (e.g. a typo'd struct field halfway through a table — the
+exact shape of the v0.96 dashboard bug), the user got HTTP 200 +
+half a page + "internal\n" appended, because the implicit
+WriteHeader from the first Write beat http.Error's 500. Now the
+template renders into a bytes.Buffer first and only a fully
+successful render is written; errors produce a clean 500.
+(Incorporates the standalone fix/render-buffer-and-missingkey-zero
+branch.)
+
+Template option missingkey=zero: naked {{.MissingKey}} on the
+map[string]any contexts most handlers pass now renders "" instead
+of the literal string "<no value>".
+
+New all-pages smoke test: seeds every table a template ranges over
+(MACs active+expired, orders pending+paid, vouchers incl. expired,
+sessions, trusted devices, sightings, sms/webhook logs, audit rows
+of each actor shape) and renders all 26 admin pages + 6 user/public
+pages, asserting 200 and zero "<no value>" occurrences. Combined
+with buffered render, any future template↔handler field drift fails
+CI instead of silently shipping.
+
+## v0.101 — DB: LIKE wildcard escaping + three missing indexes
+
+Search correctness: every user-facing search (admin MAC/label,
+orders, users-by-phone, audit actor/target/detail) built its LIKE
+pattern as "%"+q+"%" without escaping — so searching for a literal
+"%" matched every row and "a_b" also matched "axb". All six LIKE
+sites now escape \ % _ via escapeLike() and declare ESCAPE '\'.
+(Injection was never possible — patterns were always bound params —
+this is a correctness fix.)
+
+Router-class performance, all served by existing startup migration
+(schema.sql reapplies with IF NOT EXISTS on every boot):
+
+- orders(status, paid_at) — the dashboard runs ~13
+  "status='paid' AND paid_at >= ..." aggregates per page load;
+  previously each one scanned all paid rows.
+- sessions(expires_at) — the purge loop deletes by expiry every
+  few minutes.
+- audit_log(action) — /admin/audit's exact-match action filter and
+  the DISTINCT action dropdown; audit_log is the largest table on
+  long-running installs.
+
+5 race-clean tests: escapeLike unit table + literal-wildcard
+regression coverage on MACs / orders / users / audit searches.
+
+## v0.100 — Fix: redeem/voucher redirects escape user & admin input
+
+Redirect URLs in the voucher paths concatenated raw input:
+
+- POST /redeem echoed the submitted code as-is in the bounce URL —
+  `X&ok=1` injected a fake success flag into /redeem, `X#frag`
+  truncated the query.
+- POST /admin/vouchers/generate embedded the admin-typed batch name
+  raw (`a&b c` → parameter injection + invalid space in Location).
+- POST /admin/vouchers/batch/revoke for the unbatched bucket
+  redirected with a literal `batch=(no batch)` — raw space and
+  parens in the Location header.
+
+Everything now goes through url.QueryEscape. The hand-rolled
+httpEsc() helper (which skipped non-ASCII, leaving raw Chinese
+error text to http.Redirect's implicit escaping) is deleted in
+favor of the stdlib. Flash messages decode identically — only the
+on-the-wire encoding is stricter.
+
+3 race-clean regression tests asserting the injected params do NOT
+appear and values round-trip through url.Parse exactly.
+
+## v0.99 — Security: open redirect at login/2FA, GET-mutable resync, metrics token timing
+
+Three related hardening fixes, each with regression tests:
+
+1. Open redirect at user login. The POST /user/login `next`
+   parameter was only checked with HasPrefix(next, "/") —
+   "//evil.com" (protocol-relative) and "/\evil.com" (backslash
+   normalization) bounced the freshly authenticated user to an
+   attacker-chosen external domain. The 2FA login handler
+   (/user/login/2fa) trusted its query-string `next` with NO
+   validation at all. Both now go through safeNextPath(): single
+   leading slash, no second slash/backslash, no CR/LF; anything
+   else falls back to /user/me. The login form GET no longer
+   echoes a hostile next into the hidden field, and requireUser
+   now query-escapes the RequestURI it embeds in ?next= (a
+   ?a=b&c=d original URL previously leaked its params out of the
+   next value).
+
+2. /admin/resync accepted GET. verifyCSRF only guards POST, and
+   the session cookie is SameSite=Lax — so a cross-site
+   <img src="/admin/resync"> or top-level navigation triggered a
+   firewall rebuild using the admin's ambient cookie. The sidebar
+   button already POSTs with a CSRF token; the handler is now
+   POST-only (405 otherwise).
+
+3. /metrics compared the bearer token with plain string == —
+   remote timing could confirm the token byte-by-byte. Now
+   subtle.ConstantTimeCompare, same as the API-token path.
+
+12 race-clean test cases: safeNextPath shape table, hostile-next
+login + 2FA integration (Location must stay /user/me), form echo,
+resync GET→405 + no audit row + POST-still-works.
+
+## v0.98 — Fix: pay-create no longer leaves orphaned pending orders
+
+Pre-v0.98 `/api/pay/create` inserted the pending order row BEFORE
+validating the payment provider. Any request with an unknown
+provider ("paypal") or a disabled one (WeChat/Alipay not
+configured) got a 400 — but the pending order stayed in the DB,
+was polled by the background loop for 30 minutes, and inflated
+the admin pending/attention counters. On installs with only one
+provider enabled this happened every time a client raced a
+config change.
+
+Now the provider is validated first (unknown / disabled → 400,
+zero DB writes). Additionally, if the upstream Precreate call
+itself fails (WeChat/Alipay 5xx), the just-created pending order
+is canceled — the QR code was never shown, so nobody can pay it.
+
+3 race-clean tests: unknown provider leaves 0 orders, disabled
+wechat/alipay leave 0 orders, bad-MAC/bad-plan validation
+precedence unchanged.
+
+## v0.97 — auditTargetHref recognizes real generated order numbers
+
+Extends v0.92/v0.95's smart-link function. The audit smart-link
+only matched order targets with an "ORD"/"ord" prefix — but
+`newOrderNo()` actually generates "B" + 14-digit UTC timestamp +
+8 hex chars (e.g. B20260825010203deadbeef). Result: every real
+production order audit row (order_refunded / order_canceled /
+pay) rendered as plain text since v0.92; only hand-crafted test
+fixtures ever got linked.
+
+The generated shape is matched strictly (exactly 23 chars,
+digit/hex position checks) so ordinary words starting with "B"
+never get misrouted. The order_no is also query-escaped in the
+generated href now.
+
+Precedence chain stays:
+  MAC → order (ORD prefix | generated shape) → phone → user_id
+
+8 race-clean test cases: generated-shape positive, 5 near-miss
+negatives (length/charset/prefix), query-escaping, plus a
+round-trip test pinning newOrderNo() output to the matcher so
+the two can't silently drift apart again.
+
 ## v0.96 — Fix: dashboard plan-sales table was silently empty
 
 Pre-v0.96 the /admin/dashboard "最近 30 天按套餐" table referenced

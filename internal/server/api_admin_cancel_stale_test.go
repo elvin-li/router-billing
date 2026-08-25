@@ -137,3 +137,35 @@ func TestAPIOrderCancelStaleEmptyBodyOK(t *testing.T) {
 		t.Errorf("empty body should be 200 (use default); got %d", rr.Code)
 	}
 }
+
+// Regression (v0.106): a malformed body used to be silently discarded and
+// the sweep ran at the 24h default. `{"older_than_hours":"48"}` (string
+// instead of int) would cancel a MORE aggressive window than the caller
+// asked for. Malformed non-empty JSON must be a 400 with zero cancellations.
+func TestAPIOrderCancelStaleMalformedJSON400(t *testing.T) {
+	app := setupTestApp(t)
+	app.Cfg.APITokens = []config.APIToken{{Token: "rb_w", Label: "ops"}}
+	ctx := context.Background()
+	now := time.Now().UTC()
+	// A 30h-old pending order: inside the 24h default window, outside the
+	// intended 48h one. Silent-default behavior would kill it.
+	_, _ = app.DB.Exec(ctx, `INSERT INTO orders (order_no, mac, plan, days, amount_cents, status, payment_method, created_at)
+		VALUES ('MALFORMED-GUARD', 'AA:BB:CC:00:14:07', 'm', 30, 100, 'pending', 'wechat', ?)`,
+		now.Add(-30*time.Hour))
+
+	h := app.Routes()
+	for _, body := range []string{
+		`{"older_than_hours":"48"}`, // type mismatch
+		`{"older_than_hours":48`,    // truncated
+		`not json`,
+	} {
+		rr := apiReq(t, h, "POST", "/api/admin/orders/cancel-stale", "rb_w", body)
+		if rr.Code != 400 {
+			t.Errorf("body %q: want 400; got %d (%s)", body, rr.Code, rr.Body.String())
+		}
+	}
+	o, _ := app.DB.GetOrder(ctx, "MALFORMED-GUARD")
+	if o == nil || string(o.Status) != "pending" {
+		t.Errorf("order must be untouched after rejected requests; got %+v", o)
+	}
+}
