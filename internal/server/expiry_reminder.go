@@ -45,6 +45,13 @@ func (a *App) expiryReminderLoop(ctx context.Context) {
 // owner's phone, send SMS, audit. Returns the (sent, skipped, errored)
 // counts so tests can assert behavior without poking the SMS provider.
 func (a *App) sendExpiryReminders(ctx context.Context) (sent, skipped, errored int) {
+	// One pass at a time: the eligible-list query relies on audit rows the
+	// pass itself writes only after each SMS is delivered, so the hourly
+	// loop and the manual admin trigger running concurrently would both
+	// list (and text) the same users. Serializing makes the second pass
+	// see the first one's de-dup rows.
+	a.expiryRemMu.Lock()
+	defer a.expiryRemMu.Unlock()
 	// The `expiry_reminder` audit row IS the de-dup marker for the next
 	// 22h. It must land even when ctx is canceled between the SMS send
 	// and the insert (admin closed the trigger page mid-pass, or the
