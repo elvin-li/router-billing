@@ -1,5 +1,42 @@
 # Changelog
 
+## v0.111 — Deploy-script audit: uninstall left a dangling fw4 include, ipk broke image builds
+
+Audit pass over deploy/openwrt, the ipk maintainer scripts, Dockerfile
+and docker-compose. Confirmed already-correct: the nftables-1.0
+`fwd`→`forward` rename, the `PKG_UPGRADE` guard in prerm (no firewall
+teardown mid-upgrade), and client isolation on setup-secure-ssid.sh's
+update path. Fixed what remained:
+
+A. `uninstall.sh` removed `/usr/share/router-billing` but left the fw4
+`include` (registered by uci-defaults) pointing at the now-deleted
+`firewall-billing.sh` in `/etc/config/firewall` — every firewall reload
+after uninstall referenced a missing script. Uninstall now deletes the
+matching include section(s) (descending index order) and commits.
+
+B. `ipk/postinst` and `ipk/prerm` ran unconditionally on the build host
+when the package is installed into an image root (`IPKG_INSTROOT`
+set): `/etc/init.d/router-billing` doesn't exist there, so `set -e`
+failed the whole install — and the uci/nft paths would have targeted
+the host, not the image. postinst now creates the rc.d enable symlinks
+(S95/K10) inside the target root and exits; prerm exits immediately
+(nothing is running in a build root). SSID/firewall setup happens via
+uci-defaults at the image's first boot, as OpenWrt intends.
+
+C. All eight deploy scripts were mode 0644 in git (the Makefile papered
+over it with `install -m 0755` at package time, but a git checkout or
+extracted source tree had non-executable scripts). Exec bits set.
+
+D. shellcheck SC2086: unquoted `firewall.@zone[$IDX]` /
+`wireless.@wifi-iface[$SECTION]` uci arguments are glob patterns
+(`[0]` is a character class) and could be rewritten by pathname
+expansion. Quoted in uci-defaults and setup-secure-ssid.sh.
+
+E. `install.sh` generated the Free_WiFi key from 12 random bytes
+(16 base64 chars) — stripping `/+=` could leave fewer than the 12
+chars cut. Bumped to 18 bytes / 24 chars, matching the uci-defaults
+generator (which was already fixed for exactly this reason).
+
 ## v0.110 — Concurrency: DB↔firewall lost updates serialized; duplicate reminder SMS
 
 Race-hunting pass over everything that pairs a SQLite mutation with a

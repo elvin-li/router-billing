@@ -56,10 +56,13 @@ else
     # Friends_WiFi must be encrypted — auto-generate a 12-char ASCII key if not
     # supplied. Saved 0600 to /etc/router-billing/wifi-keys.txt so admin can recover it.
     if [ -z "${FREE_KEY}" ]; then
+        # 18 bytes → 24 base64 chars — enough margin that stripping '/+='
+        # never realistically leaves fewer than the 12 chars we cut
+        # (same as uci-defaults; 12 bytes / 16 chars used to cut it close).
         if command -v openssl >/dev/null 2>&1; then
-            FREE_KEY=$(openssl rand -base64 12 | tr -d '/+=' | cut -c1-12)
+            FREE_KEY=$(openssl rand -base64 18 | tr -d '/+=' | cut -c1-12)
         else
-            FREE_KEY=$(head -c 12 /dev/urandom | base64 | tr -d '/+=' | cut -c1-12)
+            FREE_KEY=$(head -c 18 /dev/urandom | base64 | tr -d '/+=' | cut -c1-12)
         fi
         log "auto-generated Free_WiFi key: ${FREE_KEY}"
     fi

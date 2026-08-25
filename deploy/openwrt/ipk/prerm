@@ -2,6 +2,12 @@
 # opkg pre-removal hook.
 set -e
 
+# Inside an image-build root (IPKG_INSTROOT set) nothing is running and the
+# nft/init.d paths below would hit the build host — skip teardown entirely.
+if [ -n "${IPKG_INSTROOT}" ]; then
+    exit 0
+fi
+
 /etc/init.d/router-billing stop 2>/dev/null || true
 /etc/init.d/router-billing disable 2>/dev/null || true
 

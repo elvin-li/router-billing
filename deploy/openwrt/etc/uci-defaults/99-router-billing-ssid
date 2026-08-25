@@ -93,7 +93,7 @@ WIFI_DEV=$(uci -q show wireless | sed -n "s/^wireless\.\([^.]*\)=wifi-device$/\1
 if [ -z "$WIFI_DEV" ]; then
     log "警告：没找到 wifi-device，跳过 SSID 配置（请先在 LuCI 启用无线）"
 else
-    uci set wireless.${WIFI_DEV}.disabled='0'
+    uci set "wireless.${WIFI_DEV}.disabled=0"
 
     add_ssid() {
         local name="$1" net="$2" key="$3" iface="$4" isolate="$5"
@@ -152,9 +152,9 @@ else
     # 老安装迁移：v0.107 之前 input 是 ACCEPT。
     PAID_ZONE_IDX=$(uci -q show firewall | sed -n "s/^firewall\.@zone\[\([0-9]*\)\]\.name='paid'$/\1/p" | head -n1)
     if [ -n "${PAID_ZONE_IDX}" ] && \
-       [ "$(uci -q get firewall.@zone[${PAID_ZONE_IDX}].input)" = "ACCEPT" ]; then
+       [ "$(uci -q get "firewall.@zone[${PAID_ZONE_IDX}].input")" = "ACCEPT" ]; then
         log "迁移 firewall.zone paid input ACCEPT -> REJECT"
-        uci set firewall.@zone[${PAID_ZONE_IDX}].input='REJECT'
+        uci set "firewall.@zone[${PAID_ZONE_IDX}].input=REJECT"
     fi
 fi
 

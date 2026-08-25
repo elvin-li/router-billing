@@ -20,9 +20,9 @@ if uci -q show wireless | grep -q "ssid='${PAID_SECURE_SSID}'"; then
     # set -e 让"更新已有 SSID 密码"路径从未成功过。
     SECTION=$(uci -q show wireless | sed -n "s/^wireless\.@wifi-iface\[\([0-9]*\)\]\.ssid='${PAID_SECURE_SSID}'$/\1/p" | head -n1)
     [ -n "${SECTION}" ] || { echo "找不到 ${PAID_SECURE_SSID} 的 wifi-iface 下标" >&2; exit 1; }
-    uci set wireless.@wifi-iface[${SECTION}].encryption='psk2'
-    uci set wireless.@wifi-iface[${SECTION}].key="${PAID_SECURE_KEY}"
-    uci set wireless.@wifi-iface[${SECTION}].isolate='1'
+    uci set "wireless.@wifi-iface[${SECTION}].encryption=psk2"
+    uci set "wireless.@wifi-iface[${SECTION}].key=${PAID_SECURE_KEY}"
+    uci set "wireless.@wifi-iface[${SECTION}].isolate=1"
 else
     echo "新增 ${PAID_SECURE_SSID}"
     uci add wireless wifi-iface >/dev/null
