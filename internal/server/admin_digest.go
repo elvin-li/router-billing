@@ -87,14 +87,20 @@ func (a *App) sendAdminDigest(ctx context.Context) (db.AdminDigestStats, error) 
 		log.Printf("admin digest: stats: %v", err)
 		return stats, err
 	}
+	// Audit rows must land even when ctx dies between "SMS delivered"
+	// and "row inserted" (shutdown, admin disconnect on the manual
+	// trigger) — same rationale as the expiry-reminder pass: the SMS is
+	// out in the real world, and the audit trail is how operators
+	// confirm the daily schedule actually fired.
+	auditCtx := context.WithoutCancel(ctx)
 	body := formatAdminDigestBody(stats)
 	phone := a.Cfg.SMS.AdminLoginAlertPhone
 	if err := a.SendSMS(ctx, phone, body); err != nil {
 		log.Printf("admin digest sms %s: %v", phone, err)
-		a.DB.Audit(ctx, "system", "admin_digest_failed", "", "phone="+phone+" err="+err.Error())
+		a.DB.Audit(auditCtx, "system", "admin_digest_failed", "", "phone="+phone+" err="+err.Error())
 		return stats, err
 	}
-	a.DB.Audit(ctx, "system", "admin_digest_sent", "",
+	a.DB.Audit(auditCtx, "system", "admin_digest_sent", "",
 		"phone="+phone+" revenue="+strconv.Itoa(stats.YesterdayRevenueCents)+
 			" paid="+strconv.Itoa(stats.YesterdayPaidOrders)+
 			" failed="+strconv.Itoa(stats.FailedOrdersToday)+
@@ -137,7 +143,10 @@ func (a *App) handleAdminDigestTrigger(w http.ResponseWriter, r *http.Request) {
 		http.Redirect(w, r, "/admin/sms-log?err=digest_no_phone", http.StatusSeeOther)
 		return
 	}
-	if _, err := a.sendAdminDigest(r.Context()); err != nil {
+	// Detach from the request context (same as the expiry-reminder
+	// trigger): an admin disconnecting mid-send must not abort between
+	// "SMS delivered" and "audit row written".
+	if _, err := a.sendAdminDigest(context.WithoutCancel(r.Context())); err != nil {
 		http.Redirect(w, r, "/admin/sms-log?err=sms_failed", http.StatusSeeOther)
 		return
 	}

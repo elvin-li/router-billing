@@ -93,6 +93,15 @@ func (r *Rotator) snapshot(ctx context.Context, dst string) error {
 		_ = os.Chmod(tmp, 0o600)
 		return os.Rename(tmp, dst)
 	}
+	// A canceled context (shutdown mid-snapshot) is not a reason to fall
+	// back: the checkpoint below would also fail on the dead ctx, and
+	// copyFile would then duplicate the raw DB file WITHOUT a WAL
+	// checkpoint — exactly the torn/stale copy VACUUM INTO exists to
+	// prevent. Abort; the next scheduled pass will produce a real one.
+	if ctx.Err() != nil {
+		_ = os.Remove(tmp)
+		return verr
+	}
 	log.Printf("backup: vacuum into failed (%v); falling back to checkpoint+copy", verr)
 	_ = os.Remove(tmp)
 	if _, err := r.DB.Exec(ctx, "PRAGMA wal_checkpoint(TRUNCATE)"); err != nil {
@@ -169,6 +178,16 @@ func copyFile(src, dst string) error {
 		return err
 	}
 	if _, err := io.Copy(out, in); err != nil {
+		out.Close()
+		os.Remove(tmp)
+		return err
+	}
+	// Flush to stable storage BEFORE the rename makes the file visible
+	// under the final name. Without the fsync, a power cut shortly after
+	// the rename could leave a zero-length or partially-written "backup"
+	// on filesystems with delayed allocation (ext4, f2fs — i.e. routers):
+	// the name says snapshot, the content says garbage.
+	if err := out.Sync(); err != nil {
 		out.Close()
 		os.Remove(tmp)
 		return err

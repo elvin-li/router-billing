@@ -417,6 +417,91 @@ func TestPanicInOnDeliveryDoesNotKillWorker(t *testing.T) {
 	}
 }
 
+func TestNilHTTPClientStillDelivers(t *testing.T) {
+	// A Notifier whose HTTPClient was cleared after New (or never set)
+	// used to nil-panic inside deliver on EVERY event — recovered by
+	// deliverSafe, but each event silently dropped. deliver must default
+	// the client instead.
+	srv := newCaptureSrv(t, nil) // always 200
+	n := New(srv.srv.URL, "")
+	n.HTTPClient = nil
+	n.BackoffSchedule = []time.Duration{}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go n.Run(ctx)
+	n.Send(Event{Type: "pay"})
+
+	deadline := time.After(2 * time.Second)
+	for atomic.LoadInt32(&srv.calls) < 1 {
+		select {
+		case <-deadline:
+			t.Fatal("event never delivered with nil HTTPClient")
+		default:
+			time.Sleep(5 * time.Millisecond)
+		}
+	}
+}
+
+func TestHungEndpointBoundedByAttemptTimeout(t *testing.T) {
+	// An endpoint that accepts the connection and never responds must not
+	// wedge the single worker — even when the HTTPClient has NO timeout
+	// (http.DefaultClient-style). AttemptTimeout is the backstop; fresh
+	// events must flow once it fires.
+	release := make(chan struct{})
+	var mu sync.Mutex
+	seen := []string{}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		var ev Event
+		_ = json.Unmarshal(body, &ev)
+		mu.Lock()
+		seen = append(seen, ev.Type)
+		mu.Unlock()
+		if ev.Type == "hang" {
+			<-release // hold the request open until test cleanup
+			return
+		}
+		w.WriteHeader(200)
+	}))
+	t.Cleanup(func() { close(release); srv.Close() })
+
+	n := New(srv.URL, "")
+	n.HTTPClient = &http.Client{} // deliberately no timeout
+	n.AttemptTimeout = 50 * time.Millisecond
+	n.BackoffSchedule = []time.Duration{} // no retries — drop the hung one
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go n.Run(ctx)
+
+	n.Send(Event{Type: "hang"})
+	n.Send(Event{Type: "fresh"})
+
+	// The fresh event must arrive shortly after the 50ms attempt timeout
+	// unblocks the worker — well before the 2s failure deadline.
+	deadline := time.After(2 * time.Second)
+	for {
+		mu.Lock()
+		gotFresh := false
+		for _, s := range seen {
+			if s == "fresh" {
+				gotFresh = true
+			}
+		}
+		mu.Unlock()
+		if gotFresh {
+			return
+		}
+		select {
+		case <-deadline:
+			t.Fatal("worker wedged behind hung request despite AttemptTimeout")
+		default:
+			time.Sleep(5 * time.Millisecond)
+		}
+	}
+}
+
 func TestAtIsSetIfZero(t *testing.T) {
 	srv := newCaptureSrv(t, nil)
 	n := New(srv.srv.URL, "")

@@ -89,6 +89,36 @@ func TestSendAdminDigestEndToEnd(t *testing.T) {
 	}
 }
 
+func TestAdminDigestAuditSurvivesContextCancel(t *testing.T) {
+	// The ctx dies the moment the SMS is delivered (admin closed the
+	// manual-trigger page, or shutdown began). The audit row is how
+	// operators confirm the daily schedule fired — it must land anyway.
+	app := setupTestApp(t)
+	console := sms.NewConsole(50)
+	app.Cfg.SMS.AdminLoginAlertPhone = "13800160001"
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	app.SMS = &sms.Sender{P: &cancelingProvider{inner: console, cancel: cancel}}
+
+	if _, err := app.sendAdminDigest(ctx); err != nil {
+		t.Fatalf("sendAdminDigest: %v", err)
+	}
+	if n := len(console.Recent()); n != 1 {
+		t.Fatalf("expected 1 SMS; got %d", n)
+	}
+	entries, _ := app.DB.ListAudit(context.Background(), 50)
+	found := false
+	for _, e := range entries {
+		if e.Action == "admin_digest_sent" {
+			found = true
+		}
+	}
+	if !found {
+		t.Error("admin_digest_sent audit row was lost to the canceled context")
+	}
+}
+
 func TestFormatAdminDigestBody(t *testing.T) {
 	cases := []struct {
 		s    db.AdminDigestStats

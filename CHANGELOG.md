@@ -1,5 +1,34 @@
 # Changelog
 
+## v0.108 — Background-job reliability follow-up: hung-webhook backstop, fsync'd backups
+
+Deep-review follow-up to the v0.107 jobs merge, closing residual gaps
+on the same surface. No product features.
+
+A. (HIGH) The notify worker could still wedge forever on a single
+request: an endpoint that accepts TCP and never responds held the
+single worker goroutine for as long as the HTTP client allowed — and a
+Notifier whose HTTPClient had no Timeout (http.DefaultClient has none)
+allowed forever. Every delivery attempt now runs under a hard
+per-attempt context deadline (`AttemptTimeout`, default 30s)
+independent of the client config; a timed-out attempt still retries on
+schedule. A nil HTTPClient no longer nil-panics per event. Response
+bodies are drained (bounded) before close so keep-alive is reused.
+
+B. Backup fallback copy is fsync'd before rename. Without the flush, a
+power cut shortly after rename could leave a zero-length "backup" on
+ext4/f2fs.
+
+C. A snapshot whose context is already canceled no longer falls through
+to checkpoint+copy without a WAL checkpoint. It aborts cleanly
+(removing `.tmp`).
+
+D. An expiry-reminder pass stops once its context is canceled instead
+of writing one `expiry_reminder_failed` audit row per leftover MAC.
+
+E. Admin-digest audit rows use `context.WithoutCancel`, and the manual
+digest trigger detaches from the request context.
+
 ## v0.107 — Consolidated hardening: merge of PRs #5–#13
 
 One combined release merging nine parallel hardening branches (test

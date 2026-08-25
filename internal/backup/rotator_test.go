@@ -181,6 +181,39 @@ func TestSnapshotProducesConsistentBackup(t *testing.T) {
 	}
 }
 
+func TestSnapshotAbortsOnCanceledContext(t *testing.T) {
+	// When the snapshot's ctx is already dead (shutdown), VACUUM INTO
+	// fails — and the fallback must NOT kick in: a raw copy without a WAL
+	// checkpoint is exactly the torn/stale backup the VACUUM path exists
+	// to prevent. Expect an error and no backup file.
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "billing.db")
+	dbx, err := db.Open(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { dbx.Close() })
+	backups := filepath.Join(dir, "backups")
+	if err := os.MkdirAll(backups, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	r := &Rotator{DB: dbx, DBPath: dbPath, Dir: backups, RetainDays: 7}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel() // dead before the snapshot starts
+
+	dst := filepath.Join(backups, "billing-canceled.db")
+	if err := r.snapshot(ctx, dst); err == nil {
+		t.Fatal("snapshot with canceled ctx should error, not fall back to raw copy")
+	}
+	if _, err := os.Stat(dst); !os.IsNotExist(err) {
+		t.Error("no backup file should exist after a canceled snapshot")
+	}
+	if _, err := os.Stat(dst + ".tmp"); !os.IsNotExist(err) {
+		t.Error("canceled snapshot should clean up its .tmp")
+	}
+}
+
 func TestOncePrunesEvenWhenSnapshotFails(t *testing.T) {
 	// A full flash partition fails the snapshot — but prune must still run
 	// so old backups are freed and the NEXT attempt can succeed. Simulate

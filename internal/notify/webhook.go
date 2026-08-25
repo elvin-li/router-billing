@@ -23,6 +23,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log"
 	"net/http"
 	"time"
@@ -37,6 +38,12 @@ var DefaultBackoffSchedule = []time.Duration{
 	30 * time.Second,
 	5 * time.Minute,
 }
+
+// defaultAttemptTimeout bounds one delivery attempt (DNS + connect + TLS +
+// request + response) when Notifier.AttemptTimeout is unset. Generous
+// compared to the 8s default HTTPClient timeout — it is a backstop, not
+// the primary limit.
+const defaultAttemptTimeout = 30 * time.Second
 
 type Event struct {
 	Type    string    `json:"type"` // "pay" / "redeem" / "grant" / "revoke" / "user_login" / ...
@@ -64,6 +71,16 @@ type Notifier struct {
 	// BackoffSchedule controls the retry timing. Empty / nil falls back to
 	// DefaultBackoffSchedule. Length 0 = no retries (initial attempt only).
 	BackoffSchedule []time.Duration
+
+	// AttemptTimeout is the hard per-attempt ceiling enforced with a
+	// context deadline, independent of HTTPClient.Timeout. Zero/negative
+	// falls back to defaultAttemptTimeout. This exists because the worker
+	// is a SINGLE goroutine: if a caller swaps in an HTTPClient without a
+	// Timeout (http.DefaultClient has none), one endpoint that accepts the
+	// TCP connection and then never responds would wedge the pipeline
+	// forever — the same stall the v0.108 re-enqueue fix addressed, just
+	// via a hung request instead of a backoff sleep.
+	AttemptTimeout time.Duration
 
 	HTTPClient *http.Client
 	queue      chan queued
@@ -165,9 +182,20 @@ func (n *Notifier) Send(ev Event) {
 }
 
 func (n *Notifier) deliver(ctx context.Context, ev Event, attempt int) {
+	// Hard per-attempt deadline: the single worker must never wedge on
+	// one request, no matter how the HTTPClient is configured. Kept
+	// separate from the parent ctx — the retry decision below checks the
+	// PARENT for shutdown, and a timed-out attempt must still retry.
+	attemptTimeout := n.AttemptTimeout
+	if attemptTimeout <= 0 {
+		attemptTimeout = defaultAttemptTimeout
+	}
+	attemptCtx, cancel := context.WithTimeout(ctx, attemptTimeout)
+	defer cancel()
+
 	body, _ := json.Marshal(ev)
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, n.URL, bytes.NewReader(body))
+	req, err := http.NewRequestWithContext(attemptCtx, http.MethodPost, n.URL, bytes.NewReader(body))
 	if err != nil {
 		log.Printf("notify: build request: %v", err)
 		if n.OnDelivery != nil {
@@ -183,11 +211,24 @@ func (n *Notifier) deliver(ctx context.Context, ev Event, attempt int) {
 		req.Header.Set("X-Router-Billing-Signature", "sha256="+hex.EncodeToString(mac.Sum(nil)))
 	}
 
+	// Default a nil client rather than dereferencing it: a Notifier whose
+	// HTTPClient was cleared (or replaced with nil after New) used to
+	// nil-panic in deliverSafe on EVERY event — recovered, but each event
+	// silently dropped. Read into a local; never mutate the shared struct
+	// (Send/deliver run concurrently with retry timers).
+	httpClient := n.HTTPClient
+	if httpClient == nil {
+		httpClient = &http.Client{Timeout: 8 * time.Second}
+	}
+
 	start := time.Now()
-	resp, err := n.HTTPClient.Do(req)
+	resp, err := httpClient.Do(req)
 	statusCode := 0
 	if err == nil {
 		statusCode = resp.StatusCode
+		// Drain a bounded slice of the body before closing so the
+		// keep-alive connection can be reused for the next delivery.
+		_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 4096))
 		resp.Body.Close()
 		if resp.StatusCode/100 == 2 {
 			if n.OnDelivery != nil {
