@@ -3,7 +3,6 @@ package server
 import (
 	"encoding/json"
 	"log"
-	"net"
 	"net/http"
 	"net/url"
 	"strconv"
@@ -25,6 +24,19 @@ const userTrustedTTL = 30 * 24 * time.Hour // 30-day trust window
 
 // User session lifetime is config.Security.UserSessionTTL() — defaults to
 // 30d, range 1..365. See internal/config/config.go.
+
+// bcryptTimingDummy is a hash of a random throwaway value, compared against
+// when a login names an unregistered phone — so the "no such user" path
+// costs the same bcrypt work as a real password check and timing doesn't
+// enumerate accounts. Hashed once at startup; the plaintext is discarded.
+var bcryptTimingDummy = func() []byte {
+	h, err := bcrypt.GenerateFromPassword([]byte(randomToken(16)), bcrypt.DefaultCost)
+	if err != nil {
+		// bcrypt only errors on cost/length misuse — ours are constants.
+		panic("bcrypt timing dummy: " + err.Error())
+	}
+	return h
+}()
 
 // userCtx assembles the common data passed to every user-facing template.
 func (a *App) userCtx(r *http.Request, page string, extra map[string]any) map[string]any {
@@ -188,7 +200,15 @@ func (a *App) handleUserLogin(w http.ResponseWriter, r *http.Request) {
 		http.Redirect(w, r, "/user/login?err=internal", http.StatusSeeOther)
 		return
 	}
-	if user == nil || bcrypt.CompareHashAndPassword([]byte(user.PasswordHash), []byte(password)) != nil {
+	passOK := false
+	if user != nil {
+		passOK = bcrypt.CompareHashAndPassword([]byte(user.PasswordHash), []byte(password)) == nil
+	} else {
+		// Burn the same bcrypt cost on unknown phones so response timing
+		// doesn't reveal which numbers are registered.
+		_ = bcrypt.CompareHashAndPassword(bcryptTimingDummy, []byte(password))
+	}
+	if !passOK {
 		a.DB.Audit(r.Context(), "user:"+phone, "login_failed", "", clientIP(r))
 		http.Redirect(w, r, "/user/login?err=bad_credentials", http.StatusSeeOther)
 		return
@@ -822,18 +842,16 @@ func (a *App) handleUserPassword(w http.ResponseWriter, r *http.Request) {
 
 // --- small bits ---
 
+// clientIP returns the address realIPMiddleware resolved for this request.
+// X-Forwarded-For handling (only from security.trusted_proxies) lives in
+// that middleware — pre-v0.106 this function trusted the header's FIRST
+// entry from anyone, which let a direct client pick a fresh fake IP per
+// request and walk straight through every per-IP rate limit.
 func clientIP(r *http.Request) string {
-	if h := r.Header.Get("X-Forwarded-For"); h != "" {
-		if i := strings.Index(h, ","); i >= 0 {
-			return strings.TrimSpace(h[:i])
-		}
-		return strings.TrimSpace(h)
+	if v, ok := r.Context().Value(realIPCtxKey).(string); ok && v != "" {
+		return v
 	}
-	host, _, err := net.SplitHostPort(r.RemoteAddr)
-	if err != nil {
-		return r.RemoteAddr
-	}
-	return host
+	return remoteHost(r)
 }
 
 // --- rate limiter ---
