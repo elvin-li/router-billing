@@ -1,5 +1,89 @@
 # Changelog
 
+## v0.107 — Consolidated hardening port: admin API, admin UI, config/CI/packaging
+
+Union port of the remaining unique fixes from the admin-API-hardening,
+admin-UI-correctness, and config-CI-docker-hardening branches onto the
+payment-hardening line. Overlapping files were union-merged; every
+security check from every branch is retained.
+
+### Admin API (security)
+
+A. (HIGH) `/api/admin/backup` no longer accepts read-only tokens. The
+raw SQLite file contains plaintext session tokens, password hashes,
+TOTP secrets and unredeemed voucher codes — exactly what every JSON
+read endpoint redacts — so a read-only token that could download it
+was a full-scope token in disguise. The route is now gated by
+`requireAPITokenPrivileged`, which rejects `readonly: true` tokens on
+every method, GET included.
+
+B. (HIGH) User-grant fan-outs can no longer clobber MAC ownership.
+Granting days to a user used to `UpsertMAC` each of their devices,
+which silently re-assigned a MAC that had meanwhile been transferred
+to another user. The fan-out now goes through `ExtendOwned` /
+`ExtendMACOwned`, whose `WHERE user_id = ?` guard makes the ownership
+check and the update a single statement — a concurrently transferred
+device is skipped, not stolen back.
+
+C. CSV formula injection neutralized in all admin exports. MAC labels
+(user-settable), SMS bodies, gateway error strings, audit detail,
+voucher batch names and PSP trade numbers are wrapped in `csvCell`,
+which quote-prefixes cells starting with `=`, `+`, `-`, `@`, tab or CR
+(including behind leading spaces), so Excel/LibreOffice/Sheets render
+them as text instead of executing DDE payloads.
+
+D. `/api/admin/orders/cancel-stale` rejects malformed JSON with a 400
+instead of silently defaulting to a 24h cutoff and mass-cancelling.
+
+### Admin UI correctness
+
+E. (HIGH) Schedule clear/apply no longer resurrects banned MACs:
+editing or clearing a schedule used to unconditionally re-add the MAC
+to the firewall set, putting blocked/expired devices back online. The
+firewall add now only happens when the MAC is active and unexpired.
+
+F. Admin logout is POST + CSRF (a hostile `<a href>` or an eager
+prefetcher could log the admin out); 2FA login errors are surfaced
+instead of silently re-rendering; flash messages use real error
+labels; the device sighting pill is recency-aware.
+
+G. Filter/export fixes: `user_id` filter badge, attention-link
+filters, `audit_trim` flash, order links, sorted SSE device frames,
+filtered CSV export filenames, and case-insensitive MAC export search.
+
+H. Page smoke test now asserts the admin shell actually renders.
+
+### Config, packaging, CI honesty
+
+I. Strict config validation: admin/API tokens, bcrypt password
+hashes, TOTP secrets, numeric ranges and URLs are validated at load;
+`--check-config` exits non-zero on any violation and CI validates
+`config.example.yaml` on every run.
+
+J. `--gen-password-hash` no longer echoes the password (terminal echo
+is disabled via x/term).
+
+K. Docker image fixed: the image's `web_root` didn't match the config
+so `docker compose up` never booted; the image now matches the
+example config, runs as non-root, and defines a `/healthz`
+HEALTHCHECK (also wired into docker-compose.yml).
+
+L. ipk packaging: `Version:` is stamped from the build instead of a
+hardcoded source value, the shipped `config.yaml` is 0600 (it holds
+admin credentials and pay keys), and the ar archive is built fresh so
+stale members can't leak in.
+
+M. CI stops trusting green: it verifies the cross-compiled binary is
+actually aarch64, opkg-validates the ipk structure (member order,
+control fields, payload paths, config mode), builds the Docker image,
+asserts it doesn't run as root, and boots it until the healthcheck
+reports healthy.
+
+Regression tests cover the read-only-token backup rejection, the
+ownership-preserving grant fan-out, `csvCell` and the export
+endpoints, the cancel-stale JSON rejection, the schedule/firewall
+interaction, the admin UI fixes, and the config validators.
+
 ## v0.106 — Payment hardening: refund-replay resurrection, amount cross-check, lost grants
 
 Money/security pass over the payment finalize path.
