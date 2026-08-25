@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"sync"
 	"time"
 
 	"router-billing/internal/db"
@@ -19,6 +20,24 @@ import (
 type MACService struct {
 	DB *db.DB
 	FW firewall.API
+
+	// mu serializes every composite (DB state + firewall set) operation.
+	//
+	// The DB layer is transactional and both firewall backends serialize
+	// their own commands, but WITHOUT this lock the pairing between the two
+	// was not atomic, and the concurrent actors (payment finalizer, expiry
+	// scheduler, minute schedule-enforcer, admin handlers) could interleave
+	// into firewall state that contradicts the DB until the next resync:
+	//
+	//   - Resync read the active list, a grant then committed+FW.Add'ed,
+	//     and Resync's full rebuild flushed the fresh MAC out of the set;
+	//   - ExpireDue flipped rows to expired, a payment re-activated one of
+	//     them (DB + FW.Add), and ExpireDue's follow-up FW.Remove yanked
+	//     the just-paid MAC offline;
+	//   - the schedule enforcer listed active MACs, an admin Revoke landed
+	//     (DB blocked + FW.Remove), and the enforcer's FW.Add put the
+	//     blocked MAC back online for the rest of its window.
+	mu sync.Mutex
 }
 
 func New(d *db.DB, fw firewall.API) *MACService {
@@ -37,6 +56,8 @@ func New(d *db.DB, fw firewall.API) *MACService {
 // nft add was never retried anyway — and the paid signal/audit/notify were
 // all skipped.
 func (s *MACService) GrantFromOrder(ctx context.Context, o *models.Order) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	label := fmt.Sprintf("paid-%s", o.Plan)
 	m, err := s.DB.UpsertMAC(ctx, o.Mac, label, o.Days, o.UserID)
 	if err != nil {
@@ -44,7 +65,7 @@ func (s *MACService) GrantFromOrder(ctx context.Context, o *models.Order) error 
 	}
 	if err := s.FW.Add(ctx, m.Mac); err != nil {
 		log.Printf("warn: firewall add %s: %v — attempting resync", m.Mac, err)
-		if rerr := s.Resync(ctx); rerr != nil {
+		if rerr := s.resyncLocked(ctx); rerr != nil {
 			log.Printf("ERROR: firewall resync after failed add %s: %v (paid MAC offline until next resync)", m.Mac, rerr)
 		}
 	}
@@ -54,6 +75,8 @@ func (s *MACService) GrantFromOrder(ctx context.Context, o *models.Order) error 
 
 // Extend is the admin-manual version of GrantFromOrder.
 func (s *MACService) Extend(ctx context.Context, mac, label string, days int, userID *int64) (*models.MAC, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	m, err := s.DB.UpsertMAC(ctx, mac, label, days, userID)
 	if err != nil {
 		return nil, err
@@ -70,6 +93,8 @@ func (s *MACService) Extend(ctx context.Context, mac, label string, days int, us
 // "skipped", not an error. Used by the user-grant fan-outs so a concurrent
 // device transfer can't be clobbered back to the granted user.
 func (s *MACService) ExtendOwned(ctx context.Context, mac, label string, days int, ownerID int64) (*models.MAC, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	m, err := s.DB.ExtendMACOwned(ctx, mac, label, days, ownerID)
 	if err != nil || m == nil {
 		return nil, err
@@ -82,6 +107,8 @@ func (s *MACService) ExtendOwned(ctx context.Context, mac, label string, days in
 
 // Revoke marks blocked + drops from firewall set.
 func (s *MACService) Revoke(ctx context.Context, mac string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	if err := s.DB.SetMACStatus(ctx, mac, models.MACBlocked); err != nil {
 		return err
 	}
@@ -90,6 +117,8 @@ func (s *MACService) Revoke(ctx context.Context, mac string) error {
 
 // Delete removes from DB + firewall.
 func (s *MACService) Delete(ctx context.Context, mac string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	if err := s.DB.DeleteMAC(ctx, mac); err != nil {
 		return err
 	}
@@ -99,6 +128,8 @@ func (s *MACService) Delete(ctx context.Context, mac string) error {
 // Replace transfers a user's remaining time from oldMac to newMac.
 // Both DB row and firewall set are updated atomically.
 func (s *MACService) Replace(ctx context.Context, userID int64, oldMac, newMac, label string) (*models.MAC, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	m, err := s.DB.ReplaceMAC(ctx, userID, oldMac, newMac, label)
 	if err != nil {
 		return nil, err
@@ -114,6 +145,15 @@ func (s *MACService) Replace(ctx context.Context, userID int64, oldMac, newMac, 
 
 // Resync rebuilds the firewall set from active MACs in DB.
 func (s *MACService) Resync(ctx context.Context) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.resyncLocked(ctx)
+}
+
+// resyncLocked is Resync's body. Caller must hold s.mu — the read of the
+// active list and the full set rebuild must be one critical section, or a
+// grant landing in between gets flushed out of the kernel set.
+func (s *MACService) resyncLocked(ctx context.Context) error {
 	macs, err := s.DB.ListActiveMACs(ctx)
 	if err != nil {
 		return err
@@ -143,6 +183,8 @@ func (s *MACService) EnforceSchedules(ctx context.Context) {
 }
 
 func (s *MACService) enforceSchedulesOnce(ctx context.Context) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	now := time.Now()
 	macs, err := s.DB.ListActiveMACs(ctx)
 	if err != nil {
@@ -169,8 +211,39 @@ func (s *MACService) enforceSchedulesOnce(ctx context.Context) {
 	}
 }
 
+// ApplyScheduleNow immediately reconciles one MAC's firewall membership
+// after its schedule changed (saved or cleared), instead of waiting for the
+// next minute tick. sched should be the just-persisted schedule; a zero
+// (empty) schedule means "no restriction".
+//
+// Runs under the service lock so the eligibility check and the firewall
+// write are one atomic step — the pre-v0.110 server-side version re-read
+// the row and then called FW.Add unlocked, so a Revoke/Delete/expiry
+// landing in between was overwritten and the ineligible MAC came back
+// online until the next resync.
+func (s *MACService) ApplyScheduleNow(ctx context.Context, mac string, sched models.MacSchedule) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	m, err := s.DB.GetMAC(ctx, mac)
+	if err != nil {
+		return err
+	}
+	// Never let a schedule write resurrect a blocked/expired/deleted MAC:
+	// remove defensively, mirroring what the minute enforcer + resync
+	// would converge to.
+	if m == nil || m.Status != models.MACActive || !m.ExpiresAt.After(time.Now()) {
+		return s.FW.Remove(ctx, mac)
+	}
+	if sched.IsEmpty() || sched.Active(time.Now()) {
+		return s.FW.Add(ctx, mac)
+	}
+	return s.FW.Remove(ctx, mac)
+}
+
 // ExpireDue marks expired DB rows and yanks them from firewall.
 func (s *MACService) ExpireDue(ctx context.Context) (int, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	expired, err := s.DB.ExpireDueMACs(ctx)
 	if err != nil {
 		return 0, err

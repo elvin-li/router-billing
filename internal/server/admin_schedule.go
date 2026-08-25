@@ -56,10 +56,10 @@ func (a *App) handleAdminMACScheduleSave(w http.ResponseWriter, r *http.Request)
 		// when the row is actually entitled to be online. Pre-v0.108 this
 		// Add was unconditional, so clearing a schedule on a blocked or
 		// expired MAC silently put it back into the paid set until the
-		// next resync.
-		if m, _ := a.DB.GetMAC(r.Context(), mac); macEligibleForFirewall(m) {
-			_ = a.MACSvc.FW.Add(r.Context(), mac)
-		}
+		// next resync. Since v0.110 the eligibility check + firewall write
+		// run under the service lock so a concurrent revoke/expiry can't
+		// interleave between them.
+		_ = a.MACSvc.ApplyScheduleNow(r.Context(), mac, models.MacSchedule{})
 		a.DB.Audit(r.Context(), "admin", "schedule_clear", mac, "")
 		http.Redirect(w, r, "/admin/macs?ok=1", http.StatusSeeOther)
 		return
@@ -94,26 +94,10 @@ func (a *App) handleAdminMACScheduleSave(w http.ResponseWriter, r *http.Request)
 	http.Redirect(w, r, "/admin/macs?ok=1", http.StatusSeeOther)
 }
 
+// applyOneSchedule delegates to the service so the eligibility check and
+// the firewall write share the same lock as revoke/expiry/resync. The
+// pre-v0.110 in-handler version read the row and then touched the firewall
+// unlocked — a Revoke landing in between was silently overwritten.
 func (a *App) applyOneSchedule(mac string, sched models.MacSchedule) {
-	ctx := backgroundCtx()
-	// Never let a schedule write resurrect a blocked/expired MAC: the
-	// minute-tick enforcer only iterates ListActiveMACs, but this
-	// immediate-apply path used to Add unconditionally, so saving an
-	// "active hours" window on an ineligible MAC granted it access.
-	m, err := a.DB.GetMAC(ctx, mac)
-	if err != nil || !macEligibleForFirewall(m) {
-		_ = a.MACSvc.FW.Remove(ctx, mac)
-		return
-	}
-	if sched.Active(timeNow()) {
-		_ = a.MACSvc.FW.Add(ctx, mac)
-	} else {
-		_ = a.MACSvc.FW.Remove(ctx, mac)
-	}
-}
-
-// macEligibleForFirewall mirrors the WHERE clause Resync builds the set
-// from (ListActiveMACs): status=active AND unexpired. nil-safe.
-func macEligibleForFirewall(m *models.MAC) bool {
-	return m != nil && m.Status == models.MACActive && m.ExpiresAt.After(timeNow())
+	_ = a.MACSvc.ApplyScheduleNow(backgroundCtx(), mac, sched)
 }
