@@ -27,6 +27,7 @@ import (
 	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -216,5 +217,37 @@ func TestRestoreUploadExemptFromSmallBodyCap(t *testing.T) {
 	}
 	if !strings.Contains(rr.Body.String(), "SQLite") && !strings.Contains(rr.Body.String(), "magic") {
 		t.Errorf("restore rejection should come from SQLite validation; body=%q", rr.Body.String())
+	}
+}
+
+// TestVoucherPrintQRNotCacheable: the QR PNG encodes a full unredeemed
+// voucher code (bearer value). It must never be marked cacheable for shared
+// caches or left in browser disk cache.
+func TestVoucherPrintQRNotCacheable(t *testing.T) {
+	app := setupTestApp(t)
+	h := app.Routes()
+	jar := loginAdmin(t, h)
+	csrf := jar[csrfCookieName]
+
+	res, _ := do(t, h, "POST", "/admin/vouchers/generate",
+		url.Values{"_csrf": {csrf}, "count": {"1"}, "days": {"30"}, "batch": {"qr-cache-test"}}, jar)
+	if res.StatusCode != 303 {
+		t.Fatalf("voucher generate: %d", res.StatusCode)
+	}
+	vs, err := app.DB.ListVouchers(context.Background(), "qr-cache-test", 10)
+	if err != nil || len(vs) != 1 {
+		t.Fatalf("list vouchers: %v (n=%d)", err, len(vs))
+	}
+
+	res, _ = do(t, h, "GET", "/admin/vouchers/print/qr?code="+vs[0].Code, nil, jar)
+	if res.StatusCode != 200 {
+		t.Fatalf("qr: %d", res.StatusCode)
+	}
+	cc := res.Header.Get("Cache-Control")
+	if strings.Contains(cc, "public") {
+		t.Errorf("voucher QR marked public-cacheable: %q", cc)
+	}
+	if !strings.Contains(cc, "no-store") {
+		t.Errorf("voucher QR should be no-store; got %q", cc)
 	}
 }
