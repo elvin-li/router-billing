@@ -1,5 +1,59 @@
 # Changelog
 
+## v0.112 — Web handler audit: CSP-dead inline JS, unbounded multipart bodies, cacheable voucher QRs
+
+Follow-up hunt over the web handler surface for the usual suspects.
+Confirmed already-correct (no change needed): every mutating UI handler
+is POST-only (no CSRF-exempt mutating GETs remain after the v0.108/109
+logout fixes), every rendered POST form carries the `_csrf` field with
+the right template scope, `missingkey=zero` is in effect and smoke-
+tested, clickjacking headers (X-Frame-Options SAMEORIGIN + CSP
+frame-ancestors 'self') apply to every response, and all session-bearing
+cookies are HttpOnly + Secure-on-TLS + SameSite=Lax. What remained was
+three real bugs:
+
+A. (HIGH, functional + safety) The CSP has shipped `script-src 'self'`
+(no 'unsafe-inline') since v0.8 — but the templates were full of inline
+`<script>` blocks and `onclick=`/`onsubmit=` attributes, ALL of which
+CSP-enforcing browsers silently refuse to run. Consequences in a real
+browser: every `confirm()` guard on a destructive action never fired
+(delete user / delete MAC / revoke session / panic button / cancel-stale
+/ trim logs all executed on first click with no prompt), the orders-page
+refund button did literally nothing (its dialog opener was an inline
+function), the /admin/macs bulk-select toolbar was dead, the backup-codes
+copy button was dead, the redeem-code input formatter never ran, and the
+portal service worker never registered. Fixed by externalizing all of it:
+new `static/ui.js` (delegated `data-confirm` / `data-print` /
+`data-dialog-close` handlers — delegation also covers rows injected by
+the devices SSE stream, whose generated `onsubmit` was equally blocked),
+`static/admin-macs.js` (bulk bar), `static/admin-orders.js` (refund
+dialog), `static/redeem.js`, `static/user-2fa-codes.js`, and the SW
+registration moved into `portal.js`. 43 inline handlers across 19
+templates became `data-*` attributes. `TestTemplatesAreCSPCompatible`
+pins the invariant (no inline scripts / handlers in templates or
+JS-generated markup; every referenced static script exists).
+
+B. (MEDIUM, DoS) `verifyCSRF` reads the token via `r.FormValue`, which
+for multipart bodies runs `ParseMultipartForm` — buffering the WHOLE
+body (everything past 32 MiB spills to temp files) with no total-size
+limit. Because the CSRF check runs in the auth wrappers BEFORE any
+handler code, handler-level `http.MaxBytesReader` caps (e.g. the 256 MiB
+cap in the restore upload) were installed after the body had already
+been consumed and never actually applied. Net effect: any client — even
+unauthenticated, e.g. against /user/forgot-password — could stream
+gigabytes of multipart at a form endpoint and fill the router's
+tmpfs/flash. csrfMiddleware now caps every request body at 1 MiB (far
+above the largest legitimate form, the import textareas) before anything
+parses it; the one genuinely big-body endpoint, `/admin/backup/restore`,
+keeps its advertised 256 MiB. Over-cap uploads now die at the CSRF gate
+with 403.
+
+C. (LOW) `/admin/vouchers/print/qr` served the QR PNG of a full
+unredeemed voucher code — a bearer value redeemable for paid days — with
+`Cache-Control: public, max-age=3600`, explicitly inviting shared proxy
+caches to store an authenticated admin response and leaving codes in
+browser disk cache on shared machines. Now `no-store`.
+
 ## v0.111 — Deploy-script audit: uninstall left a dangling fw4 include, ipk broke image builds
 
 Audit pass over deploy/openwrt, the ipk maintainer scripts, Dockerfile
