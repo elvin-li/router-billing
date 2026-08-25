@@ -2,8 +2,10 @@ package db
 
 import (
 	"context"
+	"crypto/sha256"
 	"database/sql"
 	_ "embed"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"os"
@@ -202,6 +204,28 @@ func (d *DB) queryMACs(ctx context.Context, q string, args ...any) ([]models.MAC
 	return out, rows.Err()
 }
 
+// CountMACsByUser returns user_id → number of MAC rows owned. One GROUP BY
+// instead of shipping every MAC row to Go just to count (the /admin/users
+// page did exactly that).
+func (d *DB) CountMACsByUser(ctx context.Context) (map[int64]int, error) {
+	rows, err := d.conn.QueryContext(ctx,
+		`SELECT user_id, COUNT(*) FROM macs WHERE user_id IS NOT NULL GROUP BY user_id`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := map[int64]int{}
+	for rows.Next() {
+		var uid int64
+		var n int
+		if err := rows.Scan(&uid, &n); err != nil {
+			return nil, err
+		}
+		out[uid] = n
+	}
+	return out, rows.Err()
+}
+
 func (d *DB) GetMAC(ctx context.Context, mac string) (*models.MAC, error) {
 	row := d.conn.QueryRowContext(ctx, `SELECT `+macCols+` FROM macs WHERE mac = ?`, mac)
 	m, err := scanMAC(row)
@@ -212,6 +236,48 @@ func (d *DB) GetMAC(ctx context.Context, mac string) (*models.MAC, error) {
 		return nil, err
 	}
 	return m, nil
+}
+
+// GetMACsIn returns the subset of `macs` that exist as billing rows, keyed
+// by MAC. One IN query (chunked to stay under SQLite's parameter limit)
+// instead of a point lookup per element — used by the admin devices page,
+// which merges ARP + sightings and previously issued one GetMAC per device.
+func (d *DB) GetMACsIn(ctx context.Context, macs []string) (map[string]*models.MAC, error) {
+	out := make(map[string]*models.MAC, len(macs))
+	const chunk = 500
+	for start := 0; start < len(macs); start += chunk {
+		end := start + chunk
+		if end > len(macs) {
+			end = len(macs)
+		}
+		part := macs[start:end]
+		args := make([]any, len(part))
+		for i, m := range part {
+			args[i] = m
+		}
+		// Only compile-time constants plus a repeated "?" placeholder are
+		// concatenated; every value binds through args.
+		q := `SELECT ` + macCols + ` FROM macs WHERE mac IN (?` + //nolint:gosec // G202: placeholders only
+			strings.Repeat(",?", len(part)-1) + `)`
+		rows, err := d.conn.QueryContext(ctx, q, args...)
+		if err != nil {
+			return nil, err
+		}
+		for rows.Next() {
+			m, err := scanMAC(rows)
+			if err != nil {
+				rows.Close()
+				return nil, err
+			}
+			out[m.Mac] = m
+		}
+		if err := rows.Err(); err != nil {
+			rows.Close()
+			return nil, err
+		}
+		rows.Close()
+	}
+	return out, nil
 }
 
 // UpsertMAC adds new MAC or extends existing one's expiry. Returns the post-state.
@@ -484,6 +550,28 @@ func (d *DB) ListOrders(ctx context.Context, limit int) ([]models.Order, error) 
 		limit = 100
 	}
 	return d.queryOrders(ctx, `SELECT `+orderCols+` FROM orders ORDER BY created_at DESC LIMIT ?`, limit)
+}
+
+// LatestPaidOrderForMAC returns the most recently paid order for a MAC
+// with paid_at after `since`, or nil when there is none. Used by the
+// /pay/success page to offer a receipt link — a targeted indexed lookup
+// instead of scanning the newest N orders in Go (which silently missed
+// the order once it aged out of the scan window). The `since` cutoff is
+// the caller's anti-oracle recency window, applied in SQL so the page
+// never even reads older orders.
+func (d *DB) LatestPaidOrderForMAC(ctx context.Context, mac string, since time.Time) (*models.Order, error) {
+	row := d.conn.QueryRowContext(ctx,
+		`SELECT `+orderCols+` FROM orders
+		 WHERE mac = ? AND status = 'paid' AND paid_at > ?
+		 ORDER BY paid_at DESC, id DESC LIMIT 1`, mac, since.UTC())
+	o, err := scanOrder(row)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	return o, nil
 }
 
 // OrderFilter is the optional filter set passed to SearchOrdersFiltered.
@@ -825,6 +913,15 @@ func (d *DB) CancelStalePendingOrders(ctx context.Context, olderThan time.Durati
 
 // ---------- Sessions ----------
 
+// HashToken maps a raw session token (the cookie value) to the value stored
+// in sessions.token. Tokens are stored as SHA-256 digests so a leaked DB
+// file or backup cannot be replayed as live cookies. The raw token only ever
+// lives in the client's cookie.
+func HashToken(raw string) string {
+	sum := sha256.Sum256([]byte(raw))
+	return hex.EncodeToString(sum[:])
+}
+
 func (d *DB) CreateSession(ctx context.Context, token, kind, subject string, userID *int64, ttl time.Duration) error {
 	var uid sql.NullInt64
 	if userID != nil {
@@ -832,7 +929,7 @@ func (d *DB) CreateSession(ctx context.Context, token, kind, subject string, use
 	}
 	_, err := d.conn.ExecContext(ctx,
 		`INSERT INTO sessions (token, kind, subject, user_id, expires_at) VALUES (?, ?, ?, ?, ?)`,
-		token, kind, subject, uid, time.Now().UTC().Add(ttl))
+		HashToken(token), kind, subject, uid, time.Now().UTC().Add(ttl))
 	return err
 }
 
@@ -842,9 +939,10 @@ type SessionRow struct {
 	UserID  *int64
 }
 
+// GetSession looks up a session by its raw token (cookie value).
 func (d *DB) GetSession(ctx context.Context, token string) (*SessionRow, error) {
 	row := d.conn.QueryRowContext(ctx,
-		`SELECT kind, subject, user_id FROM sessions WHERE token = ? AND expires_at > CURRENT_TIMESTAMP`, token)
+		`SELECT kind, subject, user_id FROM sessions WHERE token = ? AND expires_at > CURRENT_TIMESTAMP`, HashToken(token))
 	var s SessionRow
 	var uid sql.NullInt64
 	err := row.Scan(&s.Kind, &s.Subject, &uid)
@@ -861,8 +959,19 @@ func (d *DB) GetSession(ctx context.Context, token string) (*SessionRow, error) 
 	return &s, nil
 }
 
+// DeleteSession removes a session by its raw token (cookie value). For
+// revoking a row picked from a session list (which only exposes the stored
+// hash), use DeleteSessionByHash instead.
 func (d *DB) DeleteSession(ctx context.Context, token string) error {
-	_, err := d.conn.ExecContext(ctx, `DELETE FROM sessions WHERE token = ?`, token)
+	_, err := d.conn.ExecContext(ctx, `DELETE FROM sessions WHERE token = ?`, HashToken(token))
+	return err
+}
+
+// DeleteSessionByHash removes a session by its stored token hash — the value
+// surfaced by ListActiveSessions / ListSessionsForUser. Used by the admin
+// sessions page, whose revoke form round-trips the hash, never a raw token.
+func (d *DB) DeleteSessionByHash(ctx context.Context, tokenHash string) error {
+	_, err := d.conn.ExecContext(ctx, `DELETE FROM sessions WHERE token = ?`, tokenHash)
 	return err
 }
 
@@ -881,7 +990,7 @@ func (d *DB) DeleteSessionsByUserID(ctx context.Context, userID int64) (int64, e
 
 // SessionRecord is one row of the live-sessions list used by /admin/sessions.
 type SessionRecord struct {
-	Token     string // server-side primary key — shown truncated in UI
+	Token     string // SHA-256 hash of the cookie token — safe to show truncated in UI
 	Kind      string // "admin" | "user"
 	Subject   string // username for admin, phone for user
 	UserID    *int64 // present for kind=user
@@ -950,12 +1059,12 @@ func (d *DB) ListSessionsForUser(ctx context.Context, userID int64) ([]SessionRe
 	return out, rows.Err()
 }
 
-// DeleteAllAdminSessionsExcept logs out every admin session except `keep`.
-// Useful for "I lost my laptop" — keep current cookie alive, kill the rest.
-// Returns the number of sessions deleted.
+// DeleteAllAdminSessionsExcept logs out every admin session except `keep`
+// (a raw cookie token). Useful for "I lost my laptop" — keep current cookie
+// alive, kill the rest. Returns the number of sessions deleted.
 func (d *DB) DeleteAllAdminSessionsExcept(ctx context.Context, keep string) (int64, error) {
 	res, err := d.conn.ExecContext(ctx,
-		`DELETE FROM sessions WHERE kind = 'admin' AND token != ?`, keep)
+		`DELETE FROM sessions WHERE kind = 'admin' AND token != ?`, HashToken(keep))
 	if err != nil {
 		return 0, err
 	}
@@ -977,12 +1086,12 @@ func (d *DB) DeleteAllUserSessions(ctx context.Context) (int64, error) {
 }
 
 // DeleteUserSessionsExcept is the user equivalent — logs out every session
-// belonging to userID except `keep`, used by "sign me out of all other
-// devices". Returns the number of sessions deleted.
+// belonging to userID except `keep` (a raw cookie token), used by "sign me
+// out of all other devices". Returns the number of sessions deleted.
 func (d *DB) DeleteUserSessionsExcept(ctx context.Context, userID int64, keep string) (int64, error) {
 	res, err := d.conn.ExecContext(ctx,
 		`DELETE FROM sessions WHERE kind = 'user' AND user_id = ? AND token != ?`,
-		userID, keep)
+		userID, HashToken(keep))
 	if err != nil {
 		return 0, err
 	}
@@ -1228,22 +1337,26 @@ func (d *DB) DeleteUser(ctx context.Context, id int64) error {
 func (d *DB) CreateTrustedDevice(ctx context.Context, userID int64, token, label string, ttl time.Duration) (*models.TrustedDevice, error) {
 	now := time.Now().UTC()
 	exp := now.Add(ttl)
+	// Stored hashed, same rationale as sessions: a leaked DB dump must not
+	// yield working "skip 2FA" cookies.
+	hashed := HashToken(token)
 	res, err := d.conn.ExecContext(ctx,
 		`INSERT INTO user_trusted_devices (user_id, token, label, expires_at, last_seen, created_at)
 		 VALUES (?, ?, ?, ?, ?, ?)`,
-		userID, token, label, exp, now, now)
+		userID, hashed, label, exp, now, now)
 	if err != nil {
 		return nil, err
 	}
 	id, _ := res.LastInsertId()
 	return &models.TrustedDevice{
-		ID: id, UserID: userID, Token: token, Label: label,
+		ID: id, UserID: userID, Token: hashed, Label: label,
 		ExpiresAt: exp, LastSeen: now, CreatedAt: now,
 	}, nil
 }
 
-// GetTrustedDevice looks up by raw token, returning nil if missing/expired.
-// On hit it also bumps last_seen so the /user/2fa page shows fresh data.
+// GetTrustedDevice looks up by raw token (cookie value), returning nil if
+// missing/expired. On hit it also bumps last_seen so the /user/2fa page
+// shows fresh data.
 func (d *DB) GetTrustedDevice(ctx context.Context, token string) (*models.TrustedDevice, error) {
 	if token == "" {
 		return nil, nil
@@ -1251,7 +1364,7 @@ func (d *DB) GetTrustedDevice(ctx context.Context, token string) (*models.Truste
 	row := d.conn.QueryRowContext(ctx,
 		`SELECT id, user_id, token, label, expires_at, last_seen, created_at
 		 FROM user_trusted_devices WHERE token = ? AND expires_at > ?`,
-		token, time.Now().UTC())
+		HashToken(token), time.Now().UTC())
 	var t models.TrustedDevice
 	err := row.Scan(&t.ID, &t.UserID, &t.Token, &t.Label, &t.ExpiresAt, &t.LastSeen, &t.CreatedAt)
 	if errors.Is(err, sql.ErrNoRows) {

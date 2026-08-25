@@ -9,6 +9,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"router-billing/internal/db"
 )
 
 // loginWith2FAUntilSession runs through password → /user/login/2fa, optionally
@@ -71,8 +73,11 @@ func TestTrustDeviceCheckboxIssuesCookieAndRow(t *testing.T) {
 	if len(devices) != 1 {
 		t.Fatalf("expected 1 trusted device row; got %d", len(devices))
 	}
-	if devices[0].Token != jar[userTrustedCookie] {
-		t.Error("DB token must match cookie value")
+	if devices[0].Token != db.HashToken(jar[userTrustedCookie]) {
+		t.Error("DB must store the SHA-256 hash of the cookie value")
+	}
+	if devices[0].Token == jar[userTrustedCookie] {
+		t.Error("DB must not store the raw cookie value")
 	}
 }
 
@@ -142,7 +147,7 @@ func TestRevokeOneTrustedDeviceDoesNotKickOthers(t *testing.T) {
 	// Find the row for `first` and revoke it via the authed user endpoint.
 	var firstID int64
 	for _, d := range devices {
-		if d.Token == first[userTrustedCookie] {
+		if d.Token == db.HashToken(first[userTrustedCookie]) {
 			firstID = d.ID
 		}
 	}

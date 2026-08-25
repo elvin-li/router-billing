@@ -21,7 +21,7 @@ import (
 // /api/admin/health can alert without computing it themselves.
 func (a *App) handleAdminHealth(w http.ResponseWriter, r *http.Request) {
 	stats, _ := a.DB.Stats(r.Context())
-	att, _ := a.DB.Attention(r.Context())
+	att := a.attention(r.Context())
 	fwMACs, fwErr := a.MACSvc.FW.List(r.Context())
 	fwStatus := "ok"
 	if fwErr != nil {

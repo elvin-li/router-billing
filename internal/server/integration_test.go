@@ -918,8 +918,9 @@ func TestAdminSessionRevoke(t *testing.T) {
 		t.Fatal("victim has no session cookie")
 	}
 
-	// Admin revokes the victim's session.
-	form := url.Values{"_csrf": {tok}, "token": {victimTok}}
+	// Admin revokes the victim's session. The sessions page form round-trips
+	// the stored token hash, never the raw cookie value.
+	form := url.Values{"_csrf": {tok}, "token": {db.HashToken(victimTok)}}
 	req := httptest.NewRequest("POST", "/admin/sessions/revoke", strings.NewReader(form.Encode()))
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	for k, v := range jar {

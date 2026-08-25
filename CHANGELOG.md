@@ -1,5 +1,79 @@
 # Changelog
 
+## v0.113 — 合并遗漏修复 + 新一轮审计：voucher 授予竞态、撕裂备份下载、SSID QR 泄漏
+
+两部分工作。第一部分把仍在未合并分支上的真实修复移植进来
+（对照 PR #1/#2/#3 及全部 origin/cursor/* 分支逐提交内容级比
+对，已被等价实现覆盖的不重复合并）；第二部分是新一轮子系统审
+计发现的三个新缺陷。
+
+### 新发现并修复（本轮审计）
+
+A. (HIGH, 并发丢失更新) `GrantFromVoucher` 没有持有 v0.110 引入
+的服务级互斥锁——同族的 GrantFromOrder / Extend / Revoke /
+Resync / ExpireDue 全部在锁内，唯独 voucher 授予路径漏掉。后果
+与 v0.110-A 完全同类：兑换的 `FW.Add` 落在并发 Resync 的
+「读活跃列表 → 全量重建」窗口内时，会被重建直接冲出内核集合
+——充值码已消耗、设备却离线，直到下一次对账。失败路径的
+resync 改用已持锁的 `resyncLocked`（避免自死锁）。确定性 gate
+回归测试（冻结 Resync 于 FW.Sync 内、并发跑 GrantFromVoucher）
+在修复前代码上验证会失败。
+
+B. (MEDIUM, 数据损坏) `/admin/backup` 与 `/api/admin/backup` 下
+载端点仍是 checkpoint 后直接 `io.Copy` 活库文件——v0.109 已给
+夜间轮转备份改用 `VACUUM INTO` 修掉撕裂快照，但按需下载路径漏
+掉了：下载期间落盘的写事务（支付、会话、审计）可撕裂页面，静
+默产出损坏的备份——恰恰是主库丢失后运维要恢复的那份文件。现
+在两个端点都先 `VACUUM INTO` 一致性快照再流式返回（临时文件用
+后即删），仅当 VACUUM INTO 本身报错才回退旧行为，与轮转器策略
+一致。
+
+C. (MEDIUM, 凭据泄漏 + 开放编码器) `/admin/ssid-cards/qr` 从查
+询串接受 `?ssid=&password=` / `?url=`：WPA 密码随 GET URL 进浏
+览器历史与访问日志（每次 <img> 拉取一行）；PNG 响应带
+`Cache-Control: public, max-age=300`，明示共享缓存可存储含密码
+的已认证响应；自由参数还让它成为我们域名上的开放 QR 编码器
+（与 v0.103 修掉的 /api/pay/qr 同类）。现改为枚举参数
+`?card=free|paid|secure|portal`，载荷全部服务端从配置解析，响
+应 `no-store`。回归测试钉住两个属性。
+
+### 从未合并分支移植（内容级比对后仅取 HEAD 仍缺失的）
+
+来自 PR #3 (cursor/comprehensive-optimization)：
+
+- (MEDIUM, sec) 会话令牌与受信设备（「记住此浏览器」跳过 2FA）
+  令牌改为 SHA-256 哈希落库——拿到 DB 文件或备份不再等于拿到可
+  重放的登录/免 2FA cookie。一次性迁移（PRAGMA user_version=1/2）
+  原地改写存量行，设备上的 cookie 继续有效、无人被登出。
+  /admin/sessions 撤销表单改为回传哈希，页面 HTML 不再内嵌每个
+  live 会话的原始 cookie 值。
+- (MEDIUM, sec) /admin/users/reset-password 生成的临时密码不再
+  经重定向 URL（?reset_pwd=...，浏览器历史/中间层日志都会留
+  存）传递，改走进程内一次性 flash 存储（2 分钟 TTL，弹出即
+  删，刷新页面不再显示）。
+- (MEDIUM, 正确性) Resync 现在感知时段计划：窗口关闭的 MAC 不
+  再被启动/手动/周期 resync 放回防火墙（此前会放行至多一分钟，
+  直到分钟级 enforcer 再移除）。到期巡检 cron 每个 tick 额外跑
+  一次 panic 隔离的 Resync，瞬时 nft 失败造成的防火墙漂移一小
+  时内自愈，无需重启或手动 /admin/resync。
+- (perf) attention 计数器 3 秒进程内缓存（此前每次管理页渲染、
+  仪表盘双查、每条 SSE 流每 5 秒各打 6 条 COUNT）；
+  /admin/users 的按用户 MAC 计数改为一条 GROUP BY；无过滤 MAC
+  列表在 SQL 层 LIMIT（此前全表进 Go 再截断）、管理页统一 500
+  行上限；/admin/devices 的计费行改为一条 IN 批量查询（此前每
+  设备一次 GetMAC）；/pay/success 的收据查找改为带 30 分钟反探
+  测窗口（窗口条件下沉到 SQL）的定向索引查询
+  `LatestPaidOrderForMAC`——旧的「扫最新 50 单」在支付后又产生
+  50+ 订单时会静默丢失收据链接。
+
+确认已被等价实现覆盖、未重复合并的：PR #1/#2 的 render 缓冲、
+payqr 编码器、批量导入（v0.102/103 已含）；PR #3 的金额校验、
+VACUUM INTO 轮转备份、webhook 队列排空、nft 原子事务、XFF 信
+任代理、finalize 防取消等；auth-2fa-csrf-port /
+background-jobs-deep-opt / firewall-garden-deploy /
+port-db-tx / port-remaining-fixes 各分支的全部提交（HEAD 均有
+等价实现）。
+
 ## v0.112 — Web handler audit: CSP-dead inline JS, unbounded multipart bodies, cacheable voucher QRs
 
 Follow-up hunt over the web handler surface for the usual suspects.

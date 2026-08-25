@@ -58,6 +58,8 @@ CREATE INDEX IF NOT EXISTS idx_orders_user    ON orders(user_id);
 -- page load; the composite index serves them without scanning all paid rows.
 CREATE INDEX IF NOT EXISTS idx_orders_status_paid ON orders(status, paid_at);
 
+-- Login sessions (admin + user). token holds the SHA-256 hash of the cookie
+-- value (since v0.97) — a DB dump yields nothing replayable as a cookie.
 CREATE TABLE IF NOT EXISTS sessions (
     token       TEXT PRIMARY KEY,
     kind        TEXT NOT NULL DEFAULT 'admin', -- admin | user
@@ -130,10 +132,10 @@ CREATE TABLE IF NOT EXISTS plans (
 
 -- TOTP trusted devices — when a user checks "trust this device" at 2FA
 -- verify, we issue a 30-day token + row here so future logins from the
--- same browser skip the 2FA challenge. Token is the raw 32-byte random
--- (base64-encoded), stored in the cookie AND as the PK here. DB dump
--- risk is real but bounded: the token alone doesn't grant access without
--- the user's password too (login still validates password first).
+-- same browser skip the 2FA challenge. The cookie carries the raw random
+-- token; this table stores its SHA-256 hash (since v0.97), so a DB dump
+-- yields nothing replayable. The token alone never grants access anyway —
+-- login still validates the password first.
 CREATE TABLE IF NOT EXISTS user_trusted_devices (
     id          INTEGER PRIMARY KEY AUTOINCREMENT,
     user_id     INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,

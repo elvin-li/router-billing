@@ -169,6 +169,46 @@ func TestExpireSweepDoesNotRemoveConcurrentGrant(t *testing.T) {
 	}
 }
 
+// GrantFromVoucher is GrantFromOrder's sibling and must hold the same
+// service lock: pre-v0.113 it didn't, so a voucher redemption landing
+// while a resync was between its DB read and its full set rebuild was
+// flushed straight back out of the kernel set — the customer's code was
+// consumed but their device stayed offline until the next reconcile.
+func TestResyncDoesNotDropConcurrentVoucherGrant(t *testing.T) {
+	svc, _, g := newGatedSvc(t)
+	ctx := context.Background()
+
+	if _, err := svc.Extend(ctx, "AA:BB:CC:DD:EE:06", "seed", 30, nil); err != nil {
+		t.Fatal(err)
+	}
+	g.syncGate = newFWGate()
+
+	resyncDone := make(chan struct{})
+	go func() {
+		defer close(resyncDone)
+		_ = svc.Resync(ctx)
+	}()
+	<-g.syncGate.entered // resync has read the active list, is inside FW.Sync
+
+	grantDone := make(chan struct{})
+	go func() {
+		defer close(grantDone)
+		_, _ = svc.GrantFromVoucher(ctx, "AA:BB:CC:DD:EE:07", "voucher:test", 30, nil)
+	}()
+
+	time.Sleep(150 * time.Millisecond)
+	close(g.syncGate.release)
+	<-resyncDone
+	<-grantDone
+
+	if !g.has("AA:BB:CC:DD:EE:07") {
+		t.Error("voucher-granted MAC was flushed from the firewall set by a concurrent resync")
+	}
+	if !g.has("AA:BB:CC:DD:EE:06") {
+		t.Error("pre-existing active MAC should survive the resync")
+	}
+}
+
 // The minute schedule enforcer must not re-add a MAC that a concurrent
 // admin Revoke just blocked and removed.
 func TestScheduleEnforceDoesNotResurrectConcurrentRevoke(t *testing.T) {

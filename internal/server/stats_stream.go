@@ -22,7 +22,7 @@ func (a *App) handleAdminStatsStream(w http.ResponseWriter, r *http.Request) {
 
 	send := func() {
 		stats, _ := a.DB.Stats(r.Context())
-		att, _ := a.DB.Attention(r.Context())
+		att := a.attention(r.Context())
 		buf, _ := json.Marshal(map[string]any{
 			"total":           stats.Total,
 			"active":          stats.Active,

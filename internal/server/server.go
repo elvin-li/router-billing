@@ -69,6 +69,16 @@ type App struct {
 
 	// sseTick overrides the 5s SSE push cadence (tests only). 0 = default.
 	sseTick time.Duration
+
+	// One-time flash values (see flash.go) — secrets that must survive
+	// exactly one POST-redirect-GET hop without touching the URL.
+	flashMu sync.Mutex
+	flashes map[string]flashEntry
+
+	// Short-TTL cache for the attention counters (see attention_cache.go).
+	attMu  sync.Mutex
+	attVal db.AttentionCounts
+	attAt  time.Time
 }
 
 func NewApp(cfg *config.Config, dbx *db.DB, svc *service.MACService) (*App, error) {
@@ -96,6 +106,7 @@ func NewApp(cfg *config.Config, dbx *db.DB, svc *service.MACService) (*App, erro
 		apiTokenLimiter: map[string]*rateLimiter{},
 
 		waiters: map[string][]chan struct{}{},
+		flashes: map[string]flashEntry{},
 	}
 
 	// Wire the v0.49 webhook delivery logger: every Notifier attempt
