@@ -57,13 +57,18 @@ table ${TABLE_FAMILY} ${TABLE_NAME} {
         iifname "${PAID_IFACE}" ether saddr @${SET_NAME} return
         # 未付费但目标在 walled garden：放行（让支付/captive-portal 探测包通过）
         iifname "${PAID_IFACE}" ip daddr @wg_paid return
-        # 未付费：HTTP → 门户；HTTPS → reject 触发 CP 探测
+        # 未付费：HTTP → 门户
         iifname "${PAID_IFACE}" tcp dport 80  redirect to :${PORTAL_PORT}
-        iifname "${PAID_IFACE}" tcp dport 443 reject
     }
     chain forward {
         iifname "${PAID_IFACE}" ether saddr @${SET_NAME} return
         iifname "${PAID_IFACE}" ip daddr @wg_paid return
+        # 未付费 HTTPS → RST，浏览器立刻报错并触发 captive-portal 探测。
+        # 必须放在 forward（filter hook）：内核 5.11 之前（OpenWrt 22.03 =
+        # 5.10）reject 只允许出现在 input/forward/output —— 放在 nat
+        # prerouting 的话整个 nft -f 事务在 commit 时被内核拒绝
+        # (EOPNOTSUPP)，apply 整体失败，计费规则一条都不剩。
+        iifname "${PAID_IFACE}" tcp dport 443 reject with tcp reset
         iifname "${PAID_IFACE}" drop
     }
 }

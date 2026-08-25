@@ -27,41 +27,27 @@ func stubbedManager(t *testing.T, script string) *Manager {
 	return m
 }
 
-// Real `nft -a list set inet billing mac_paid` output wraps the set in the
-// table declaration — the first "{" in the output is the TABLE brace, not the
-// elements brace. List must not lose elements to that wrapper.
+// List goes through `nft -j list set` JSON output. Regression guard for the
+// pre-v0.107 text parser that anchored on the table's opening brace and
+// silently dropped the first MAC of every listing.
 func TestListParsesRealNftOutput(t *testing.T) {
 	m := stubbedManager(t, `cat <<'EOF'
-table inet billing { # handle 5
-	set mac_paid { # handle 1
-		type ether_addr
-		counter
-		elements = { aa:bb:cc:dd:ee:ff counter packets 4 bytes 260,
-			     11:22:33:44:55:66 counter packets 0 bytes 0 }
-	}
-}
+{"nftables": [{"metainfo": {"version": "1.0.9", "release_name": "Old Doc Yak #3", "json_schema_version": 1}}, {"set": {"family": "inet", "name": "mac_paid", "table": "billing", "type": "ether_addr", "handle": 3, "elem": [{"elem": {"val": "aa:bb:cc:dd:ee:ff", "counter": {"packets": 4, "bytes": 260}}}, {"elem": {"val": "11:22:33:44:55:66", "counter": {"packets": 0, "bytes": 0}}}], "stmt": [{"counter": null}]}}]}
 EOF`)
 	got, err := m.List(context.Background())
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := []string{"AA:BB:CC:DD:EE:FF", "11:22:33:44:55:66"}
+	want := []string{"11:22:33:44:55:66", "AA:BB:CC:DD:EE:FF"} // uppercase, sorted
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("List:\n got  %+v\n want %+v", got, want)
 	}
 }
 
-// A single-element set has no commas at all — the whole elements body is one
-// token glued to the table/set preamble. Regression guard for the parser
-// dropping it entirely.
+// A single-element set must survive the round trip intact.
 func TestListSingleElement(t *testing.T) {
 	m := stubbedManager(t, `cat <<'EOF'
-table inet billing {
-	set mac_paid {
-		type ether_addr
-		elements = { aa:bb:cc:dd:ee:ff }
-	}
-}
+{"nftables": [{"metainfo": {"json_schema_version": 1}}, {"set": {"family": "inet", "name": "mac_paid", "table": "billing", "type": "ether_addr", "elem": ["aa:bb:cc:dd:ee:ff"]}}]}
 EOF`)
 	got, err := m.List(context.Background())
 	if err != nil {
@@ -73,14 +59,10 @@ EOF`)
 	}
 }
 
-// Empty set: nft prints the set definition without an elements clause.
+// Empty set: nft emits the set object without an "elem" key.
 func TestListEmptySet(t *testing.T) {
 	m := stubbedManager(t, `cat <<'EOF'
-table inet billing {
-	set mac_paid {
-		type ether_addr
-	}
-}
+{"nftables": [{"metainfo": {"json_schema_version": 1}}, {"set": {"family": "inet", "name": "mac_paid", "table": "billing", "type": "ether_addr"}}]}
 EOF`)
 	got, err := m.List(context.Background())
 	if err != nil {
@@ -172,28 +154,17 @@ func TestWalledGardenOpsViaExec(t *testing.T) {
 	if err := ok.EnsureWalledGardenSet(ctx, "wg_paid"); err != nil {
 		t.Errorf("EnsureWalledGardenSet: %v", err)
 	}
-	if err := ok.AddWalledGardenIPs(ctx, "wg_paid", []string{"1.1.1.1", "2.2.2.2"}); err != nil {
-		t.Errorf("AddWalledGardenIPs: %v", err)
+	if err := ok.SyncWalledGardenIPs(ctx, "wg_paid", []string{"1.1.1.1", "2.2.2.2"}); err != nil {
+		t.Errorf("SyncWalledGardenIPs: %v", err)
 	}
-	if err := ok.RemoveWalledGardenIPs(ctx, "wg_paid", []string{"1.1.1.1"}); err != nil {
-		t.Errorf("RemoveWalledGardenIPs: %v", err)
+	// Empty list still execs (flush-only transaction drains the set).
+	if err := ok.SyncWalledGardenIPs(ctx, "wg_paid", nil); err != nil {
+		t.Errorf("empty sync should succeed: %v", err)
 	}
-	// Empty slices are no-ops (never exec).
-	boom := stubbedManager(t, `exit 1`)
-	if err := boom.AddWalledGardenIPs(ctx, "wg_paid", nil); err != nil {
-		t.Errorf("empty add should be no-op: %v", err)
-	}
-	if err := boom.RemoveWalledGardenIPs(ctx, "wg_paid", nil); err != nil {
-		t.Errorf("empty remove should be no-op: %v", err)
-	}
-	// Idempotency on duplicates / missing.
-	dup := stubbedManager(t, `echo "Error: File exists" >&2; exit 1`)
-	if err := dup.AddWalledGardenIPs(ctx, "wg_paid", []string{"1.1.1.1"}); err != nil {
-		t.Errorf("duplicate wg add should be nil: %v", err)
-	}
-	miss := stubbedManager(t, `echo "Error: No such file or directory" >&2; exit 1`)
-	if err := miss.RemoveWalledGardenIPs(ctx, "wg_paid", []string{"1.1.1.1"}); err != nil {
-		t.Errorf("missing wg remove should be nil: %v", err)
+	// Hard nft failures propagate.
+	boom := stubbedManager(t, `echo "Error: Operation not permitted" >&2; exit 1`)
+	if err := boom.SyncWalledGardenIPs(ctx, "wg_paid", []string{"1.1.1.1"}); err == nil {
+		t.Error("hard wg sync failure should propagate")
 	}
 }
 

@@ -15,7 +15,11 @@ WIFI_DEV=$(uci -q show wireless | sed -n "s/^wireless\.\([^.]*\)=wifi-device$/\1
 
 if uci -q show wireless | grep -q "ssid='${PAID_SECURE_SSID}'"; then
     echo "SSID ${PAID_SECURE_SSID} 已存在，仅更新密码"
-    SECTION=$(uci -q show wireless | awk -F'[].[]' "/ssid='${PAID_SECURE_SSID}'/ {print \$2; exit}")
+    # 提取 @wifi-iface[N] 的数字下标。旧版 awk -F'[].[]' 取的是 $2 ——
+    # 那是字面量 "@wifi-iface" 而不是下标，随后的 uci set 必然报错，
+    # set -e 让"更新已有 SSID 密码"路径从未成功过。
+    SECTION=$(uci -q show wireless | sed -n "s/^wireless\.@wifi-iface\[\([0-9]*\)\]\.ssid='${PAID_SECURE_SSID}'$/\1/p" | head -n1)
+    [ -n "${SECTION}" ] || { echo "找不到 ${PAID_SECURE_SSID} 的 wifi-iface 下标" >&2; exit 1; }
     uci set wireless.@wifi-iface[${SECTION}].encryption='psk2'
     uci set wireless.@wifi-iface[${SECTION}].key="${PAID_SECURE_KEY}"
 else
@@ -32,4 +36,15 @@ fi
 
 uci commit wireless
 wifi reload
-echo "完成。$(echo $PAID_SECURE_SSID) (psk2) 已上线。"
+
+# 与 install.sh 保持一致：密码记录到 root-only 的 wifi-keys.txt。
+WIFI_KEYS=/etc/router-billing/wifi-keys.txt
+mkdir -p /etc/router-billing
+if [ ! -f "${WIFI_KEYS}" ]; then
+    touch "${WIFI_KEYS}"
+    echo "# router-billing wifi keys" >> "${WIFI_KEYS}"
+fi
+chmod 0600 "${WIFI_KEYS}"
+echo "paid_secure_key=${PAID_SECURE_KEY}" >> "${WIFI_KEYS}"
+
+echo "完成。${PAID_SECURE_SSID} (psk2) 已上线。密码已记录到 ${WIFI_KEYS} (0600)。"
