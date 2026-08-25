@@ -6,7 +6,61 @@ import (
 	"path/filepath"
 	"testing"
 	"time"
+
+	"router-billing/internal/db"
 )
+
+// TestSnapshotProducesConsistentCopy runs the real snapshot path (VACUUM
+// INTO with the copy fallback) against a live database and verifies the
+// result opens cleanly and contains the source rows.
+func TestSnapshotProducesConsistentCopy(t *testing.T) {
+	dir := t.TempDir()
+	srcPath := filepath.Join(dir, "billing.db")
+	d, err := db.Open(srcPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer d.Close()
+	ctx := context.Background()
+	for i := 0; i < 5; i++ {
+		d.Audit(ctx, "test", "snapshot_test", "T", "row")
+	}
+
+	r := &Rotator{DB: d, DBPath: srcPath, Dir: dir}
+	dst := filepath.Join(dir, "billing-snap.db")
+	if err := r.snapshot(ctx, dst); err != nil {
+		t.Fatalf("snapshot: %v", err)
+	}
+	if _, err := os.Stat(dst + ".tmp"); !os.IsNotExist(err) {
+		t.Error(".tmp left behind after snapshot")
+	}
+	info, err := os.Stat(dst)
+	if err != nil {
+		t.Fatalf("snapshot file missing: %v", err)
+	}
+	if info.Mode().Perm() != 0o600 {
+		t.Errorf("snapshot mode = %v; want 0o600", info.Mode().Perm())
+	}
+
+	copyDB, err := db.Open(dst)
+	if err != nil {
+		t.Fatalf("open snapshot: %v", err)
+	}
+	defer copyDB.Close()
+	entries, err := copyDB.ListAudit(ctx, 50)
+	if err != nil {
+		t.Fatalf("read snapshot: %v", err)
+	}
+	found := 0
+	for _, e := range entries {
+		if e.Action == "snapshot_test" {
+			found++
+		}
+	}
+	if found != 5 {
+		t.Errorf("snapshot has %d test rows, want 5", found)
+	}
+}
 
 func TestCopyFileAtomic(t *testing.T) {
 	dir := t.TempDir()

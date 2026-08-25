@@ -53,13 +53,29 @@ func (a *App) handleAPIBackup(w http.ResponseWriter, r *http.Request, actor stri
 	a.streamBackup(w, r, actor, a.clientIP(r))
 }
 
-// streamBackup is the shared body — checkpoint + stream + audit row.
+// streamBackup is the shared body — snapshot + stream + audit row.
 // `actor` distinguishes UI ("admin") from API (Bearer label) in audit.
+//
+// The snapshot is taken with `VACUUM INTO` a sibling temp file: SQLite
+// copies inside a read transaction, so the download is consistent even if
+// a payment lands mid-stream. Falls back to the old checkpoint+stream of
+// the live file when VACUUM INTO fails (that path can capture a torn copy
+// if a write races the stream, but it beats returning nothing).
 func (a *App) streamBackup(w http.ResponseWriter, r *http.Request, actor, ip string) {
-	if _, err := a.DB.Exec(r.Context(), "PRAGMA wal_checkpoint(TRUNCATE)"); err != nil {
-		log.Printf("backup: checkpoint failed: %v", err)
+	path := a.Cfg.DBPath
+	tmp := filepath.Join(filepath.Dir(a.Cfg.DBPath),
+		fmt.Sprintf(".backup-stream-%d.db", time.Now().UnixNano()))
+	if _, err := a.DB.Exec(r.Context(), "VACUUM INTO ?", tmp); err == nil {
+		path = tmp
+		defer os.Remove(tmp)
+	} else {
+		log.Printf("backup: vacuum-into failed (%v); falling back to checkpoint+stream", err)
+		_ = os.Remove(tmp)
+		if _, err := a.DB.Exec(r.Context(), "PRAGMA wal_checkpoint(TRUNCATE)"); err != nil {
+			log.Printf("backup: checkpoint failed: %v", err)
+		}
 	}
-	f, err := os.Open(a.Cfg.DBPath)
+	f, err := os.Open(path)
 	if err != nil {
 		http.Error(w, "open db: "+err.Error(), http.StatusInternalServerError)
 		return
