@@ -680,6 +680,7 @@ func (a *App) handleAdminUserResetPassword(w http.ResponseWriter, r *http.Reques
 	}
 	// Invalidate any existing sessions so the old password is gone.
 	_, _ = a.DB.Exec(r.Context(), `DELETE FROM sessions WHERE kind='user' AND user_id = ?`, id)
+	_ = a.DB.DeleteAllTrustedDevices(r.Context(), id)
 
 	// If SMS is configured AND the admin checked "send via SMS", deliver
 	// the temp password to the user's phone instead of returning it in

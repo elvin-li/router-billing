@@ -1,5 +1,17 @@
 # Changelog
 
+## v0.105 — Password change / reset now kills other sessions + trusted devices
+
+Changing password from `/user/me` previously left every other
+`rb_user` session alive. A stolen cookie stayed logged in after the
+victim rotated the password. The change now keeps only the browser
+that submitted the form (`DeleteUserSessionsExcept`) and wipes
+`user_trusted_devices` so a remembered 2FA skip cannot outlive the
+old password.
+
+The same trusted-device wipe now also runs on SMS forgot-password
+verify and on admin reset-password (admin already deleted sessions).
+
 ## v0.104 — OpenWrt: firewall-billing.sh was a parse error on nftables 1.0.x
 
 Critical ops fix. The nftables filter chain was named `fwd`, which

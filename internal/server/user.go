@@ -799,6 +799,23 @@ func (a *App) handleUserPassword(w http.ResponseWriter, r *http.Request) {
 		http.Redirect(w, r, "/user/me?err=internal", http.StatusSeeOther)
 		return
 	}
+	// A password change means every other login is untrusted: stolen
+	// rb_user cookies must die. Keep the browser that just proved the
+	// old password so the user is not bounced to /user/login.
+	keep := ""
+	if c, err := r.Cookie(userCookieName); err == nil {
+		keep = c.Value
+	}
+	if keep != "" {
+		if _, err := a.DB.DeleteUserSessionsExcept(r.Context(), uid, keep); err != nil {
+			log.Printf("password-change drop other sessions %d: %v", uid, err)
+		}
+	} else if _, err := a.DB.DeleteSessionsByUserID(r.Context(), uid); err != nil {
+		log.Printf("password-change drop sessions %d: %v", uid, err)
+	}
+	if err := a.DB.DeleteAllTrustedDevices(r.Context(), uid); err != nil {
+		log.Printf("password-change drop trusted devices %d: %v", uid, err)
+	}
 	a.DB.Audit(r.Context(), "user:"+user.Phone, "password_change", "", "")
 	http.Redirect(w, r, "/user/me?ok=password", http.StatusSeeOther)
 }

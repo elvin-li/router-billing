@@ -54,6 +54,10 @@ the password can passively decrypt).
 - Admin session TTL: 12 hours; user TTL: 30 days.
 - Logout deletes the server-side session row + clears the cookie.
 - Admin suspend on a user calls `DeleteSessionsByUserID` — _no grace period_.
+- Password change from `/user/me` keeps only the current session and
+  deletes every other `rb_user` row plus all trusted devices. SMS
+  forgot-password and admin reset-password delete all sessions and
+  trusted devices.
 - Sessions purged hourly via the housekeeping loop.
 
 ### CSRF
