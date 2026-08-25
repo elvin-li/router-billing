@@ -539,6 +539,13 @@ func (d *DB) queryOrders(ctx context.Context, q string, args ...any) ([]models.O
 
 // MarkOrderPaid sets status=paid atomically; returns (transitioned, order, err).
 // Idempotent — re-calling for an already-paid order returns transitioned=false.
+//
+// `refunded` is a terminal state and is treated like already-paid: both
+// PSPs redeliver success notifications for up to ~24h, and pre-v0.105 a
+// redelivery (or a replayed capture) arriving AFTER an admin refund flipped
+// the order back to `paid` and re-granted the MAC days — the customer kept
+// the refund AND the access. Returning transitioned=false (no error) acks
+// the notification so the PSP stops retrying, without touching the order.
 func (d *DB) MarkOrderPaid(ctx context.Context, orderNo, tradeNo string) (bool, *models.Order, error) {
 	tx, err := d.conn.BeginTx(ctx, nil)
 	if err != nil {
@@ -554,12 +561,20 @@ func (d *DB) MarkOrderPaid(ctx context.Context, orderNo, tradeNo string) (bool, 
 	if err != nil {
 		return false, nil, err
 	}
-	if o.Status == models.OrderPaid {
+	if o.Status == models.OrderPaid || o.Status == models.OrderRefunded {
 		return false, o, nil
 	}
 	now := time.Now().UTC()
-	if _, err := tx.ExecContext(ctx, `UPDATE orders SET status = 'paid', trade_no = ?, paid_at = ? WHERE order_no = ?`, tradeNo, now, orderNo); err != nil {
+	// Guard the UPDATE on the status we just read so a concurrent transition
+	// (e.g. an admin refund racing this webhook) can't be overwritten.
+	res, err := tx.ExecContext(ctx,
+		`UPDATE orders SET status = 'paid', trade_no = ?, paid_at = ? WHERE order_no = ? AND status = ?`,
+		tradeNo, now, orderNo, string(o.Status))
+	if err != nil {
 		return false, nil, err
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return false, nil, fmt.Errorf("order %s changed state concurrently, not marking paid", orderNo)
 	}
 	if err := tx.Commit(); err != nil {
 		return false, nil, err
@@ -568,6 +583,25 @@ func (d *DB) MarkOrderPaid(ctx context.Context, orderNo, tradeNo string) (bool, 
 	o.TradeNo = tradeNo
 	o.PaidAt = &now
 	return true, o, nil
+}
+
+// RevertOrderToPending flips a paid order back to pending. Used ONLY by the
+// payment finalizer as compensation when the post-payment grant fails after
+// MarkOrderPaid already committed: leaving the order `paid` would consume
+// the one transitioned=true signal, so neither the PSP's retry nor our
+// poller would ever re-drive the MAC grant. Reverting lets the next
+// notify/poll retry the whole finalize. trade_no/paid_at are kept so the
+// gateway reference survives the round trip.
+func (d *DB) RevertOrderToPending(ctx context.Context, orderNo string) error {
+	res, err := d.conn.ExecContext(ctx,
+		`UPDATE orders SET status = 'pending' WHERE order_no = ? AND status = 'paid'`, orderNo)
+	if err != nil {
+		return err
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return fmt.Errorf("order %s not paid, cannot revert", orderNo)
+	}
+	return nil
 }
 
 // MarkOrderRefunded transitions a paid order to refunded and rolls back the
