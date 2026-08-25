@@ -1,5 +1,63 @@
 # Changelog
 
+## v0.107 — DB layer: broken date() stats, expiry-sweep atomicity, tx gaps, indexes
+
+SQLite/Go correctness pass over internal/db.
+
+A. (HIGH) Two daily stats were permanently zero. modernc.org/sqlite
+stores Go-bound time.Time as "2006-01-02 15:04:05.999 +0000 UTC" — a
+format SQLite's date() function returns NULL for. So SnapshotToday's
+`date(paid_at) = date('now')` recorded paid_orders = 0 in every daily
+snapshot ever taken, and Attention's `date(created_at) = date('now')`
+kept the FailedToday dashboard chip at 0 no matter how many orders
+failed. Both now compare against datetime('now','start of day'),
+which works lexicographically on the shared "YYYY-MM-DD HH:MM:SS"
+prefix — the same pattern DashboardSnapshot already used (its comment
+even warned about date(); the two older call sites never got the
+memo). SnapshotToday also no longer swallows the count error.
+
+B. (MED) ExpireDueMACs was a SELECT list followed by a separate
+blanket UPDATE — not atomic. A MAC extended between the two
+statements stayed active but was still in the returned list, so the
+caller revoked firewall access for a customer who had just renewed; a
+MAC expiring between the statements got flipped but was never
+reported, so its revoke webhook/notify never fired; and two
+concurrent sweeps could both report the same MAC (double webhooks).
+Now a single `UPDATE ... RETURNING mac` — flip and report are one
+atomic statement, each due MAC is claimed by exactly one sweep.
+
+C. (MED) ClearUserTOTP ran three separate statements (wipe secret,
+delete backup codes, delete trusted devices). A failure after the
+first left 2FA off WITH live trusted-device tokens that would
+silently bypass the next enrollment's challenge. All three writes now
+commit in one transaction.
+
+D. (MED) SuspendUser's session purge was a separate best-effort
+statement whose error was discarded — a failed delete left the
+suspended user with a working session until natural expiry.
+DeleteUser had the same swallowed-error pattern. Both are now single
+transactions that propagate errors.
+
+E. (LOW) BumpPasswordResetAttempts was UPDATE-then-SELECT; two
+concurrent failed verifies could both read the same post-increment
+value, under-counting attempts against the brute-force cap. Now one
+`UPDATE ... RETURNING attempts`.
+
+F. (PERF) Missing indexes: sessions(user_id) — every per-user session
+op (suspend purge, "sign out other devices", list, count) scanned the
+whole table; and audit_log(action, target) — the daily expiry-
+reminder loop's correlated NOT EXISTS probe re-scanned every
+expiry_reminder row per candidate MAC. Both added via schema.sql's
+idempotent CREATE INDEX IF NOT EXISTS, so existing deploys pick them
+up on next startup.
+
+Regression tests for all of the above, including concurrency tests
+(verified under -race) that fail on the pre-fix code.
+
+internal/db/db.go
+internal/db/schema.sql
+internal/db/tx_time_index_test.go
+
 ## v0.106 — Payment hardening: refund-replay resurrection, amount cross-check, lost grants
 
 Money/security pass over the payment finalize path.
