@@ -99,7 +99,7 @@ func (a *App) handleAdminExpiryReminderTrigger(w http.ResponseWriter, r *http.Re
 	sent, skipped, errored := a.sendExpiryReminders(r.Context())
 	a.DB.Audit(r.Context(), "admin", "expiry_reminder_pass", "",
 		"sent="+itoaSmall(sent)+" skipped="+itoaSmall(skipped)+" errored="+itoaSmall(errored)+
-			" ip="+clientIP(r))
+			" ip="+a.clientIP(r))
 	loc := "/admin/sms-log?ok=reminders&sent=" + itoaSmall(sent) +
 		"&skipped=" + itoaSmall(skipped) + "&errored=" + itoaSmall(errored)
 	http.Redirect(w, r, loc, http.StatusSeeOther)

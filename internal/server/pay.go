@@ -42,7 +42,7 @@ func (a *App) handlePayCreate(w http.ResponseWriter, r *http.Request) {
 	// WeChat and Alipay rate-limit downstream, but every flood-create costs
 	// us a sqlite write + outbound HTTPS roundtrip. 20/min/IP is generous
 	// for the worst legitimate user (fat-finger reload spam).
-	if a.payCreateLimiter != nil && !a.payCreateLimiter.allow(clientIP(r)) {
+	if a.payCreateLimiter != nil && !a.payCreateLimiter.allow(a.clientIP(r)) {
 		writeJSON(w, http.StatusTooManyRequests, map[string]string{
 			"error": "请求过于频繁，请稍候再试",
 		})

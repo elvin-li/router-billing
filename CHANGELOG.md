@@ -1,5 +1,56 @@
 # Changelog
 
+## v0.105 — Security: X-Forwarded-For rate-limit bypass, SSE session leak, /pay/success order oracle, walled-garden LAN hole
+
+Four independent portal/user-surface fixes:
+
+A. clientIP() trusted X-Forwarded-For unconditionally. On the default
+deployment (binary listening directly on the router LAN, no reverse
+proxy) that header is client-controlled, so ONE spoofed header per
+request defeated every IP-keyed rate limiter: unlimited voucher-code
+guesses at /redeem (the only brute-force defense on 12-char codes),
+login floods, /api/pay/create order floods, forgot-password SMS
+pumping — and forged the IPs written into the audit log. XFF is now
+only honored behind the new opt-in `security.trust_proxy_headers`
+config (set it ONLY when a proxy you control overwrites the header).
+
+B. /admin/devices/stream and /admin/stats/stream checked the admin
+session only at connect time. A revoked session (panic button,
+revoke-all, logout elsewhere) or an expired one kept receiving live
+device data — MACs, IPs, DHCP hostnames, revenue counters —
+indefinitely, since heartbeats keep the connection open forever. Both
+streams now re-validate the session cookie on every tick/heartbeat
+and close when it's gone.
+
+C. /pay/success?mac= accepted any raw string and always looked up the
+most recent PAID order for it — anyone who knew a neighbor's MAC
+(they're broadcast on the LAN) could fetch their order number and
+from it the full /receipt (amount, plan, order/trade numbers), any
+time. The param now goes through NormalizeMAC, and the receipt link +
+expiry row only render for orders paid in the last 30 minutes (the
+page is only ever reached right after paying) or for the requester's
+own detected device.
+
+D. Walled-garden DNS answers pointing at loopback / RFC1918 /
+link-local / CGNAT / multicast / 240/4 space are rejected before
+entering the nftables bypass set. Previously a misconfigured or
+hostile upstream resolver answering 192.168.1.1 for a garden CDN
+domain let UNPAID devices reach the router itself (or other LAN
+hosts) ahead of the drop rule. Literal IP entries configured in
+`walled_garden.domains` still pass verbatim (explicit admin intent).
+
+Also: db.RedeemVoucher's mark-redeemed UPDATE now re-asserts
+`redeemed_at IS NULL AND revoked = 0` in its WHERE clause
+(compare-and-set), so a double-spend can't win even if the
+SetMaxOpenConns(1) serialization ever changes.
+
+Tests: XFF ignored by default / honored when trusted, redeem limiter
+survives header rotation, both SSE streams close within ticks of
+session revocation (real httptest.Server), fresh-vs-stale receipt
+gating + reflected-garbage mac, 16-goroutine single-winner redeem
+(race detector clean), non-public DNS answers filtered vs literal IP
+passthrough.
+
 ## v0.104 — OpenWrt: firewall-billing.sh was a parse error on nftables 1.0.x
 
 Critical ops fix. The nftables filter chain was named `fwd`, which

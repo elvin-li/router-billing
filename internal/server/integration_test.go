@@ -617,6 +617,10 @@ func TestSecureCookieSetWhenBehindTLS(t *testing.T) {
 func TestAdminLoginRateLimitByUsername(t *testing.T) {
 	app := setupTestApp(t)
 	app.adminLoginByUser = newRateLimiter(3, time.Hour)
+	// This test rotates X-Forwarded-For to isolate the per-username
+	// limiter from the per-IP one — that only works when the app is
+	// configured to trust proxy headers (v0.105).
+	app.Cfg.Security.TrustProxyHeaders = true
 	h := app.Routes()
 
 	// 3 attempts with wrong password but the SAME username are allowed

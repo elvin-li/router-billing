@@ -1881,10 +1881,20 @@ func (d *DB) RedeemVoucher(ctx context.Context, code, mac string, userID *int64)
 	if userID != nil {
 		uid = *userID
 	}
-	if _, err := tx.ExecContext(ctx,
-		`UPDATE vouchers SET redeemed_at = ?, redeemed_by_mac = ?, redeemed_user_id = ? WHERE code = ?`,
-		now, mac, uid, code); err != nil {
+	// Compare-and-set: the WHERE clause re-asserts the still-usable
+	// conditions checked above so the mark-redeemed write can never win
+	// against a concurrent redeem/revoke of the same code, regardless of
+	// connection-pool or journal-mode settings. Belt-and-braces on top of
+	// the SetMaxOpenConns(1) serialization.
+	res, err := tx.ExecContext(ctx,
+		`UPDATE vouchers SET redeemed_at = ?, redeemed_by_mac = ?, redeemed_user_id = ?
+		 WHERE code = ? AND redeemed_at IS NULL AND revoked = 0`,
+		now, mac, uid, code)
+	if err != nil {
 		return nil, err
+	}
+	if n, err := res.RowsAffected(); err == nil && n == 0 {
+		return nil, ErrVoucherUsed
 	}
 	if err := tx.Commit(); err != nil {
 		return nil, err
