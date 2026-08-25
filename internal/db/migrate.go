@@ -25,7 +25,7 @@ func runMigrations(d *sql.DB) error {
 		// no longer trusts the URL-supplied `payload=` parameter (open
 		// QR-encoder vector). Existing pending orders won't have it
 		// populated; they'll either get re-queried & finalized, or
-		// auto-cancelled by the stale-pending sweep.
+		// auto-canceled by the stale-pending sweep.
 		{"orders", "qr_payload", "TEXT NOT NULL DEFAULT ''"},
 		{"sessions", "kind", "TEXT NOT NULL DEFAULT 'admin'"},
 		{"sessions", "subject", "TEXT NOT NULL DEFAULT ''"},
