@@ -5,6 +5,7 @@ import (
 	"image/png"
 	"log"
 	"net/http"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -282,7 +283,15 @@ func (a *App) handleUser2FAConfirm(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	code := extractDigits(r.PostForm.Get("code"))
-	if !totp.Verify(user.TOTPPending, code, time.Now()) {
+	step, codeOK := totp.MatchingStep(user.TOTPPending, code, time.Now())
+	// Record the confirm code in the replay high-water mark too: the
+	// pending secret is promoted to the live secret verbatim, so without
+	// this the code that just confirmed enrollment would still pass the
+	// login-2FA / disable checks for the rest of its ±1-step window.
+	if codeOK && !totpConsumeStep(user.TOTPPending, step) {
+		codeOK = false
+	}
+	if !codeOK {
 		a.DB.Audit(r.Context(), "user:"+user.Phone, "2fa_enroll_failed", "", "ip="+clientIP(r))
 		http.Redirect(w, r, "/user/2fa?err=2fa_failed", http.StatusSeeOther)
 		return
@@ -332,6 +341,17 @@ func (a *App) handleUser2FADisable(w http.ResponseWriter, r *http.Request) {
 	}
 	if err := r.ParseForm(); err != nil {
 		http.Error(w, "form", http.StatusBadRequest)
+		return
+	}
+	// Cap attempts per user: the login-2FA path caps at 5 wrong codes per
+	// pending token, but this endpoint had no cap at all — an attacker
+	// holding a stolen session cookie AND the password could brute-force
+	// the 6-digit space (~10^6, hours at LAN latency) to turn 2FA off,
+	// which is exactly the takeover 2FA exists to stop. 5 attempts / 15
+	// minutes is far more than any honest disable needs.
+	if !a.twoFADisableLimit.allow(strconv.FormatInt(uid, 10)) {
+		a.DB.Audit(r.Context(), "user:"+user.Phone, "2fa_disable_failed", "", "reason=rate_limited ip="+clientIP(r))
+		http.Redirect(w, r, "/user/2fa?err=rate_limited", http.StatusSeeOther)
 		return
 	}
 	pwd := r.PostForm.Get("password")

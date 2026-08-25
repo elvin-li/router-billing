@@ -23,6 +23,10 @@ func enrollUser2FA(t *testing.T, h http.Handler, app *App, phone, password strin
 	_, body := do(t, h, "POST", "/user/2fa/confirm",
 		url.Values{"_csrf": {csrf}, "code": {code}}, jar)
 	codes = scrapeBackupCodes(t, body)
+	// Confirm consumed this timestep (one-time use); callers legitimately
+	// reuse codes from the same 30s step, which a real authenticator would
+	// have rolled past by then.
+	resetTOTPReplay()
 	return
 }
 
