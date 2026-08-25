@@ -74,6 +74,11 @@ type App struct {
 	// exactly one POST-redirect-GET hop without touching the URL.
 	flashMu sync.Mutex
 	flashes map[string]flashEntry
+
+	// Short-TTL cache for the attention counters (see attention_cache.go).
+	attMu  sync.Mutex
+	attVal db.AttentionCounts
+	attAt  time.Time
 }
 
 func NewApp(cfg *config.Config, dbx *db.DB, svc *service.MACService) (*App, error) {
