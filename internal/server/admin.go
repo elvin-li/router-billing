@@ -1242,6 +1242,13 @@ func (a *App) handleAdminMACNotes(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *App) handleAdminResync(w http.ResponseWriter, r *http.Request) {
+	// POST-only: this mutates the firewall set, and the CSRF middleware
+	// only verifies POST bodies. A GET here would be reachable cross-site
+	// (SameSite=Lax still sends cookies on top-level GET navigation).
+	if r.Method != http.MethodPost {
+		http.Redirect(w, r, "/admin/macs", http.StatusSeeOther)
+		return
+	}
 	if err := a.MACSvc.Resync(r.Context()); err != nil {
 		log.Printf("admin resync: %v", err)
 		a.DB.Audit(r.Context(), "admin", "firewall_resync_failed", "", "err="+err.Error()+" ip="+a.clientIP(r))
