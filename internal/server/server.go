@@ -58,6 +58,9 @@ type App struct {
 
 	waitMu  sync.Mutex
 	waiters map[string][]chan struct{} // order_no → pending wait channels
+
+	// sseTick overrides the 5s SSE push cadence (tests only). 0 = default.
+	sseTick time.Duration
 }
 
 func NewApp(cfg *config.Config, dbx *db.DB, svc *service.MACService) (*App, error) {
@@ -278,7 +281,11 @@ func (a *App) Routes() http.Handler {
 	mux.HandleFunc("/api/admin/sessions", a.requireAPITokenRead(a.handleAPISessions))
 	mux.HandleFunc("/api/admin/audit/distinct", a.requireAPITokenRead(a.handleAPIAuditDistinct))
 	mux.HandleFunc("/api/admin/audit/totals", a.requireAPITokenRead(a.handleAPIAuditTotals))
-	mux.HandleFunc("/api/admin/backup", a.requireAPITokenRead(a.handleAPIBackup))
+	// Backup is privileged: the raw DB file carries session tokens,
+	// password hashes, TOTP secrets, and full voucher codes — all of
+	// which the JSON read endpoints deliberately strip. Read-only
+	// tokens are rejected even though the method is GET.
+	mux.HandleFunc("/api/admin/backup", a.requireAPITokenPrivileged(a.handleAPIBackup))
 	mux.HandleFunc("/api/admin/macs", a.requireAPITokenRead(a.handleAPIMACList))
 	mux.HandleFunc("/api/admin/macs/get", a.requireAPITokenRead(a.handleAPIMACGet))
 	mux.HandleFunc("/api/admin/users", a.requireAPITokenRead(a.handleAPIUserList))
@@ -354,7 +361,7 @@ func (a *App) Routes() http.Handler {
 		http.ServeFile(w, r, filepath.Join(staticDir, "sw.js"))
 	})
 
-	return a.securityHeaders(csrfMiddleware(logMiddleware(mux)))
+	return a.securityHeaders(a.realIPMiddleware(csrfMiddleware(logMiddleware(mux))))
 }
 
 func (a *App) Run(ctx context.Context) error {
@@ -396,36 +403,19 @@ func (a *App) purgeLoop(ctx context.Context) {
 	// (reclaim pages from churn — voucher batches, audit purges, etc.).
 	weekly := time.NewTicker(7 * 24 * time.Hour)
 	defer weekly.Stop()
+	// One pass at boot, like the other background loops. Routers get
+	// power-cycled daily in the field; a purge that only ever fires after
+	// 2h of continuous uptime lets expired sessions / audit / sms / webhook
+	// rows grow without bound on any box that never stays up that long.
+	// (The weekly VACUUM deliberately does NOT run at boot — it takes a
+	// write lock and a daily-rebooted router would vacuum daily.)
+	a.purgeOnce(ctx)
 	for {
 		select {
 		case <-ctx.Done():
 			return
 		case <-short.C:
-			_ = a.DB.PurgeExpiredSessions(ctx)
-			_ = a.DB.PurgeAuditLog(ctx, a.Cfg.Security.AuditLogRetention())
-			// SMS log gets the same retention cap as audit_log — both are
-			// observability tables that accumulate forever otherwise.
-			_ = a.DB.PurgeSMSLog(ctx, a.Cfg.Security.AuditLogRetention())
-			// Webhook delivery log (v0.49) uses the same retention cap.
-			_ = a.DB.PurgeWebhookDeliveries(ctx, a.Cfg.Security.AuditLogRetention())
-			// These three were added in v0.13 (password reset codes,
-			// trusted devices) but never plumbed into the janitor — so
-			// stale rows accumulated until the user manually
-			// re-triggered the flow. Tidy up here too.
-			_ = a.DB.PurgeExpiredPasswordResets(ctx)
-			_ = a.DB.PurgeExpiredTrustedDevices(ctx)
-			// v0.60: auto-cancel stale pending orders if enabled. Skip
-			// the audit row when count=0 to avoid the periodic-noop
-			// audit-spam an enabled background sweep would otherwise
-			// generate.
-			if hours := a.Cfg.Security.AutoCancelStaleOrders(); hours > 0 {
-				if n, err := a.DB.CancelStalePendingOrders(ctx, time.Duration(hours)*time.Hour); err == nil && n > 0 {
-					a.DB.Audit(ctx, "system", "orders_cancel_stale", "",
-						fmt.Sprintf("count=%d hours=%d via=purge_loop", n, hours))
-				} else if err != nil {
-					log.Printf("auto cancel stale: %v", err)
-				}
-			}
+			a.purgeOnce(ctx)
 		case <-weekly.C:
 			if _, err := a.DB.Exec(ctx, "PRAGMA optimize"); err != nil {
 				log.Printf("sqlite optimize: %v", err)
@@ -433,6 +423,35 @@ func (a *App) purgeLoop(ctx context.Context) {
 			if _, err := a.DB.Exec(ctx, "VACUUM"); err != nil {
 				log.Printf("sqlite vacuum: %v", err)
 			}
+		}
+	}
+}
+
+// purgeOnce is one short-cadence housekeeping pass — cheap DELETEs only.
+func (a *App) purgeOnce(ctx context.Context) {
+	_ = a.DB.PurgeExpiredSessions(ctx)
+	_ = a.DB.PurgeAuditLog(ctx, a.Cfg.Security.AuditLogRetention())
+	// SMS log gets the same retention cap as audit_log — both are
+	// observability tables that accumulate forever otherwise.
+	_ = a.DB.PurgeSMSLog(ctx, a.Cfg.Security.AuditLogRetention())
+	// Webhook delivery log (v0.49) uses the same retention cap.
+	_ = a.DB.PurgeWebhookDeliveries(ctx, a.Cfg.Security.AuditLogRetention())
+	// These three were added in v0.13 (password reset codes,
+	// trusted devices) but never plumbed into the janitor — so
+	// stale rows accumulated until the user manually
+	// re-triggered the flow. Tidy up here too.
+	_ = a.DB.PurgeExpiredPasswordResets(ctx)
+	_ = a.DB.PurgeExpiredTrustedDevices(ctx)
+	// v0.60: auto-cancel stale pending orders if enabled. Skip
+	// the audit row when count=0 to avoid the periodic-noop
+	// audit-spam an enabled background sweep would otherwise
+	// generate.
+	if hours := a.Cfg.Security.AutoCancelStaleOrders(); hours > 0 {
+		if n, err := a.DB.CancelStalePendingOrders(ctx, time.Duration(hours)*time.Hour); err == nil && n > 0 {
+			a.DB.Audit(ctx, "system", "orders_cancel_stale", "",
+				fmt.Sprintf("count=%d hours=%d via=purge_loop", n, hours))
+		} else if err != nil {
+			log.Printf("auto cancel stale: %v", err)
 		}
 	}
 }

@@ -96,24 +96,32 @@ func TestAllPagesRenderWithSeededData(t *testing.T) {
 		"/admin/devices",
 		"/admin/orders",
 		"/admin/orders?status=paid",
+		fmt.Sprintf("/admin/orders?user_id=%d", userID),
 		"/admin/orders/detail?order_no=" + orderNo,
 		"/admin/orders/detail?order_no=ORD-SMOKE-2",
 		fmt.Sprintf("/admin/users/detail?id=%d", userID),
 		"/admin/users",
 		"/admin/audit",
 		"/admin/audit?actor=admin",
+		"/admin/audit?since=2020-01-01&until=2099-12-31",
 		"/admin/sessions",
 		"/admin/health",
 		"/admin/maintenance",
 		"/admin/webhook-log",
+		"/admin/webhook-log?only_failed=1",
 		"/admin/sms-log",
+		"/admin/sms-log?phone=13800139900&only_failed=1",
 		"/admin/api-tokens",
 		"/admin/ssid-cards",
 		"/admin/vouchers",
 		"/admin/vouchers?batch=smoke-batch",
 		"/admin/vouchers/print?batch=smoke-batch",
 		"/admin/plans",
-		"/admin/2fa",
+	}
+	// Pages that legitimately don't render the admin shell layout.
+	noShell := map[string]bool{
+		"/admin/health": true, // JSON
+		"/admin/vouchers/print?batch=smoke-batch": true, // standalone print layout
 	}
 	for _, page := range adminPages {
 		res, body := do(t, h, "GET", page, nil, adminJar)
@@ -123,6 +131,13 @@ func TestAllPagesRenderWithSeededData(t *testing.T) {
 		}
 		if strings.Contains(body, "<no value>") {
 			t.Errorf("%s renders '<no value>'", page)
+		}
+		// The "/" portal catch-all serves 200 for ANY unrouted path, so a
+		// typo'd URL in this list would pass vacuously (pre-v0.108
+		// "/admin/2fa" did exactly that — the route is /admin/login/2fa).
+		// Demand the admin layout marker so every URL is a real admin page.
+		if !noShell[page] && !strings.Contains(body, `class="admin-shell"`) {
+			t.Errorf("%s does not render the admin shell — wrong URL hitting the portal catch-all?", page)
 		}
 	}
 

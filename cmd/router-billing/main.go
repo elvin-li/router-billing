@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"golang.org/x/crypto/bcrypt"
+	"golang.org/x/term"
 
 	"router-billing/internal/backup"
 	"router-billing/internal/config"
@@ -174,15 +175,15 @@ func main() {
 // runGenHash reads a single line from stdin (no echo if TTY) and prints a
 // bcrypt hash suitable for paste into admins[].password_hash.
 func runGenHash() {
-	fmt.Print("password: ")
-	scanner := bufio.NewScanner(os.Stdin)
-	if !scanner.Scan() {
-		fmt.Fprintln(os.Stderr, "no input")
+	p, err := readPassword()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "read password: %v\n", err)
 		os.Exit(2)
 	}
-	p := strings.TrimRight(scanner.Text(), "\r\n")
-	if len(p) < 6 {
-		fmt.Fprintln(os.Stderr, "password must be at least 6 chars")
+	// Match the config validator's floor for plaintext passwords so the
+	// hash you generate is never weaker than what --check-config accepts.
+	if len(p) < 8 {
+		fmt.Fprintln(os.Stderr, "password must be at least 8 chars")
 		os.Exit(2)
 	}
 	h, err := bcrypt.GenerateFromPassword([]byte(p), bcrypt.DefaultCost)
@@ -191,4 +192,28 @@ func runGenHash() {
 		os.Exit(2)
 	}
 	fmt.Println(string(h))
+}
+
+// readPassword disables terminal echo when stdin is a TTY (so the password
+// doesn't land in scrollback / screen recordings) and falls back to a plain
+// line read when input is piped, e.g. `echo -n pw | router-billing --gen-password-hash`.
+func readPassword() (string, error) {
+	fd := int(os.Stdin.Fd())
+	if term.IsTerminal(fd) {
+		fmt.Fprint(os.Stderr, "password: ")
+		b, err := term.ReadPassword(fd)
+		fmt.Fprintln(os.Stderr)
+		if err != nil {
+			return "", err
+		}
+		return string(b), nil
+	}
+	scanner := bufio.NewScanner(os.Stdin)
+	if !scanner.Scan() {
+		if err := scanner.Err(); err != nil {
+			return "", err
+		}
+		return "", fmt.Errorf("no input")
+	}
+	return strings.TrimRight(scanner.Text(), "\r\n"), nil
 }

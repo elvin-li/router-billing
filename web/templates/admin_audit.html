@@ -27,6 +27,9 @@
       </div>
     </div>
 
+    {{if eq .OK "audit_trim"}}<div class="flash ok">审计日志已按 <code>security.audit_log_keep</code> 配额裁剪 ✓</div>{{end}}
+    {{if eq .Err "trim_failed"}}<div class="flash err">裁剪失败，详见服务器日志</div>{{end}}
+
     {{if .ActionTotals}}
     <section class="admin-card">
       <h2 style="margin-top:0; font-size:14px;">动作频次{{if or .Filter.Since .Filter.Until}}（按日期范围过滤后）{{end}}</h2>

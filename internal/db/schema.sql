@@ -68,6 +68,11 @@ CREATE TABLE IF NOT EXISTS sessions (
 CREATE INDEX IF NOT EXISTS idx_sessions_kind ON sessions(kind);
 -- Purge loop deletes by expiry every few minutes.
 CREATE INDEX IF NOT EXISTS idx_sessions_expires ON sessions(expires_at);
+-- Per-user session ops (suspend/delete/list/"sign out other devices"/count)
+-- all filter on user_id; without this they scan the whole table — the
+-- kind index is useless (2 values) once there's more than a handful of
+-- users. v0.107.
+CREATE INDEX IF NOT EXISTS idx_sessions_user ON sessions(user_id);
 
 -- Live device tracking — populated by sightings.Tracker.
 -- Used by the admin /devices page to suggest unsubscribed MACs.
@@ -182,6 +187,11 @@ CREATE INDEX IF NOT EXISTS idx_audit_at ON audit_log(at);
 -- /admin/audit exact-match action filter + DISTINCT action dropdown; the
 -- audit log is the largest table on long-running installs.
 CREATE INDEX IF NOT EXISTS idx_audit_action ON audit_log(action);
+-- The daily expiry-reminder loop runs a correlated NOT EXISTS
+-- (action='expiry_reminder' AND target=mac AND at>=...) per candidate MAC;
+-- with only the action index each probe re-scans every reminder row ever
+-- logged. (action, target) makes each probe a point lookup. v0.107.
+CREATE INDEX IF NOT EXISTS idx_audit_action_target ON audit_log(action, target);
 
 -- SMS log — every send-through-App.SendSMS records one row regardless of
 -- outcome. Persistent (survives restarts) and provider-agnostic, unlike

@@ -20,9 +20,36 @@ PAID_KEY="${PAID_KEY:-}"
 PAID_SECURE_SSID="${PAID_SECURE_SSID:-Paid_Secure_WiFi}"
 PAID_SECURE_KEY="${PAID_SECURE_KEY:-}"
 
-# Warn loudly if Free SSID is still open — that means anyone who walks past
-# can also reach /admin (port 8080) on the LAN.
-if [ -z "${FREE_KEY}" ]; then
+WIFI_KEYS=/etc/router-billing/wifi-keys.txt
+
+# The ipk path (opkg postinst / first boot) runs this script with no env,
+# unlike install.sh which generates FREE_KEY before calling it. Without this
+# the Free SSID — the one that shares the LAN with /admin and dropbear —
+# silently came up OPEN on every opkg install. Generate a key here when the
+# SSID doesn't exist yet and record it root-only, same as install.sh does.
+if [ -z "${FREE_KEY}" ] && ! uci -q show wireless | grep -q "ssid='${FREE_SSID}'"; then
+    if command -v openssl >/dev/null 2>&1; then
+        FREE_KEY=$(openssl rand -base64 18 | tr -d '/+=' | cut -c1-12)
+    else
+        FREE_KEY=$(head -c 18 /dev/urandom | base64 | tr -d '/+=' | cut -c1-12)
+    fi
+    if [ -n "${FREE_KEY}" ] && [ ${#FREE_KEY} -ge 8 ]; then
+        mkdir -p /etc/router-billing
+        if [ ! -f "${WIFI_KEYS}" ]; then
+            touch "${WIFI_KEYS}"
+            chmod 0600 "${WIFI_KEYS}"
+            echo "# router-billing wifi keys (auto-generated)" >> "${WIFI_KEYS}"
+        fi
+        echo "free_key=${FREE_KEY}" >> "${WIFI_KEYS}"
+        echo "[router-billing] ${FREE_SSID} 密码已自动生成，查看：cat ${WIFI_KEYS}"
+    else
+        FREE_KEY=""
+    fi
+fi
+
+# Warn loudly if the Free SSID is about to be created open — that means
+# anyone who walks past can also reach /admin (port 8080) on the LAN.
+if [ -z "${FREE_KEY}" ] && ! uci -q show wireless | grep -q "ssid='${FREE_SSID}'"; then
     cat >&2 <<'WARN'
 [router-billing] !! FREE_KEY 未设置 — Free_WiFi 将保持开放。
 [router-billing] !! 这意味着任何人都能连 LAN，触达 /admin/login（依然有密码）。
@@ -69,7 +96,7 @@ else
     uci set wireless.${WIFI_DEV}.disabled='0'
 
     add_ssid() {
-        local name="$1" net="$2" key="$3" iface="$4"
+        local name="$1" net="$2" key="$3" iface="$4" isolate="$5"
         if uci -q show wireless | grep -q "ssid='${name}'"; then
             log "SSID ${name} 已存在，跳过"
             return
@@ -92,13 +119,16 @@ else
         else
             uci set wireless.@wifi-iface[-1].encryption='none'
         fi
-        uci set wireless.@wifi-iface[-1].isolate='0'
+        uci set wireless.@wifi-iface[-1].isolate="${isolate}"
     }
 
-    add_ssid "${FREE_SSID}"        "lan"  "${FREE_KEY}"        "wl-free"
-    add_ssid "${PAID_SSID}"        "paid" "${PAID_KEY}"        "wl-paid"
+    # 收费 SSID 上都是陌生人（开放网络更是任何人）：开启 AP 客户端隔离，
+    # 阻止收费网内互嗅/互攻（付费 MAC 更难被就近偷学）。免费 SSID 是熟人
+    # 网，保持互通。
+    add_ssid "${FREE_SSID}"        "lan"  "${FREE_KEY}"        "wl-free"    "0"
+    add_ssid "${PAID_SSID}"        "paid" "${PAID_KEY}"        "wl-paid"    "1"
     if [ -n "${PAID_SECURE_KEY}" ] && [ ${#PAID_SECURE_KEY} -ge 8 ]; then
-        add_ssid "${PAID_SECURE_SSID}" "paid" "${PAID_SECURE_KEY}" "wl-paidsec"
+        add_ssid "${PAID_SECURE_SSID}" "paid" "${PAID_SECURE_KEY}" "wl-paidsec" "1"
     else
         log "未设置 PAID_SECURE_KEY (≥8 字符)，跳过加密收费 SSID"
         log "  事后想加：export PAID_SECURE_KEY=xxxxxx && sh /usr/share/router-billing/setup-secure-ssid.sh"
@@ -106,15 +136,26 @@ else
 fi
 
 # ---- 4. fw4 区域 paid + 转发 paid -> wan ----
+# input 必须是 REJECT：收费 SSID 上都是陌生人，input ACCEPT 会把路由器
+# 本机的 dropbear/SSH、LuCI、以及其他所有监听端口全部暴露给未付费设备。
+# 门户所需的 DHCP/DNS/8080 由下面三条显式 Allow 规则放行。
 if ! uci -q show firewall | grep -q "name='paid'"; then
     log "添加 firewall.zone paid"
     uci add  firewall zone >/dev/null
     uci set  firewall.@zone[-1].name='paid'
-    uci set  firewall.@zone[-1].input='ACCEPT'
+    uci set  firewall.@zone[-1].input='REJECT'
     uci set  firewall.@zone[-1].output='ACCEPT'
     uci set  firewall.@zone[-1].forward='REJECT'
     uci set  firewall.@zone[-1].masq='1'
     uci add_list firewall.@zone[-1].network='paid'
+else
+    # 老安装迁移：v0.107 之前 input 是 ACCEPT。
+    PAID_ZONE_IDX=$(uci -q show firewall | sed -n "s/^firewall\.@zone\[\([0-9]*\)\]\.name='paid'$/\1/p" | head -n1)
+    if [ -n "${PAID_ZONE_IDX}" ] && \
+       [ "$(uci -q get firewall.@zone[${PAID_ZONE_IDX}].input)" = "ACCEPT" ]; then
+        log "迁移 firewall.zone paid input ACCEPT -> REJECT"
+        uci set firewall.@zone[${PAID_ZONE_IDX}].input='REJECT'
+    fi
 fi
 
 if ! uci -q show firewall | grep -q "name='paid-to-wan'"; then

@@ -113,10 +113,14 @@ func (a *App) verifyAndConsumeBackupCode(ctx context.Context, userID int64, code
 	if matched == 0 {
 		return false, nil
 	}
-	if err := a.DB.MarkBackupCodeUsed(ctx, matched); err != nil {
+	// The conditional UPDATE is the actual single-use gate: two concurrent
+	// logins can both read the row as unused, but only one wins the write.
+	// The loser must be rejected, or the "single-use" promise is racy.
+	consumed, err := a.DB.MarkBackupCodeUsed(ctx, matched)
+	if err != nil {
 		return false, err
 	}
-	return true, nil
+	return consumed, nil
 }
 
 // renderBackupCodesOnce displays the freshly-generated plaintexts. Called

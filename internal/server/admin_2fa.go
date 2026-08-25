@@ -48,13 +48,22 @@ func (a *App) handleAdminLogin2FA(w http.ResponseWriter, r *http.Request) {
 
 	if r.Method == http.MethodGet {
 		a.render(w, "admin_2fa.html", map[string]any{
-			"Error":    "",
-			"Username": username,
+			"Error":     "",
+			"Username":  username,
+			"CSRFToken": csrfFromContext(r.Context()),
 		})
 		return
 	}
 	if r.Method != http.MethodPost {
 		http.Error(w, "method", http.StatusMethodNotAllowed)
+		return
+	}
+	// The user-side 2FA verify checks CSRF; this one historically didn't —
+	// a cross-site form could burn the 5-attempt budget and lock the admin
+	// out of their pending login. Checked before the attempt counter so a
+	// missing token never consumes an attempt.
+	if !verifyCSRF(r) {
+		http.Error(w, "CSRF token invalid — please refresh the page and retry", http.StatusForbidden)
 		return
 	}
 	if err := r.ParseForm(); err != nil {
@@ -88,11 +97,18 @@ func (a *App) handleAdminLogin2FA(w http.ResponseWriter, r *http.Request) {
 		return -1
 	}, code)
 
-	if !totp.Verify(admin.TOTPSecret, code, time.Now()) {
+	step, codeOK := totp.MatchingStep(admin.TOTPSecret, code, time.Now())
+	// One-time use (RFC 6238 §5.2): a code that already completed a login
+	// can't be replayed for a second session inside its validity window.
+	if codeOK && !totpConsumeStep(admin.TOTPSecret, step) {
+		codeOK = false
+	}
+	if !codeOK {
 		a.DB.Audit(r.Context(), "admin-attempt:"+username, "2fa_failed", "", "ip="+clientIP(r))
 		a.render(w, "admin_2fa.html", map[string]any{
-			"Error":    "验证码错误，请再试一次",
-			"Username": username,
+			"Error":     "验证码错误，请再试一次",
+			"Username":  username,
+			"CSRFToken": csrfFromContext(r.Context()),
 		})
 		return
 	}

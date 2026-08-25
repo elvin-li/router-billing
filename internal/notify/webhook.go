@@ -4,11 +4,15 @@
 //
 // Delivery model:
 //   - Best-effort, fire-and-forget queue with 64-deep buffer
-//   - Single worker goroutine — events are serialized (preserves order)
+//   - Single worker goroutine — fresh events are delivered in order
 //   - HMAC-SHA256 signature in `X-Router-Billing-Signature` header
 //   - Drops on full queue, logs to standard logger
 //   - Exponential backoff retries — by default 2s, 30s, 5m; tests inject
-//     a tighter schedule via BackoffSchedule.
+//     a tighter schedule via BackoffSchedule. Retries are scheduled with
+//     a timer and re-enqueued, so a failing endpoint never blocks the
+//     worker: fresh events keep flowing while a retry waits its turn.
+//     (Retried events may therefore land out of order relative to newer
+//     events — receivers should key on Event.At / OrderNo, not arrival.)
 package notify
 
 import (
@@ -62,7 +66,7 @@ type Notifier struct {
 	BackoffSchedule []time.Duration
 
 	HTTPClient *http.Client
-	queue      chan Event
+	queue      chan queued
 
 	// OnDelivery, if non-nil, is called once per delivery attempt (initial
 	// + each retry) AFTER the HTTP response settles. Callback must not
@@ -74,6 +78,14 @@ type Notifier struct {
 	// failure, connection refused, etc.). `err` is the same value that
 	// drives the retry decision.
 	OnDelivery func(ev Event, attempt int, statusCode int, durationMs int64, err error)
+}
+
+// queued is one queue entry: the event plus which delivery attempt it is
+// on (0 = initial). Retries re-enter the queue with attempt+1 instead of
+// blocking the worker in a sleep.
+type queued struct {
+	ev      Event
+	attempt int
 }
 
 func New(url, secret string) *Notifier {
@@ -88,7 +100,7 @@ func New(url, secret string) *Notifier {
 		URL:        url,
 		Secret:     secret,
 		HTTPClient: &http.Client{Timeout: 8 * time.Second},
-		queue:      make(chan Event, 64),
+		queue:      make(chan queued, 64),
 	}
 }
 
@@ -118,10 +130,23 @@ func (n *Notifier) Run(ctx context.Context) {
 		select {
 		case <-ctx.Done():
 			return
-		case ev := <-n.queue:
-			n.deliver(ctx, ev, 0)
+		case q := <-n.queue:
+			n.deliverSafe(ctx, q.ev, q.attempt)
 		}
 	}
+}
+
+// deliverSafe wraps deliver with a recover so a panic (e.g. inside the
+// caller-supplied OnDelivery hook) drops one event instead of killing
+// the whole process via an unrecovered panic in the worker goroutine.
+func (n *Notifier) deliverSafe(ctx context.Context, ev Event, attempt int) {
+	defer func() {
+		if r := recover(); r != nil {
+			log.Printf("notify: panic delivering %s/%s (event dropped, worker continues): %v",
+				ev.Type, ev.MAC, r)
+		}
+	}()
+	n.deliver(ctx, ev, attempt)
 }
 
 // Send enqueues an event. Non-blocking; drops on a full queue.
@@ -133,7 +158,7 @@ func (n *Notifier) Send(ev Event) {
 		ev.At = time.Now().UTC()
 	}
 	select {
-	case n.queue <- ev:
+	case n.queue <- queued{ev: ev}:
 	default:
 		log.Printf("notify: queue full, dropping %s/%s", ev.Type, ev.MAC)
 	}
@@ -177,15 +202,26 @@ func (n *Notifier) deliver(ctx context.Context, ev Event, attempt int) {
 	}
 	sched := n.schedule()
 	if attempt < len(sched) {
+		if ctx.Err() != nil {
+			return // shutting down — don't schedule work nobody will run
+		}
 		delay := sched[attempt]
 		log.Printf("notify: %s/%s attempt %d failed (%v); retrying in %s",
 			ev.Type, ev.MAC, attempt+1, err, delay)
-		select {
-		case <-ctx.Done():
-			return
-		case <-time.After(delay):
-		}
-		n.deliver(ctx, ev, attempt+1)
+		// Schedule the retry via re-enqueue rather than sleeping here:
+		// the pre-v0.108 in-place `time.After(delay)` held the single
+		// worker for the whole backoff (up to ~5.5min per event on the
+		// default schedule), so one dead endpoint stalled the pipeline
+		// until the 64-slot queue overflowed and payment/grant events
+		// were silently dropped.
+		next := queued{ev: ev, attempt: attempt + 1}
+		time.AfterFunc(delay, func() {
+			select {
+			case n.queue <- next:
+			default:
+				log.Printf("notify: queue full, dropping retry %s/%s", ev.Type, ev.MAC)
+			}
+		})
 		return
 	}
 	log.Printf("notify: drop %s/%s after %d attempts: %v", ev.Type, ev.MAC, attempt+1, err)

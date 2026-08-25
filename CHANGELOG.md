@@ -1,5 +1,545 @@
 # Changelog
 
+## v0.107 — Consolidated hardening: merge of PRs #5–#13
+
+One combined release merging nine parallel hardening branches (test
+hardening, DB transactions/time/indexes, firewall/portal, background
+jobs, portal/user security, admin API, auth/2FA/CSRF, admin UI,
+config/CI/docker). Where branches fixed the same bug independently the
+stronger fix won:
+
+- nftables List(): the JSON-based parser (firewall branch) replaced the
+  text-anchored parser (test branch); both fixed the dropped-first-MAC
+  bug, and the exec-level regression tests were ported to the JSON API.
+- Client-IP attribution: security.trusted_proxies (auth branch, CIDR
+  allowlist + realIPMiddleware, last-XFF-entry semantics) replaced the
+  portal branch's security.trust_proxy_headers boolean; all call sites
+  now go through the middleware-resolved IP.
+- Walled garden: full-list atomic rebuild with timeout refresh
+  (firewall branch) combined with the public-IPv4 answer filter and
+  literal-IP passthrough (portal branch).
+
+Also includes the test-hardening branch's new coverage for config
+loading, schedule enforcement, arp/sightings exec paths and the JSON
+logger. Details per area below.
+
+### Firewall/portal correctness: 22.03 apply failure, walled-garden 25h death, List drops a MAC, paid-zone router exposure
+
+Correctness pass over the MAC whitelist, the captive-portal redirect
+and the paid/free SSID split. Everything below was verified against a
+live kernel (nft 1.0.9, the OpenWrt 23.05 userspace).
+
+A. (HIGH) firewall-billing.sh failed WHOLESALE on OpenWrt 22.03. The
+`tcp dport 443 reject` sat in the nat/prerouting chain, but kernels
+before 5.11 only allow the reject statement in input/forward/output
+(nft_reject validate; prerouting was added in commit 117ca1f8920c) —
+and 22.03 ships kernel 5.10. The kernel refuses the whole `nft -f`
+transaction at commit time, so apply produced ZERO billing rules and
+every Paid_WiFi device was online for free — the exact failure mode
+v0.104 fixed for the `fwd` keyword, reintroduced one hook down.
+(`nft -c`/"verified parsing" can't catch it: the EOPNOTSUPP comes from
+the kernel at commit.) The 443 reject now lives in the forward chain
+(valid on every kernel this project supports) as `reject with tcp
+reset`, which is also the correct signal for captive-portal probes.
+HTTP redirect stays in prerouting; behavior for clients is unchanged.
+
+B. (HIGH) The walled garden silently died after 25 hours of daemon
+uptime. Elements carry a 25h timeout, but the kernel does NOT refresh
+an element's expiry when it is re-added — and the resolver only pushed
+IPs it hadn't seen before. Stable payment-server IPs (WeChat/Alipay
+resolve very consistently) therefore expired out of the set and were
+never re-added: unpaid devices could no longer reach the payment
+servers, i.e. nobody could pay, until the daemon restarted. The
+resolver now pushes the FULL resolved list every refresh cycle and the
+new Manager.SyncWalledGardenIPs rebuilds the set atomically (one
+`nft -f -` transaction) with fresh 25h timeouts. IPs are validated as
+plain IPv4 before they enter the nft script — DNS answers are
+attacker-influenced input. A total DNS outage leaves the set alone
+(drains via timeout) instead of wiping it.
+
+C. (HIGH) nftables List() dropped the first MAC of every listing (the
+same bug PR #5 fixed on its branch, independently confirmed here
+against real nft output). The text parser cut from the TABLE's opening
+brace, split on commas and truncated tokens at the first space, so the
+first element — glued to "set mac_paid { … elements = {" — was always
+discarded. Any consumer reconciling DB↔firewall from List would
+conclude that MAC was offline. List now parses `nft -j` JSON with the
+same parser Counters uses.
+
+D. (MED) Sync (nft backend) was flush-then-add as two separate nft
+processes: every resync briefly exposed an EMPTY whitelist (paid users
+redirected to the portal mid-session), and an error between the two
+calls left it empty until the next resync. Both operations are now one
+`nft -f -` netlink batch — readers see old or new membership, never
+the gap, and a failed transaction keeps the old set. The ipset backend
+had the same flaw (`ipset restore` replays lines, it is not a
+transaction, despite the comment): it now stages into `mac_paid_swp`
+and uses `swap`, which IS atomic; the live set is never flushed.
+
+E. (MED, security) The fw4 paid zone was created with input=ACCEPT,
+exposing every service on the router itself — dropbear/SSH, LuCI,
+anything listening — to unpaid strangers on the open SSID. The
+explicit Allow-DHCP/DNS/Portal rules that have always been generated
+alongside it only make sense with input=REJECT, which is what the zone
+now gets; the three allows keep DHCP, DNS and the portal working.
+Re-running the uci-defaults script (which an ipk upgrade does
+automatically) migrates existing ACCEPT zones; manual installs can run
+`sh /etc/uci-defaults/99-router-billing-ssid` or flip
+`uci set firewall.@zone[N].input='REJECT'` by hand.
+
+F. (MED) opkg upgrades opened a free-internet window: prerm runs on
+upgrade too (remove-then-install) and purged the whole billing table,
+so redirect/drop rules were gone while the new package unpacked. prerm
+now skips the purge when opkg signals PKG_UPGRADE=1; real removals
+still purge.
+
+G. setup-secure-ssid.sh's "SSID exists, update the key" path had never
+worked: `awk -F'[].[]' {print $2}` extracts the literal "@wifi-iface",
+not the section index, so the subsequent `uci set` always errored out
+under `set -e`. Now extracted with an anchored sed capture (the
+uninstall.sh how-to had the same field bug, plus it deleted sections
+in ascending index order — deletions shift later indices — now
+descending). The key is also recorded into wifi-keys.txt like
+install.sh does.
+
+H. ipk installs brought the Free SSID up OPEN: only install.sh
+generated FREE_KEY, but the uci-defaults script runs with an empty
+environment from postinst / first boot. It now generates the key
+itself when it is about to create the SSID without one, and records it
+in /etc/router-billing/wifi-keys.txt (0600), same as install.sh.
+
+I. Hardening: paid SSIDs get AP client isolation (isolate=1 — the open
+paid network is all strangers; the free/friends SSID stays isolate=0);
+config.yaml is installed 0600 instead of 0644 (it holds the admin
+bcrypt hash and WeChat/Alipay merchant keys) by both install.sh and
+the ipk build, and install.sh tightens existing installs.
+
+New regression tests: real nft-1.0.9 JSON List output keeps the first
+MAC; sync payloads are single transactions (flush-only when empty);
+walled-garden payload validates/rejects IPv6, garbage and nft-script
+injection; the resolver re-pushes the full list every cycle and leaves
+the set alone on DNS outage; the ipset restore script stages+swaps and
+never touches the live set directly.
+
+### DB layer: broken date() stats, expiry-sweep atomicity, tx gaps, indexes
+
+SQLite/Go correctness pass over internal/db.
+
+A. (HIGH) Two daily stats were permanently zero. modernc.org/sqlite
+stores Go-bound time.Time as "2006-01-02 15:04:05.999 +0000 UTC" — a
+format SQLite's date() function returns NULL for. So SnapshotToday's
+`date(paid_at) = date('now')` recorded paid_orders = 0 in every daily
+snapshot ever taken, and Attention's `date(created_at) = date('now')`
+kept the FailedToday dashboard chip at 0 no matter how many orders
+failed. Both now compare against datetime('now','start of day'),
+which works lexicographically on the shared "YYYY-MM-DD HH:MM:SS"
+prefix — the same pattern DashboardSnapshot already used (its comment
+even warned about date(); the two older call sites never got the
+memo). SnapshotToday also no longer swallows the count error.
+
+B. (MED) ExpireDueMACs was a SELECT list followed by a separate
+blanket UPDATE — not atomic. A MAC extended between the two
+statements stayed active but was still in the returned list, so the
+caller revoked firewall access for a customer who had just renewed; a
+MAC expiring between the statements got flipped but was never
+reported, so its revoke webhook/notify never fired; and two
+concurrent sweeps could both report the same MAC (double webhooks).
+Now a single `UPDATE ... RETURNING mac` — flip and report are one
+atomic statement, each due MAC is claimed by exactly one sweep.
+
+C. (MED) ClearUserTOTP ran three separate statements (wipe secret,
+delete backup codes, delete trusted devices). A failure after the
+first left 2FA off WITH live trusted-device tokens that would
+silently bypass the next enrollment's challenge. All three writes now
+commit in one transaction.
+
+D. (MED) SuspendUser's session purge was a separate best-effort
+statement whose error was discarded — a failed delete left the
+suspended user with a working session until natural expiry.
+DeleteUser had the same swallowed-error pattern. Both are now single
+transactions that propagate errors.
+
+E. (LOW) BumpPasswordResetAttempts was UPDATE-then-SELECT; two
+concurrent failed verifies could both read the same post-increment
+value, under-counting attempts against the brute-force cap. Now one
+`UPDATE ... RETURNING attempts`.
+
+F. (PERF) Missing indexes: sessions(user_id) — every per-user session
+op (suspend purge, "sign out other devices", list, count) scanned the
+whole table; and audit_log(action, target) — the daily expiry-
+reminder loop's correlated NOT EXISTS probe re-scanned every
+expiry_reminder row per candidate MAC. Both added via schema.sql's
+idempotent CREATE INDEX IF NOT EXISTS, so existing deploys pick them
+up on next startup.
+
+Regression tests for all of the above, including concurrency tests
+(verified under -race) that fail on the pre-fix code.
+
+internal/db/db.go
+internal/db/schema.sql
+internal/db/tx_time_index_test.go
+
+### Background-job reliability: webhook pipeline stall, SMS spam, torn backups
+
+Reliability pass over the background jobs (scheduler, notify worker,
+SMS loops, backup rotator, purge janitor). Complements v0.107's DB
+fixes; no product features.
+
+A. (HIGH) The webhook notify worker retried failures in-place, sleeping
+through the backoff (up to ~5.5 min per event on the default 2s/30s/5m
+schedule) on the single goroutine that drains the 64-slot queue. One
+dead/slow endpoint stalled the whole pipeline until the queue
+overflowed and later pay/grant/revoke events were silently dropped.
+Retries are now scheduled with a timer and re-enqueued, so fresh
+events keep flowing while a failed one waits its turn. (Retried events
+may arrive out of order relative to newer ones — receivers should key
+on the event payload, not arrival order.)
+
+B. (HIGH) A panic in the notify worker — including the OnDelivery hook
+that persists webhook_deliveries rows — or in one scheduler expiry
+pass was unrecovered, killing the entire process (billing UI, payment
+webhooks, firewall enforcement) over one bad tick. Both now recover,
+log, and continue.
+
+C. (HIGH) Backup snapshots could be silently corrupt: the rotator
+checkpointed the WAL and then byte-copied the live DB file, so any
+write landing mid-copy (order paid, session created) tore pages in the
+copy — discovered only when restoring after losing the primary.
+Snapshots now use `VACUUM INTO` (transactionally consistent under
+concurrent writers), written to a .tmp and renamed, clamped to 0600.
+Falls back to checkpoint+copy only if VACUUM INTO itself errors.
+
+D. Backup rotator could wedge a full flash partition permanently:
+prune only ran after a successful snapshot, so once the disk filled,
+every snapshot failed and nothing was ever freed. Prune now runs even
+when the snapshot fails. Orphaned `*.db.tmp` files from interrupted
+snapshots (which the prune filter used to skip forever) are removed
+once they're an hour old, and a failed copy flush no longer leaks its
+partial .tmp.
+
+E. (SMS spam) The expiry-reminder de-dup marker is an audit row written
+AFTER the SMS goes out — with the caller's context. If that context
+died in between (admin closed the manual-trigger page mid-pass, server
+shutdown), the insert failed silently and every later hourly pass
+re-texted the same users until the MAC expired. De-dup/outcome audit
+rows and the sms_log row now use context.WithoutCancel, and the manual
+trigger detaches from the request context entirely (same rationale as
+the v0.106 payment-finalize fix). /admin/maintenance/expire-now is
+likewise detached so a client disconnect can't split the DB expiry
+flip from the firewall resync.
+
+F. Daily admin digest fired one hour EARLY: the loop scheduled at
+`hour-1` while config documents "at the given UTC hour" (1..24, 24 =
+midnight). Also, after a suspend/clock step of N days the loop's
+`target += 24h` catch-up fired N digest SMSes back-to-back; the next
+send is now recomputed from the wall clock (extracted into testable
+`nextDigestAt`).
+
+G. Reminder SMS body understated remaining time by truncating
+(71h → "2 天"); now rounds up ("3 天").
+
+H. Aliyun SMS adapter: a literal &Aliyun{} (nil nowFn/nonceFn) panicked
+inside whichever background goroutine sent the SMS; lazy in-place
+HTTPClient/Endpoint defaulting inside Send was a data race under the
+concurrent senders (reminder loop, digest loop, login alerts). Both
+fixed with local-variable defaults and nil guards.
+
+I. The purge janitor only ever ran 2h after boot, so routers that get
+power-cycled daily never purged expired sessions / audit / sms /
+webhook logs at all. One housekeeping pass now runs at boot (the
+weekly VACUUM intentionally still waits — a daily-rebooted router
+should not VACUUM daily).
+
+Regression tests cover: fresh events flowing past a failing event's
+backoff, retry completion, OnDelivery-panic survival, scheduler
+panic survival, digest hour semantics + clock-jump absorption,
+reminder de-dup across a mid-pass context cancel, day-count rounding,
+snapshot integrity under a live DB (PRAGMA integrity_check), prune
+running despite snapshot failure, stale .tmp cleanup, boot-time purge
+pass, Aliyun zero-value Send and concurrent-Send race (-race).
+
+### Security: X-Forwarded-For rate-limit bypass, SSE session leak, /pay/success order oracle, walled-garden LAN hole
+
+Four independent portal/user-surface fixes:
+
+A. clientIP() trusted X-Forwarded-For unconditionally. On the default
+deployment (binary listening directly on the router LAN, no reverse
+proxy) that header is client-controlled, so ONE spoofed header per
+request defeated every IP-keyed rate limiter: unlimited voucher-code
+guesses at /redeem (the only brute-force defense on 12-char codes),
+login floods, /api/pay/create order floods, forgot-password SMS
+pumping — and forged the IPs written into the audit log. XFF is now
+only honored behind the new opt-in `security.trust_proxy_headers`
+config (set it ONLY when a proxy you control overwrites the header).
+
+B. /admin/devices/stream and /admin/stats/stream checked the admin
+session only at connect time. A revoked session (panic button,
+revoke-all, logout elsewhere) or an expired one kept receiving live
+device data — MACs, IPs, DHCP hostnames, revenue counters —
+indefinitely, since heartbeats keep the connection open forever. Both
+streams now re-validate the session cookie on every tick/heartbeat
+and close when it's gone.
+
+C. /pay/success?mac= accepted any raw string and always looked up the
+most recent PAID order for it — anyone who knew a neighbor's MAC
+(they're broadcast on the LAN) could fetch their order number and
+from it the full /receipt (amount, plan, order/trade numbers), any
+time. The param now goes through NormalizeMAC, and the receipt link +
+expiry row only render for orders paid in the last 30 minutes (the
+page is only ever reached right after paying) or for the requester's
+own detected device.
+
+D. Walled-garden DNS answers pointing at loopback / RFC1918 /
+link-local / CGNAT / multicast / 240/4 space are rejected before
+entering the nftables bypass set. Previously a misconfigured or
+hostile upstream resolver answering 192.168.1.1 for a garden CDN
+domain let UNPAID devices reach the router itself (or other LAN
+hosts) ahead of the drop rule. Literal IP entries configured in
+`walled_garden.domains` still pass verbatim (explicit admin intent).
+
+Also: db.RedeemVoucher's mark-redeemed UPDATE now re-asserts
+`redeemed_at IS NULL AND revoked = 0` in its WHERE clause
+(compare-and-set), so a double-spend can't win even if the
+SetMaxOpenConns(1) serialization ever changes.
+
+Tests: XFF ignored by default / honored when trusted, redeem limiter
+survives header rotation, both SSE streams close within ticks of
+session revocation (real httptest.Server), fresh-vs-stale receipt
+gating + reflected-garbage mac, 16-goroutine single-winner redeem
+(race detector clean), non-public DNS answers filtered vs literal IP
+passthrough.
+
+### Admin API: backup scope escalation, grant ownership clobber, CSV formula injection
+
+Four admin-API security fixes:
+
+A. /api/admin/backup accepted READ-ONLY Bearer tokens. The raw SQLite
+file contains plaintext session tokens (which mint live admin/user
+cookies), password hashes, TOTP secrets, full unredeemed voucher
+codes, and SMS message bodies — exactly the material every JSON read
+endpoint deliberately strips. A leaked monitoring token was therefore
+a full-scope token in disguise. The route now goes through
+requireAPITokenPrivileged, which rejects readonly tokens with 403 on
+every method. Off-router backup automation must use a non-readonly
+token (which it should have anyway — it holds the whole DB).
+
+B. /api/admin/users/grant and /api/admin/users/grant-by-phone listed a
+user's MACs and then extended each one through the unconditional
+UpsertMAC path, which OVERWRITES macs.user_id. A device transferred
+to a different user between the list and the per-MAC write (user-side
+replace/claim flow) was silently re-extended AND reassigned back to
+the granted user. New db.ExtendMACOwned / MACSvc.ExtendOwned guard
+the update with WHERE user_id = ? in a single statement; a row whose
+ownership changed is skipped (logged, excluded from macs_extended),
+never stolen.
+
+C. CSV exports (/admin/export/{macs,orders,users,audit,sms-log,
+webhook-log}.csv + /admin/vouchers/export.csv) wrote user-influenced
+text raw. MAC labels are settable by END USERS via /user/macs/label;
+audit detail, SMS bodies, and gateway error strings carry external
+text too. A label like =HYPERLINK(...) or a DDE payload executes when
+the admin opens the export in Excel/LibreOffice. All text cells now
+pass through csvCell, which prefixes ' when the first non-space byte
+is one of = + - @ TAB CR. Timestamps/ids/normalized MACs are
+unaffected.
+
+D. /api/admin/orders/cancel-stale silently discarded JSON decode
+errors, so a malformed body ({"older_than_hours":"48"} — string, not
+int) fell back to the 24h default and canceled a MORE aggressive
+window than the caller asked for. Empty body still means the
+documented 24h default; malformed non-empty JSON is now a 400 with
+zero cancellations.
+
+Tests: readonly backup 403 (+ no DB bytes, no audit row, 401 without
+token), ExtendOwned skip/extend matrix + grant-by-phone end-to-end
+isolation, csvCell unit matrix + macs/audit/sms-log export round-trips
+through encoding/csv, cancel-stale malformed-JSON 400 with order
+untouched.
+
+### Auth hardening: TOTP one-time use, backup-code race, XFF rate-limit bypass, admin-2FA CSRF, reset enumeration
+
+Five distinct fixes across login / 2FA / forgot-password, each with
+regression tests:
+
+1. **TOTP codes are now one-time use** (RFC 6238 §5.2). A 6-digit code
+   used to stay valid for its whole ±1-step window (~90 s) — anyone
+   who saw the victim type it (shoulder-surf, phishing relay) could
+   immediately reuse it to open a second session, or to pass the
+   2FA-disable check. `totp.MatchingStep` reports the timestep a code
+   matched and the server keeps a per-secret high-water mark; a replay
+   is treated exactly like a wrong code. Applies to user login 2FA,
+   admin login 2FA, and user 2FA disable.
+
+2. **Backup-code double spend under concurrency.**
+   `MarkBackupCodeUsed` never reported whether the conditional UPDATE
+   actually landed, so two logins racing on the same code could both
+   read it as unused and both pass. It now returns a consumed flag and
+   `verifyAndConsumeBackupCode` requires it — exactly one racer wins.
+
+3. **X-Forwarded-For no longer defeats per-IP rate limits.**
+   `clientIP` trusted the FIRST XFF entry from anyone; a direct client
+   could stamp a fresh fake IP per request and walk through every
+   per-IP limiter (login, register, forgot-password issue/verify) and
+   forge the ip= recorded in audit rows. The header is now ignored
+   unless the request arrives from `security.trusted_proxies` (new
+   config, single IPs or CIDRs, default empty = never trust), and when
+   trusted we take the LAST entry — the one the proxy appended — never
+   client-supplied leading entries. Deployments behind nginx/Caddy
+   should list the proxy address to keep per-client keying.
+
+4. **/admin/login/2fa POST now CSRF-checked** like its user-side
+   counterpart (checked before the attempt counter, so a cross-site
+   form can't silently burn the 5-attempt budget and lock the admin
+   out of a pending login). Template carries the `_csrf` field.
+
+5. **Forgot-password verify no longer enumerates accounts.** Probing
+   `/user/forgot-password/verify` with a made-up code answered
+   验证码错误 for unregistered phones but 已过期 for registered ones —
+   a registration oracle that never sent an SMS. Both now answer
+   已过期, and neither path runs bcrypt so timing is uniform as well.
+   Related: `/user/login` now burns a dummy bcrypt comparison on
+   unknown phones so response timing doesn't reveal registration
+   either.
+
+### Admin UI correctness: logout CSRF, schedule/firewall leak, stale badges, filtered exports
+
+Correctness pass over the admin templates and the handlers that feed
+them.
+
+A. (HIGH) Clearing a MAC's schedule — or saving one whose window is
+currently open — re-added the MAC to the paid nftables set
+unconditionally. A BLOCKED or EXPIRED device regained internet access
+until the next resync tick. Both the clear branch and the
+immediate-apply path (`applyOneSchedule`) now check eligibility
+(status=active AND not expired) first, and the apply path defensively
+removes ineligible MACs instead.
+
+B. (MED) `/admin/logout` was a GET link. SameSite=Lax cookies ride
+along on top-level cross-site GET navigations and on speculative link
+prefetches, so a hostile link — or an eager browser prefetcher walking
+the sidebar — could sign the admin out (session fixation setup /
+denial of service). Logout is now POST + CSRF; the sidebar renders a
+form styled like the old link, and GET bounces to the dashboard with
+the session intact.
+
+C. The 最近在线 pill on `/admin/macs/detail` showed 在线 whenever ANY
+sighting row existed, even one from weeks ago. It now applies the same
+10-minute recency window as `/admin/devices` and shows 离线 otherwise.
+
+D. `/admin/login?err=…` codes from the 2FA flow (`2fa_expired`,
+`2fa_locked`, `2fa_misconfigured`) were silently dropped on the GET
+render — an expired pending-2FA session bounced the admin to a blank
+form with no explanation. They now render as proper messages; unknown
+codes are not echoed. `errLabel` also gained real messages for the
+plan-validation codes (`bad_key`, `label_too_long`, `days_too_large`,
+`price_too_large`) plus `not_found` / `bad_mac` / `db`, which used to
+surface as raw code strings.
+
+E. Filters/links: the orders header's 已过滤 badge ignored the
+`user_id` filter; the `/admin/macs` attention links dropped the status
+filters their dashboard twins carry; `ok=audit_trim` had no flash on
+the audit page; order numbers on the user detail page weren't links.
+
+F. The SSE frames on `/admin/devices` were unsorted, so two seconds
+after page load the carefully ranked list (online-unknown first, then
+online-known, …) reshuffled into DB order. Frames now sort with the
+same ranking as the initial render.
+
+G. CSV exports: `orders.csv` / `audit.csv` are named
+`*-filtered.csv` when any filter is active, so a partial download
+isn't mistaken for the full dataset; the MAC export's in-memory search
+post-filter was case-SENSITIVE (`q=office` missed "Office-Printer")
+while the page itself uses case-insensitive LIKE — now lowercased on
+both sides.
+
+H. Tests: `pages_smoke_test.go` dropped the nonexistent `/admin/2fa`
+URL (it vacuously passed by rendering the portal catch-all), gained
+filtered-URL variants, and now asserts every admin page actually
+renders the admin shell. New regression tests cover the schedule
+firewall eligibility, logout semantics, login error surfacing, the
+sighting recency pill, and export filenames/case-insensitivity.
+
+### Config strictness, packaging fixes, CI stops trusting itself
+
+Platform pass over config validation, the Docker dev path, the .ipk
+packaging, and the CI checks that were quietly green while things were
+broken. Extends v0.104's strict `--check-config` — every item below
+fails at load time instead of misbehaving at runtime.
+
+A. Config validation holes closed (all previously passed --check-config):
+
+- `security.password_strength` typos (e.g. "strong") silently meant
+  lax — a hidden security downgrade. Now only ""/lax/strict validate.
+- Empty `api_tokens[].token` entries were silently ignored at runtime
+  (operator believes a token exists; every request 401s). Tokens now
+  must be ≥16 chars, unique, non-empty; rate_limit_per_min ≥ 0.
+- `password_hash` wasn't checked to be bcrypt — pasting a sha256 hex
+  (or the plaintext) locked the admin out with no diagnostic. Same for
+  non-base32 `totp_secret`: Verify() always false = permanent 2FA
+  lockout discovered at the login prompt. Both are validated at load.
+- Plaintext admin passwords must be ≥8 chars (bcrypt hashes are
+  exempt; `changeme` in the example config remains exactly at the
+  floor). Setting both password AND password_hash is now an error, as
+  are duplicate admin usernames across admin:/admins[].
+- `listen`/`portal_port`/`portal_host` were never validated — a
+  missing colon in listen passed --check-config and died at bind.
+- Negative durations (scheduler/backup/walled-garden intervals) were
+  silently replaced by hardcoded fallbacks deep in each goroutine.
+- `firewall.backend` typos passed --check-config, then log.Fatal'd at
+  boot. Validation mirrors firewall.NewBackend's accepted names.
+- `sms.provider` typos and incomplete aliyun credentials degraded to
+  "SMS disabled" with only a log line — password-reset texts just
+  never arrived in prod. Now rejected, along with out-of-range
+  expiry_reminder_days / admin_digest_hour.
+- `webhook.url` must be an absolute http(s) URL and requires a
+  secret — unsigned webhooks can't be verified by the receiver, so
+  anyone finding the endpoint could forge payment events.
+- Walled-garden domain entries that are URLs ("https://x/path") never
+  resolve; the resolver retried the bogus lookup forever while
+  payment hosts stayed unreachable. Bare domains enforced.
+- Security knob ranges (admin_session_hours, user_session_days,
+  audit_log_keep, auto_cancel_stale_order_hours, hsts_max_age_seconds)
+  are rejected when out of documented range instead of being silently
+  clamped to something the operator didn't ask for.
+
+B. Docker dev path was entirely broken and CI was green: the image put
+web assets at /app/web while the compose-mounted config.example.yaml
+points web_root at /usr/share/router-billing/web — template parsing
+fatal'd on boot, so `docker compose up` never worked. Assets moved to
+the config's path (matching the .ipk layout). Added a /healthz-based
+HEALTHCHECK to the image, and cap_drop ALL + no-new-privileges +
+healthcheck to docker-compose (image already ran non-root as `rb`).
+
+C. .ipk packaging: the control file's hardcoded `Version: 0.6` was
+shipped in every build — `opkg upgrade` never saw a newer version.
+The Makefile now stamps VERSION into the staged control, and
+release.yml passes the tag (v0.108 → 0.108) so the binary's
+--version, the ipk filename and the control field all agree. Also:
+`ipk` added to .PHONY; the old archive is removed before `ar -rc`
+(ar UPDATES an existing archive, risking stale member order —
+debian-binary must be first for opkg); tar uses --numeric-owner; and
+/etc/router-billing/config.yaml ships 0600 instead of world-readable
+0644 (it holds admin credentials, pay keys and API tokens).
+
+D. CI false greens: build-arm64 would happily upload an x86-64 binary
+if GOARCH regressed (now `file`-checked for aarch64); `make ipk`
+exiting 0 said nothing about installability (structure, member order,
+control fields, version/filename agreement and config perms are now
+verified); and the Docker image was never built at all (new job:
+build, assert non-root uid, --check-config in-container, and boot to
+a healthy /healthz with all capabilities dropped).
+
+E. `--gen-password-hash` echoed the password to the terminal despite
+its "no echo if TTY" comment — it now uses term.ReadPassword on TTYs
+(piped stdin still works) and enforces the same 8-char floor as the
+config validator.
+
+Tests: config_test.go grows a Load()-based rejection table covering
+every new validation rule, acceptance tests for hardened configs and
+password_strength case-variants, and a test pinning
+config.example.yaml itself as valid so the example can't drift from
+strict --check-config even if the workflow step is reshuffled.
+
 ## v0.106 — Payment hardening: refund-replay resurrection, amount cross-check, lost grants
 
 Money/security pass over the payment finalize path.

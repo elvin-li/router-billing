@@ -238,13 +238,19 @@ func (a *App) handleAdminExportMACs(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		// Post-filter q + status in memory (bounded by user's MAC count).
+		// Case-insensitive to match the SQL LIKE path used when no
+		// user_id is set — pre-v0.108 a lowercase "aa:bb" query matched
+		// there but not here (MACs are stored uppercase).
 		if qSearch != "" || statusFilter != "" {
+			qLower := strings.ToLower(qSearch)
 			filtered := macs[:0]
 			for _, m := range macs {
 				if statusFilter != "" && string(m.Status) != statusFilter {
 					continue
 				}
-				if qSearch != "" && !strings.Contains(m.Mac, qSearch) && !strings.Contains(m.Label, qSearch) {
+				if qSearch != "" &&
+					!strings.Contains(strings.ToLower(m.Mac), qLower) &&
+					!strings.Contains(strings.ToLower(m.Label), qLower) {
 					continue
 				}
 				filtered = append(filtered, m)
@@ -281,7 +287,7 @@ func (a *App) handleAdminExportMACs(w http.ResponseWriter, r *http.Request) {
 		}
 		_ = cw.Write([]string{
 			m.Mac,
-			m.Label,
+			csvCell(m.Label), // user-settable via /user/macs/label — formula-injection risk
 			string(m.Status),
 			m.ExpiresAt.UTC().Format(time.RFC3339),
 			uid,
@@ -409,11 +415,11 @@ func (a *App) handleAdminExportSMSLog(w http.ResponseWriter, r *http.Request) {
 		_ = cw.Write([]string{
 			strconv.FormatInt(l.ID, 10),
 			l.SentAt.UTC().Format(time.RFC3339),
-			l.Provider,
-			l.Phone,
-			l.Message,
+			csvCell(l.Provider),
+			csvCell(l.Phone),
+			csvCell(l.Message), // free text — formula-injection risk
 			successStr,
-			l.ErrorMsg,
+			csvCell(l.ErrorMsg), // provider-supplied — formula-injection risk
 		})
 	}
 }
@@ -460,13 +466,13 @@ func (a *App) handleAdminExportWebhookLog(w http.ResponseWriter, r *http.Request
 		_ = cw.Write([]string{
 			strconv.FormatInt(l.ID, 10),
 			l.SentAt.UTC().Format(time.RFC3339),
-			l.EventType,
-			l.MAC,
+			csvCell(l.EventType),
+			csvCell(l.MAC),
 			strconv.Itoa(l.Attempt),
 			strconv.Itoa(l.StatusCode),
 			successStr,
 			strconv.FormatInt(l.DurationMs, 10),
-			l.ErrorMsg,
+			csvCell(l.ErrorMsg), // downstream-supplied — formula-injection risk
 		})
 	}
 }
@@ -498,15 +504,22 @@ func (a *App) handleAdminExportAudit(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.Header().Set("Content-Type", "text/csv; charset=utf-8")
-	w.Header().Set("Content-Disposition", `attachment; filename="audit.csv"`)
+	filename := "audit.csv"
+	if q.Get("actor") != "" || q.Get("action") != "" || q.Get("target") != "" ||
+		q.Get("q") != "" || q.Get("since") != "" || q.Get("until") != "" {
+		filename = "audit-filtered.csv"
+	}
+	w.Header().Set("Content-Disposition", `attachment; filename="`+filename+`"`)
 	cw := csv.NewWriter(w)
 	defer cw.Flush()
 	_ = cw.Write([]string{"id", "at", "actor", "action", "target", "detail"})
 	for _, e := range entries {
+		// Audit detail embeds user-controlled text (labels, notes, SMS
+		// error strings) — every text column is neutralized.
 		_ = cw.Write([]string{
 			strconv.FormatInt(e.ID, 10),
 			e.At.UTC().Format(time.RFC3339),
-			e.Actor, e.Action, e.Target, e.Detail,
+			csvCell(e.Actor), csvCell(e.Action), csvCell(e.Target), csvCell(e.Detail),
 		})
 	}
 }
@@ -542,7 +555,13 @@ func (a *App) handleAdminExportOrders(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.Header().Set("Content-Type", "text/csv; charset=utf-8")
-	w.Header().Set("Content-Disposition", `attachment; filename="orders.csv"`)
+	// Filename flags active filters — matches the macs/users/sms/webhook
+	// export pattern so the download is self-describing.
+	filename := "orders.csv"
+	if q != "" || status != "" || since != "" || until != "" || userID > 0 {
+		filename = "orders-filtered.csv"
+	}
+	w.Header().Set("Content-Disposition", `attachment; filename="`+filename+`"`)
 	cw := csv.NewWriter(w)
 	defer cw.Flush()
 	_ = cw.Write([]string{"order_no", "mac", "plan", "days", "amount_cents", "status", "method", "trade_no", "user_id", "paid_at", "created_at"})
@@ -556,8 +575,9 @@ func (a *App) handleAdminExportOrders(w http.ResponseWriter, r *http.Request) {
 			paid = o.PaidAt.UTC().Format(time.RFC3339)
 		}
 		_ = cw.Write([]string{
-			o.OrderNo, o.Mac, o.Plan, strconv.Itoa(o.Days),
-			strconv.Itoa(o.AmountCents), string(o.Status), o.PaymentMethod, o.TradeNo,
+			csvCell(o.OrderNo), csvCell(o.Mac), csvCell(o.Plan), strconv.Itoa(o.Days),
+			strconv.Itoa(o.AmountCents), string(o.Status), csvCell(o.PaymentMethod),
+			csvCell(o.TradeNo), // gateway-supplied — formula-injection risk
 			uid, paid, o.CreatedAt.UTC().Format(time.RFC3339),
 		})
 	}

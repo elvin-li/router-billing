@@ -22,7 +22,7 @@ jobs:
       - name: go vet
         run: go vet ./...
       - name: go test (race — needs cgo, default on linux runners)
-        run: CGO_ENABLED=1 go test -v -race ./...
+        run: CGO_ENABLED=1 go test -v -race -timeout 20m ./...
       - name: go build local (static, no cgo)
         run: CGO_ENABLED=0 go build -o /tmp/router-billing ./cmd/router-billing
       # Strict since v0.104 — the example config must always validate.
@@ -40,8 +40,40 @@ jobs:
         with: { go-version: '1.22', cache: true }
       - name: cross-compile
         run: make arm64
+      # A dropped GOARCH in the Makefile would still "succeed" and upload an
+      # x86-64 binary that only fails on the router. Pin the architecture.
+      - name: verify binary is aarch64
+        run: |
+          file build/router-billing-arm64
+          file build/router-billing-arm64 | grep -q 'aarch64' \
+            || { echo "::error::cross-compile produced a non-aarch64 binary"; exit 1; }
       - name: build ipk
         run: make ipk
+      # `make ipk` exiting 0 says nothing about whether opkg can install the
+      # result. Check the parts opkg actually cares about: member order,
+      # control fields, payload paths, and that the config isn't shipped
+      # world-readable (it holds admin credentials and pay keys).
+      - name: verify ipk structure
+        run: |
+          set -x
+          ipk=$(ls build/router-billing_*_aarch64_generic.ipk)
+          first=$(ar -t "$ipk" | head -n1)
+          [ "$first" = "debian-binary" ] \
+            || { echo "::error::debian-binary must be the first ar member (got $first)"; exit 1; }
+          workdir=$(mktemp -d)
+          cp "$ipk" "$workdir/" && cd "$workdir"
+          ar -x "$(basename "$ipk")"
+          tar -xzf control.tar.gz
+          grep -q '^Package: router-billing$' control
+          grep -q '^Architecture: aarch64_generic$' control
+          # Version must be stamped from the build, not the hardcoded source value.
+          ver=$(sed -n 's/^Version: //p' control)
+          echo "$ipk" | grep -qF "_${ver}_" \
+            || { echo "::error::control Version ($ver) doesn't match ipk filename"; exit 1; }
+          tar -tzf data.tar.gz | grep -q './usr/bin/router-billing'
+          tar -tzf data.tar.gz | grep -q './etc/init.d/router-billing'
+          tar -tvzf data.tar.gz | grep 'etc/router-billing/config.yaml' | grep -q -- '-rw-------' \
+            || { echo "::error::config.yaml in ipk must be 0600 (contains credentials)"; exit 1; }
       - name: pack tar.gz
         run: make pack-arm64
       - name: artifact sizes
@@ -54,6 +86,41 @@ jobs:
             build/router-billing-arm64.tar.gz
             build/router-billing_*_aarch64_generic.ipk
           retention-days: 14
+
+  # The Dockerfile is the contributor onboarding path ("docker compose up"),
+  # but nothing ever built it in CI — the image was broken for an unknown
+  # number of releases (web_root mismatch) with green checks throughout.
+  docker:
+    name: docker image
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: build image
+        run: docker build -t router-billing:ci .
+      - name: image must not run as root
+        run: |
+          uid=$(docker run --rm --entrypoint id router-billing:ci -u)
+          echo "container uid: $uid"
+          [ "$uid" != "0" ] || { echo "::error::container runs as root"; exit 1; }
+      - name: --check-config inside container
+        run: docker run --rm router-billing:ci --check-config -config /app/config.example.yaml
+      - name: healthcheck is defined
+        run: |
+          docker inspect --format '{{.Config.Healthcheck.Test}}' router-billing:ci | grep -q healthz \
+            || { echo "::error::image has no /healthz HEALTHCHECK"; exit 1; }
+      - name: boots and reports healthy (dry firewall)
+        run: |
+          docker run -d --name rb --cap-drop=ALL --security-opt no-new-privileges \
+            router-billing:ci -config /app/config.example.yaml --dry-firewall
+          for i in $(seq 1 30); do
+            s=$(docker inspect --format '{{.State.Health.Status}}' rb)
+            [ "$s" = "healthy" ] && exit 0
+            [ "$s" = "unhealthy" ] && break
+            sleep 2
+          done
+          echo "::error::container never became healthy (status=$s)"
+          docker logs rb
+          exit 1
 
   lint:
     name: lint

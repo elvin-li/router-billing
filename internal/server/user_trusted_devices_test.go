@@ -16,6 +16,9 @@ import (
 // rb_user_trusted) so subsequent tests can issue authed requests.
 func loginWith2FAUntilSession(t *testing.T, h http.Handler, app *App, phone, password string, trustDevice bool) map[string]string {
 	t.Helper()
+	// Tests log in repeatedly inside one 30s TOTP step; a real authenticator
+	// would show a fresh code each login, so lift the one-time-use ledger.
+	resetTOTPReplay()
 	res, _ := do(t, h, "POST", "/user/login",
 		url.Values{"phone": {phone}, "password": {password}}, nil)
 	if res.StatusCode != 303 {
@@ -208,7 +211,9 @@ func TestDisable2FAWipesTrustedDevices(t *testing.T) {
 		t.Fatalf("setup: should have 1 trusted device; got %d", len(devs))
 	}
 
-	// Disable 2FA.
+	// Disable 2FA. (Fresh-code simulation: the login above consumed the
+	// current step for one-time-use purposes.)
+	resetTOTPReplay()
 	code := validTOTPForUser(t, app, "13800139035")
 	res, _ := do(t, h, "POST", "/user/2fa/disable",
 		url.Values{"_csrf": {jar[csrfCookieName]}, "password": {"disable-trust-pw"}, "code": {code}}, jar)

@@ -116,12 +116,18 @@
         <span>重建防火墙</span>
       </button>
     </form>
-    <a href="/admin/logout" style="margin-top:6px;">
-      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-        <path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><polyline points="16 17 21 12 16 7"/><line x1="21" y1="12" x2="9" y2="12"/>
-      </svg>
-      <span>退出</span>
-    </a>
+    {{/* POST + CSRF: a plain GET link let cross-site navigations and
+         link prefetchers log the admin out (SameSite=Lax sends cookies
+         on top-level GETs). */}}
+    <form method="post" action="/admin/logout" style="margin:6px 0 0;">
+      {{template "csrf" .}}
+      <button type="submit" class="linklike">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><polyline points="16 17 21 12 16 7"/><line x1="21" y1="12" x2="9" y2="12"/>
+        </svg>
+        <span>退出</span>
+      </button>
+    </form>
   </div>
 </aside>
 {{end}}

@@ -102,7 +102,7 @@
           <tbody>
             {{range .Orders}}
             <tr>
-              <td class="mono" style="font-size:12px;">{{.OrderNo}}</td>
+              <td class="mono" style="font-size:12px;"><a href="/admin/orders/detail?order_no={{.OrderNo}}" style="color:inherit;" title="查看完整时间线">{{.OrderNo}}</a></td>
               <td class="mono">{{.Mac}}</td>
               <td><strong>¥{{formatYuan .AmountCents}}</strong></td>
               <td><span class="pill {{.Status}}">{{.Status}}</span></td>
