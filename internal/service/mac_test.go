@@ -162,6 +162,83 @@ func TestGrantPropagatesFirewallError(t *testing.T) {
 	}
 }
 
+// TestRedeemVoucherGrantFirewallFailureDoesNotBurnVoucher pins the reason
+// this method exists: an nft/ipset hiccup during redemption must NOT fail
+// the redemption. The days are committed in the DB (source of truth), the
+// firewall error comes back separately, and the hourly reconcile heals
+// the set.
+func TestRedeemVoucherGrantFirewallFailureDoesNotBurnVoucher(t *testing.T) {
+	svc, dbx, fw := newTestSvc(t)
+	ctx := context.Background()
+
+	if _, err := dbx.CreateVoucher(ctx, "SVCFWFAIL001", 30, "", "B1", nil); err != nil {
+		t.Fatal(err)
+	}
+	fw.addErr = errors.New("nft: transient failure")
+
+	v, m, fwErr, err := svc.RedeemVoucherGrant(ctx, "SVCFWFAIL001", "AA:BB:CC:DD:EE:F1", nil)
+	if err != nil {
+		t.Fatalf("redemption must succeed despite firewall failure; got %v", err)
+	}
+	if fwErr == nil {
+		t.Error("fwErr should surface the firewall failure")
+	}
+	if v == nil || v.RedeemedAt == nil {
+		t.Error("voucher should be consumed")
+	}
+	if m == nil {
+		t.Fatal("expected MAC row")
+	}
+	// Days landed in the DB even though the set add failed.
+	got, _ := dbx.GetMAC(ctx, "AA:BB:CC:DD:EE:F1")
+	if got == nil || !got.ExpiresAt.After(time.Now()) {
+		t.Errorf("MAC grant should be persisted; got %+v", got)
+	}
+}
+
+// TestRedeemVoucherGrantHappyPathAddsToFirewall — normal path: DB commit
+// plus firewall add, no firewall error.
+func TestRedeemVoucherGrantHappyPathAddsToFirewall(t *testing.T) {
+	svc, dbx, fw := newTestSvc(t)
+	ctx := context.Background()
+
+	if _, err := dbx.CreateVoucher(ctx, "SVCFWOK00001", 7, "", "B2", nil); err != nil {
+		t.Fatal(err)
+	}
+	_, m, fwErr, err := svc.RedeemVoucherGrant(ctx, "SVCFWOK00001", "AA:BB:CC:DD:EE:F2", nil)
+	if err != nil || fwErr != nil {
+		t.Fatalf("err=%v fwErr=%v", err, fwErr)
+	}
+	if !fw.set[m.Mac] {
+		t.Error("mac should be in firewall set")
+	}
+}
+
+// TestRedeemVoucherGrantRejectedTouchesNothing — a used voucher must fail
+// the whole call: no firewall add, no MAC row.
+func TestRedeemVoucherGrantRejectedTouchesNothing(t *testing.T) {
+	svc, dbx, fw := newTestSvc(t)
+	ctx := context.Background()
+
+	if _, err := dbx.CreateVoucher(ctx, "SVCUSED00001", 7, "", "", nil); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := dbx.RedeemVoucher(ctx, "SVCUSED00001", "11:22:33:44:55:66", nil); err != nil {
+		t.Fatal(err)
+	}
+
+	_, _, _, err := svc.RedeemVoucherGrant(ctx, "SVCUSED00001", "AA:BB:CC:DD:EE:F3", nil)
+	if !errors.Is(err, db.ErrVoucherUsed) {
+		t.Errorf("err = %v, want ErrVoucherUsed", err)
+	}
+	if len(fw.addCalls) != 0 {
+		t.Errorf("no firewall calls expected; got %+v", fw.addCalls)
+	}
+	if m, _ := dbx.GetMAC(ctx, "AA:BB:CC:DD:EE:F3"); m != nil {
+		t.Errorf("MAC must not be created on rejected redeem; got %+v", m)
+	}
+}
+
 func TestExtendAddsThenUpdatesFW(t *testing.T) {
 	svc, _, fw := newTestSvc(t)
 	ctx := context.Background()

@@ -356,21 +356,24 @@ func (a *App) handleRedeem(w http.ResponseWriter, r *http.Request) {
 		userID = &uid
 	}
 
-	v, err := a.DB.RedeemVoucher(r.Context(), code, mac, userID)
+	// Voucher consumption + MAC grant commit together — a failure on
+	// either side rolls back both, so a DB hiccup can never burn the
+	// customer's code without delivering the days.
+	v, m, fwErr, err := a.MACSvc.RedeemVoucherGrant(r.Context(), code, mac, userID)
 	if err != nil {
 		http.Redirect(w, r, "/redeem?code="+httpEsc(codeRaw)+"&err="+httpEsc(redeemErrLabel(err)), http.StatusSeeOther)
-		return
-	}
-	// Apply the time to the MAC.
-	m, err := a.MACSvc.Extend(r.Context(), mac, "voucher:"+v.Batch, v.Days, userID)
-	if err != nil {
-		log.Printf("redeem extend %s: %v", mac, err)
-		http.Redirect(w, r, "/redeem?code="+httpEsc(codeRaw)+"&err="+httpEsc("授权失败请联系管理员"), http.StatusSeeOther)
 		return
 	}
 	actor := "user-anon"
 	if userID != nil {
 		actor = fmt.Sprintf("user:%d", *userID)
+	}
+	if fwErr != nil {
+		// Days are in the DB; only the firewall add failed. The hourly
+		// reconcile (or /admin/resync) heals it — audit so ops can see
+		// affected customers if they call in before that happens.
+		a.DB.Audit(r.Context(), "system", "redeem_fw_add_failed", mac,
+			"voucher="+code+" err="+fwErr.Error())
 	}
 	a.DB.Audit(r.Context(), actor, "redeem", mac, "voucher="+code)
 	uid := int64(0)

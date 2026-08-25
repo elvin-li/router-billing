@@ -53,6 +53,27 @@ func (s *MACService) Extend(ctx context.Context, mac, label string, days int, us
 	return m, nil
 }
 
+// RedeemVoucherGrant consumes a voucher and grants its days to the MAC as
+// ONE DB transaction, then adds the MAC to the firewall best-effort.
+//
+// The firewall add deliberately does NOT fail the redemption: the DB is
+// the source of truth and the hourly scheduler reconcile (plus manual
+// /admin/resync) self-heals set drift. Failing here would burn the
+// customer's voucher over a transient nft/ipset hiccup — the one outcome
+// this method exists to prevent. A failed add is returned via fwErr so
+// the caller can audit it without telling the customer their code is gone.
+func (s *MACService) RedeemVoucherGrant(ctx context.Context, code, mac string, userID *int64) (v *models.Voucher, m *models.MAC, fwErr error, err error) {
+	v, m, err = s.DB.RedeemVoucherGrant(ctx, code, mac, userID)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	if aerr := s.FW.Add(ctx, m.Mac); aerr != nil {
+		log.Printf("warn: firewall add %s after voucher redeem: %v (reconcile will heal)", m.Mac, aerr)
+		fwErr = aerr
+	}
+	return v, m, fwErr, nil
+}
+
 // Revoke marks blocked + drops from firewall set.
 func (s *MACService) Revoke(ctx context.Context, mac string) error {
 	if err := s.DB.SetMACStatus(ctx, mac, models.MACBlocked); err != nil {

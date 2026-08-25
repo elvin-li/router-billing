@@ -279,9 +279,22 @@ func (d *DB) UpsertMAC(ctx context.Context, mac, label string, days int, userID 
 	}
 	defer tx.Rollback()
 
+	if err := upsertMACTx(ctx, tx, mac, label, days, userID); err != nil {
+		return nil, err
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, err
+	}
+	return d.GetMAC(ctx, mac)
+}
+
+// upsertMACTx is the transaction-level body of UpsertMAC, shared with
+// RedeemVoucherGrant so voucher consumption and the MAC grant can commit
+// (or roll back) together.
+func upsertMACTx(ctx context.Context, tx *sql.Tx, mac, label string, days int, userID *int64) error {
 	existing, err := getMACTx(ctx, tx, mac)
 	if err != nil {
-		return nil, err
+		return err
 	}
 	now := time.Now().UTC()
 	var newExpiry time.Time
@@ -313,13 +326,7 @@ func (d *DB) UpsertMAC(ctx context.Context, mac, label string, days int, userID 
 				newLabel, newExpiry, now, mac)
 		}
 	}
-	if err != nil {
-		return nil, err
-	}
-	if err := tx.Commit(); err != nil {
-		return nil, err
-	}
-	return d.GetMAC(ctx, mac)
+	return err
 }
 
 func getMACTx(ctx context.Context, tx *sql.Tx, mac string) (*models.MAC, error) {
@@ -1938,6 +1945,65 @@ func (d *DB) RedeemVoucher(ctx context.Context, code, mac string, userID *int64)
 	v.RedeemedByMac = mac
 	v.RedeemedUserID = userID
 	return v, nil
+}
+
+// RedeemVoucherGrant marks the voucher consumed AND grants its days to the
+// MAC in one transaction. Either both land or neither does — the standalone
+// RedeemVoucher + UpsertMAC sequence had a window where a failed grant left
+// the voucher burned with nothing delivered, unrecoverable for the customer
+// without admin surgery.
+//
+// The MAC's label is set to "voucher:<batch>" matching the label the
+// two-step flow used. Returns the voucher and the post-grant MAC row.
+// Validation errors are the same typed errors RedeemVoucher returns.
+func (d *DB) RedeemVoucherGrant(ctx context.Context, code, mac string, userID *int64) (*models.Voucher, *models.MAC, error) {
+	tx, err := d.conn.BeginTx(ctx, nil)
+	if err != nil {
+		return nil, nil, err
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	row := tx.QueryRowContext(ctx, `SELECT `+voucherCols+` FROM vouchers WHERE code = ?`, code)
+	v, err := scanVoucher(row)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, nil, ErrVoucherNotFound
+	}
+	if err != nil {
+		return nil, nil, err
+	}
+	if v.Revoked {
+		return nil, nil, ErrVoucherRevoked
+	}
+	if v.RedeemedAt != nil {
+		return nil, nil, ErrVoucherUsed
+	}
+	if v.ExpiresAt != nil && v.ExpiresAt.Before(time.Now().UTC()) {
+		return nil, nil, ErrVoucherExpired
+	}
+	now := time.Now().UTC()
+	var uid any
+	if userID != nil {
+		uid = *userID
+	}
+	if _, err := tx.ExecContext(ctx,
+		`UPDATE vouchers SET redeemed_at = ?, redeemed_by_mac = ?, redeemed_user_id = ? WHERE code = ?`,
+		now, mac, uid, code); err != nil {
+		return nil, nil, err
+	}
+	if err := upsertMACTx(ctx, tx, mac, "voucher:"+v.Batch, v.Days, userID); err != nil {
+		return nil, nil, err
+	}
+	m, err := getMACTx(ctx, tx, mac)
+	if err != nil {
+		return nil, nil, err
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, nil, err
+	}
+	v.RedeemedAt = &now
+	v.RedeemedByMac = mac
+	v.RedeemedUserID = userID
+	return v, m, nil
 }
 
 // Voucher errors.
