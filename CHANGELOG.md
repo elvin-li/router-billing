@@ -1,5 +1,25 @@
 # Changelog
 
+## v0.98 — Fix: pay-create no longer leaves orphaned pending orders
+
+Pre-v0.98 `/api/pay/create` inserted the pending order row BEFORE
+validating the payment provider. Any request with an unknown
+provider ("paypal") or a disabled one (WeChat/Alipay not
+configured) got a 400 — but the pending order stayed in the DB,
+was polled by the background loop for 30 minutes, and inflated
+the admin pending/attention counters. On installs with only one
+provider enabled this happened every time a client raced a
+config change.
+
+Now the provider is validated first (unknown / disabled → 400,
+zero DB writes). Additionally, if the upstream Precreate call
+itself fails (WeChat/Alipay 5xx), the just-created pending order
+is canceled — the QR code was never shown, so nobody can pay it.
+
+3 race-clean tests: unknown provider leaves 0 orders, disabled
+wechat/alipay leave 0 orders, bad-MAC/bad-plan validation
+precedence unchanged.
+
 ## v0.97 — auditTargetHref recognizes real generated order numbers
 
 Extends v0.92/v0.95's smart-link function. The audit smart-link
