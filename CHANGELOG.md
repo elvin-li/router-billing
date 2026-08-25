@@ -1,63 +1,29 @@
 # Changelog
-## v0.107 — DB layer: broken date() stats, expiry-sweep atomicity, tx gaps, indexes
 
-SQLite/Go correctness pass over internal/db.
+## v0.107 — Consolidated hardening: merge of PRs #5–#13
 
-A. (HIGH) Two daily stats were permanently zero. modernc.org/sqlite
-stores Go-bound time.Time as "2006-01-02 15:04:05.999 +0000 UTC" — a
-format SQLite's date() function returns NULL for. So SnapshotToday's
-`date(paid_at) = date('now')` recorded paid_orders = 0 in every daily
-snapshot ever taken, and Attention's `date(created_at) = date('now')`
-kept the FailedToday dashboard chip at 0 no matter how many orders
-failed. Both now compare against datetime('now','start of day'),
-which works lexicographically on the shared "YYYY-MM-DD HH:MM:SS"
-prefix — the same pattern DashboardSnapshot already used (its comment
-even warned about date(); the two older call sites never got the
-memo). SnapshotToday also no longer swallows the count error.
+One combined release merging nine parallel hardening branches (test
+hardening, DB transactions/time/indexes, firewall/portal, background
+jobs, portal/user security, admin API, auth/2FA/CSRF, admin UI,
+config/CI/docker). Where branches fixed the same bug independently the
+stronger fix won:
 
-B. (MED) ExpireDueMACs was a SELECT list followed by a separate
-blanket UPDATE — not atomic. A MAC extended between the two
-statements stayed active but was still in the returned list, so the
-caller revoked firewall access for a customer who had just renewed; a
-MAC expiring between the statements got flipped but was never
-reported, so its revoke webhook/notify never fired; and two
-concurrent sweeps could both report the same MAC (double webhooks).
-Now a single `UPDATE ... RETURNING mac` — flip and report are one
-atomic statement, each due MAC is claimed by exactly one sweep.
+- nftables List(): the JSON-based parser (firewall branch) replaced the
+  text-anchored parser (test branch); both fixed the dropped-first-MAC
+  bug, and the exec-level regression tests were ported to the JSON API.
+- Client-IP attribution: security.trusted_proxies (auth branch, CIDR
+  allowlist + realIPMiddleware, last-XFF-entry semantics) replaced the
+  portal branch's security.trust_proxy_headers boolean; all call sites
+  now go through the middleware-resolved IP.
+- Walled garden: full-list atomic rebuild with timeout refresh
+  (firewall branch) combined with the public-IPv4 answer filter and
+  literal-IP passthrough (portal branch).
 
-C. (MED) ClearUserTOTP ran three separate statements (wipe secret,
-delete backup codes, delete trusted devices). A failure after the
-first left 2FA off WITH live trusted-device tokens that would
-silently bypass the next enrollment's challenge. All three writes now
-commit in one transaction.
+Also includes the test-hardening branch's new coverage for config
+loading, schedule enforcement, arp/sightings exec paths and the JSON
+logger. Details per area below.
 
-D. (MED) SuspendUser's session purge was a separate best-effort
-statement whose error was discarded — a failed delete left the
-suspended user with a working session until natural expiry.
-DeleteUser had the same swallowed-error pattern. Both are now single
-transactions that propagate errors.
-
-E. (LOW) BumpPasswordResetAttempts was UPDATE-then-SELECT; two
-concurrent failed verifies could both read the same post-increment
-value, under-counting attempts against the brute-force cap. Now one
-`UPDATE ... RETURNING attempts`.
-
-F. (PERF) Missing indexes: sessions(user_id) — every per-user session
-op (suspend purge, "sign out other devices", list, count) scanned the
-whole table; and audit_log(action, target) — the daily expiry-
-reminder loop's correlated NOT EXISTS probe re-scanned every
-expiry_reminder row per candidate MAC. Both added via schema.sql's
-idempotent CREATE INDEX IF NOT EXISTS, so existing deploys pick them
-up on next startup.
-
-Regression tests for all of the above, including concurrency tests
-(verified under -race) that fail on the pre-fix code.
-
-internal/db/db.go
-internal/db/schema.sql
-internal/db/tx_time_index_test.go
-
-## v0.107 — Firewall/portal correctness: 22.03 apply failure, walled-garden 25h death, List drops a MAC, paid-zone router exposure
+### Firewall/portal correctness: 22.03 apply failure, walled-garden 25h death, List drops a MAC, paid-zone router exposure
 
 Correctness pass over the MAC whitelist, the captive-portal redirect
 and the paid/free SSID split. Everything below was verified against a
@@ -155,8 +121,65 @@ injection; the resolver re-pushes the full list every cycle and leaves
 the set alone on DNS outage; the ipset restore script stages+swaps and
 never touches the live set directly.
 
+### DB layer: broken date() stats, expiry-sweep atomicity, tx gaps, indexes
 
-## v0.108 — Background-job reliability: webhook pipeline stall, SMS spam, torn backups
+SQLite/Go correctness pass over internal/db.
+
+A. (HIGH) Two daily stats were permanently zero. modernc.org/sqlite
+stores Go-bound time.Time as "2006-01-02 15:04:05.999 +0000 UTC" — a
+format SQLite's date() function returns NULL for. So SnapshotToday's
+`date(paid_at) = date('now')` recorded paid_orders = 0 in every daily
+snapshot ever taken, and Attention's `date(created_at) = date('now')`
+kept the FailedToday dashboard chip at 0 no matter how many orders
+failed. Both now compare against datetime('now','start of day'),
+which works lexicographically on the shared "YYYY-MM-DD HH:MM:SS"
+prefix — the same pattern DashboardSnapshot already used (its comment
+even warned about date(); the two older call sites never got the
+memo). SnapshotToday also no longer swallows the count error.
+
+B. (MED) ExpireDueMACs was a SELECT list followed by a separate
+blanket UPDATE — not atomic. A MAC extended between the two
+statements stayed active but was still in the returned list, so the
+caller revoked firewall access for a customer who had just renewed; a
+MAC expiring between the statements got flipped but was never
+reported, so its revoke webhook/notify never fired; and two
+concurrent sweeps could both report the same MAC (double webhooks).
+Now a single `UPDATE ... RETURNING mac` — flip and report are one
+atomic statement, each due MAC is claimed by exactly one sweep.
+
+C. (MED) ClearUserTOTP ran three separate statements (wipe secret,
+delete backup codes, delete trusted devices). A failure after the
+first left 2FA off WITH live trusted-device tokens that would
+silently bypass the next enrollment's challenge. All three writes now
+commit in one transaction.
+
+D. (MED) SuspendUser's session purge was a separate best-effort
+statement whose error was discarded — a failed delete left the
+suspended user with a working session until natural expiry.
+DeleteUser had the same swallowed-error pattern. Both are now single
+transactions that propagate errors.
+
+E. (LOW) BumpPasswordResetAttempts was UPDATE-then-SELECT; two
+concurrent failed verifies could both read the same post-increment
+value, under-counting attempts against the brute-force cap. Now one
+`UPDATE ... RETURNING attempts`.
+
+F. (PERF) Missing indexes: sessions(user_id) — every per-user session
+op (suspend purge, "sign out other devices", list, count) scanned the
+whole table; and audit_log(action, target) — the daily expiry-
+reminder loop's correlated NOT EXISTS probe re-scanned every
+expiry_reminder row per candidate MAC. Both added via schema.sql's
+idempotent CREATE INDEX IF NOT EXISTS, so existing deploys pick them
+up on next startup.
+
+Regression tests for all of the above, including concurrency tests
+(verified under -race) that fail on the pre-fix code.
+
+internal/db/db.go
+internal/db/schema.sql
+internal/db/tx_time_index_test.go
+
+### Background-job reliability: webhook pipeline stall, SMS spam, torn backups
 
 Reliability pass over the background jobs (scheduler, notify worker,
 SMS loops, backup rotator, purge janitor). Complements v0.107's DB
@@ -235,7 +258,150 @@ snapshot integrity under a live DB (PRAGMA integrity_check), prune
 running despite snapshot failure, stale .tmp cleanup, boot-time purge
 pass, Aliyun zero-value Send and concurrent-Send race (-race).
 
-## v0.108 — Admin UI correctness: logout CSRF, schedule/firewall leak, stale badges, filtered exports
+### Security: X-Forwarded-For rate-limit bypass, SSE session leak, /pay/success order oracle, walled-garden LAN hole
+
+Four independent portal/user-surface fixes:
+
+A. clientIP() trusted X-Forwarded-For unconditionally. On the default
+deployment (binary listening directly on the router LAN, no reverse
+proxy) that header is client-controlled, so ONE spoofed header per
+request defeated every IP-keyed rate limiter: unlimited voucher-code
+guesses at /redeem (the only brute-force defense on 12-char codes),
+login floods, /api/pay/create order floods, forgot-password SMS
+pumping — and forged the IPs written into the audit log. XFF is now
+only honored behind the new opt-in `security.trust_proxy_headers`
+config (set it ONLY when a proxy you control overwrites the header).
+
+B. /admin/devices/stream and /admin/stats/stream checked the admin
+session only at connect time. A revoked session (panic button,
+revoke-all, logout elsewhere) or an expired one kept receiving live
+device data — MACs, IPs, DHCP hostnames, revenue counters —
+indefinitely, since heartbeats keep the connection open forever. Both
+streams now re-validate the session cookie on every tick/heartbeat
+and close when it's gone.
+
+C. /pay/success?mac= accepted any raw string and always looked up the
+most recent PAID order for it — anyone who knew a neighbor's MAC
+(they're broadcast on the LAN) could fetch their order number and
+from it the full /receipt (amount, plan, order/trade numbers), any
+time. The param now goes through NormalizeMAC, and the receipt link +
+expiry row only render for orders paid in the last 30 minutes (the
+page is only ever reached right after paying) or for the requester's
+own detected device.
+
+D. Walled-garden DNS answers pointing at loopback / RFC1918 /
+link-local / CGNAT / multicast / 240/4 space are rejected before
+entering the nftables bypass set. Previously a misconfigured or
+hostile upstream resolver answering 192.168.1.1 for a garden CDN
+domain let UNPAID devices reach the router itself (or other LAN
+hosts) ahead of the drop rule. Literal IP entries configured in
+`walled_garden.domains` still pass verbatim (explicit admin intent).
+
+Also: db.RedeemVoucher's mark-redeemed UPDATE now re-asserts
+`redeemed_at IS NULL AND revoked = 0` in its WHERE clause
+(compare-and-set), so a double-spend can't win even if the
+SetMaxOpenConns(1) serialization ever changes.
+
+Tests: XFF ignored by default / honored when trusted, redeem limiter
+survives header rotation, both SSE streams close within ticks of
+session revocation (real httptest.Server), fresh-vs-stale receipt
+gating + reflected-garbage mac, 16-goroutine single-winner redeem
+(race detector clean), non-public DNS answers filtered vs literal IP
+passthrough.
+
+### Admin API: backup scope escalation, grant ownership clobber, CSV formula injection
+
+Four admin-API security fixes:
+
+A. /api/admin/backup accepted READ-ONLY Bearer tokens. The raw SQLite
+file contains plaintext session tokens (which mint live admin/user
+cookies), password hashes, TOTP secrets, full unredeemed voucher
+codes, and SMS message bodies — exactly the material every JSON read
+endpoint deliberately strips. A leaked monitoring token was therefore
+a full-scope token in disguise. The route now goes through
+requireAPITokenPrivileged, which rejects readonly tokens with 403 on
+every method. Off-router backup automation must use a non-readonly
+token (which it should have anyway — it holds the whole DB).
+
+B. /api/admin/users/grant and /api/admin/users/grant-by-phone listed a
+user's MACs and then extended each one through the unconditional
+UpsertMAC path, which OVERWRITES macs.user_id. A device transferred
+to a different user between the list and the per-MAC write (user-side
+replace/claim flow) was silently re-extended AND reassigned back to
+the granted user. New db.ExtendMACOwned / MACSvc.ExtendOwned guard
+the update with WHERE user_id = ? in a single statement; a row whose
+ownership changed is skipped (logged, excluded from macs_extended),
+never stolen.
+
+C. CSV exports (/admin/export/{macs,orders,users,audit,sms-log,
+webhook-log}.csv + /admin/vouchers/export.csv) wrote user-influenced
+text raw. MAC labels are settable by END USERS via /user/macs/label;
+audit detail, SMS bodies, and gateway error strings carry external
+text too. A label like =HYPERLINK(...) or a DDE payload executes when
+the admin opens the export in Excel/LibreOffice. All text cells now
+pass through csvCell, which prefixes ' when the first non-space byte
+is one of = + - @ TAB CR. Timestamps/ids/normalized MACs are
+unaffected.
+
+D. /api/admin/orders/cancel-stale silently discarded JSON decode
+errors, so a malformed body ({"older_than_hours":"48"} — string, not
+int) fell back to the 24h default and canceled a MORE aggressive
+window than the caller asked for. Empty body still means the
+documented 24h default; malformed non-empty JSON is now a 400 with
+zero cancellations.
+
+Tests: readonly backup 403 (+ no DB bytes, no audit row, 401 without
+token), ExtendOwned skip/extend matrix + grant-by-phone end-to-end
+isolation, csvCell unit matrix + macs/audit/sms-log export round-trips
+through encoding/csv, cancel-stale malformed-JSON 400 with order
+untouched.
+
+### Auth hardening: TOTP one-time use, backup-code race, XFF rate-limit bypass, admin-2FA CSRF, reset enumeration
+
+Five distinct fixes across login / 2FA / forgot-password, each with
+regression tests:
+
+1. **TOTP codes are now one-time use** (RFC 6238 §5.2). A 6-digit code
+   used to stay valid for its whole ±1-step window (~90 s) — anyone
+   who saw the victim type it (shoulder-surf, phishing relay) could
+   immediately reuse it to open a second session, or to pass the
+   2FA-disable check. `totp.MatchingStep` reports the timestep a code
+   matched and the server keeps a per-secret high-water mark; a replay
+   is treated exactly like a wrong code. Applies to user login 2FA,
+   admin login 2FA, and user 2FA disable.
+
+2. **Backup-code double spend under concurrency.**
+   `MarkBackupCodeUsed` never reported whether the conditional UPDATE
+   actually landed, so two logins racing on the same code could both
+   read it as unused and both pass. It now returns a consumed flag and
+   `verifyAndConsumeBackupCode` requires it — exactly one racer wins.
+
+3. **X-Forwarded-For no longer defeats per-IP rate limits.**
+   `clientIP` trusted the FIRST XFF entry from anyone; a direct client
+   could stamp a fresh fake IP per request and walk through every
+   per-IP limiter (login, register, forgot-password issue/verify) and
+   forge the ip= recorded in audit rows. The header is now ignored
+   unless the request arrives from `security.trusted_proxies` (new
+   config, single IPs or CIDRs, default empty = never trust), and when
+   trusted we take the LAST entry — the one the proxy appended — never
+   client-supplied leading entries. Deployments behind nginx/Caddy
+   should list the proxy address to keep per-client keying.
+
+4. **/admin/login/2fa POST now CSRF-checked** like its user-side
+   counterpart (checked before the attempt counter, so a cross-site
+   form can't silently burn the 5-attempt budget and lock the admin
+   out of a pending login). Template carries the `_csrf` field.
+
+5. **Forgot-password verify no longer enumerates accounts.** Probing
+   `/user/forgot-password/verify` with a made-up code answered
+   验证码错误 for unregistered phones but 已过期 for registered ones —
+   a registration oracle that never sent an SMS. Both now answer
+   已过期, and neither path runs bcrypt so timing is uniform as well.
+   Related: `/user/login` now burns a dummy bcrypt comparison on
+   unknown phones so response timing doesn't reveal registration
+   either.
+
+### Admin UI correctness: logout CSRF, schedule/firewall leak, stale badges, filtered exports
 
 Correctness pass over the admin templates and the handlers that feed
 them.
@@ -293,7 +459,7 @@ renders the admin shell. New regression tests cover the schedule
 firewall eligibility, logout semantics, login error surfacing, the
 sighting recency pill, and export filenames/case-insensitivity.
 
-## v0.108 — Config strictness, packaging fixes, CI stops trusting itself
+### Config strictness, packaging fixes, CI stops trusting itself
 
 Platform pass over config validation, the Docker dev path, the .ipk
 packaging, and the CI checks that were quietly green while things were
@@ -429,98 +595,6 @@ mismatch (rejected + audited), finalize idempotency, unknown-amount
 acceptance, the Beijing-time timestamp, the event_type filter, and the
 new order_no shape.
 
-## v0.106 — Admin API: backup scope escalation, grant ownership clobber, CSV formula injection
-
-Four admin-API security fixes:
-
-A. /api/admin/backup accepted READ-ONLY Bearer tokens. The raw SQLite
-file contains plaintext session tokens (which mint live admin/user
-cookies), password hashes, TOTP secrets, full unredeemed voucher
-codes, and SMS message bodies — exactly the material every JSON read
-endpoint deliberately strips. A leaked monitoring token was therefore
-a full-scope token in disguise. The route now goes through
-requireAPITokenPrivileged, which rejects readonly tokens with 403 on
-every method. Off-router backup automation must use a non-readonly
-token (which it should have anyway — it holds the whole DB).
-
-B. /api/admin/users/grant and /api/admin/users/grant-by-phone listed a
-user's MACs and then extended each one through the unconditional
-UpsertMAC path, which OVERWRITES macs.user_id. A device transferred
-to a different user between the list and the per-MAC write (user-side
-replace/claim flow) was silently re-extended AND reassigned back to
-the granted user. New db.ExtendMACOwned / MACSvc.ExtendOwned guard
-the update with WHERE user_id = ? in a single statement; a row whose
-ownership changed is skipped (logged, excluded from macs_extended),
-never stolen.
-
-C. CSV exports (/admin/export/{macs,orders,users,audit,sms-log,
-webhook-log}.csv + /admin/vouchers/export.csv) wrote user-influenced
-text raw. MAC labels are settable by END USERS via /user/macs/label;
-audit detail, SMS bodies, and gateway error strings carry external
-text too. A label like =HYPERLINK(...) or a DDE payload executes when
-the admin opens the export in Excel/LibreOffice. All text cells now
-pass through csvCell, which prefixes ' when the first non-space byte
-is one of = + - @ TAB CR. Timestamps/ids/normalized MACs are
-unaffected.
-
-D. /api/admin/orders/cancel-stale silently discarded JSON decode
-errors, so a malformed body ({"older_than_hours":"48"} — string, not
-int) fell back to the 24h default and canceled a MORE aggressive
-window than the caller asked for. Empty body still means the
-documented 24h default; malformed non-empty JSON is now a 400 with
-zero cancellations.
-
-Tests: readonly backup 403 (+ no DB bytes, no audit row, 401 without
-token), ExtendOwned skip/extend matrix + grant-by-phone end-to-end
-isolation, csvCell unit matrix + macs/audit/sms-log export round-trips
-through encoding/csv, cancel-stale malformed-JSON 400 with order
-untouched.
-
-## v0.106 — Auth hardening: TOTP one-time use, backup-code race, XFF rate-limit bypass, admin-2FA CSRF, reset enumeration
-
-Five distinct fixes across login / 2FA / forgot-password, each with
-regression tests:
-
-1. **TOTP codes are now one-time use** (RFC 6238 §5.2). A 6-digit code
-   used to stay valid for its whole ±1-step window (~90 s) — anyone
-   who saw the victim type it (shoulder-surf, phishing relay) could
-   immediately reuse it to open a second session, or to pass the
-   2FA-disable check. `totp.MatchingStep` reports the timestep a code
-   matched and the server keeps a per-secret high-water mark; a replay
-   is treated exactly like a wrong code. Applies to user login 2FA,
-   admin login 2FA, and user 2FA disable.
-
-2. **Backup-code double spend under concurrency.**
-   `MarkBackupCodeUsed` never reported whether the conditional UPDATE
-   actually landed, so two logins racing on the same code could both
-   read it as unused and both pass. It now returns a consumed flag and
-   `verifyAndConsumeBackupCode` requires it — exactly one racer wins.
-
-3. **X-Forwarded-For no longer defeats per-IP rate limits.**
-   `clientIP` trusted the FIRST XFF entry from anyone; a direct client
-   could stamp a fresh fake IP per request and walk through every
-   per-IP limiter (login, register, forgot-password issue/verify) and
-   forge the ip= recorded in audit rows. The header is now ignored
-   unless the request arrives from `security.trusted_proxies` (new
-   config, single IPs or CIDRs, default empty = never trust), and when
-   trusted we take the LAST entry — the one the proxy appended — never
-   client-supplied leading entries. Deployments behind nginx/Caddy
-   should list the proxy address to keep per-client keying.
-
-4. **/admin/login/2fa POST now CSRF-checked** like its user-side
-   counterpart (checked before the attempt counter, so a cross-site
-   form can't silently burn the 5-attempt budget and lock the admin
-   out of a pending login). Template carries the `_csrf` field.
-
-5. **Forgot-password verify no longer enumerates accounts.** Probing
-   `/user/forgot-password/verify` with a made-up code answered
-   验证码错误 for unregistered phones but 已过期 for registered ones —
-   a registration oracle that never sent an SMS. Both now answer
-   已过期, and neither path runs bcrypt so timing is uniform as well.
-   Related: `/user/login` now burns a dummy bcrypt comparison on
-   unknown phones so response timing doesn't reveal registration
-   either.
-
 ## v0.105 — Password change / reset now kills other sessions + trusted devices
 
 Changing password from `/user/me` previously left every other
@@ -532,57 +606,6 @@ old password.
 
 The same trusted-device wipe now also runs on SMS forgot-password
 verify and on admin reset-password (admin already deleted sessions).
-
-## v0.105 — Security: X-Forwarded-For rate-limit bypass, SSE session leak, /pay/success order oracle, walled-garden LAN hole
-
-Four independent portal/user-surface fixes:
-
-A. clientIP() trusted X-Forwarded-For unconditionally. On the default
-deployment (binary listening directly on the router LAN, no reverse
-proxy) that header is client-controlled, so ONE spoofed header per
-request defeated every IP-keyed rate limiter: unlimited voucher-code
-guesses at /redeem (the only brute-force defense on 12-char codes),
-login floods, /api/pay/create order floods, forgot-password SMS
-pumping — and forged the IPs written into the audit log. XFF is now
-only honored behind the new opt-in `security.trust_proxy_headers`
-config (set it ONLY when a proxy you control overwrites the header).
-
-B. /admin/devices/stream and /admin/stats/stream checked the admin
-session only at connect time. A revoked session (panic button,
-revoke-all, logout elsewhere) or an expired one kept receiving live
-device data — MACs, IPs, DHCP hostnames, revenue counters —
-indefinitely, since heartbeats keep the connection open forever. Both
-streams now re-validate the session cookie on every tick/heartbeat
-and close when it's gone.
-
-C. /pay/success?mac= accepted any raw string and always looked up the
-most recent PAID order for it — anyone who knew a neighbor's MAC
-(they're broadcast on the LAN) could fetch their order number and
-from it the full /receipt (amount, plan, order/trade numbers), any
-time. The param now goes through NormalizeMAC, and the receipt link +
-expiry row only render for orders paid in the last 30 minutes (the
-page is only ever reached right after paying) or for the requester's
-own detected device.
-
-D. Walled-garden DNS answers pointing at loopback / RFC1918 /
-link-local / CGNAT / multicast / 240/4 space are rejected before
-entering the nftables bypass set. Previously a misconfigured or
-hostile upstream resolver answering 192.168.1.1 for a garden CDN
-domain let UNPAID devices reach the router itself (or other LAN
-hosts) ahead of the drop rule. Literal IP entries configured in
-`walled_garden.domains` still pass verbatim (explicit admin intent).
-
-Also: db.RedeemVoucher's mark-redeemed UPDATE now re-asserts
-`redeemed_at IS NULL AND revoked = 0` in its WHERE clause
-(compare-and-set), so a double-spend can't win even if the
-SetMaxOpenConns(1) serialization ever changes.
-
-Tests: XFF ignored by default / honored when trusted, redeem limiter
-survives header rotation, both SSE streams close within ticks of
-session revocation (real httptest.Server), fresh-vs-stale receipt
-gating + reflected-garbage mac, 16-goroutine single-winner redeem
-(race detector clean), non-public DNS answers filtered vs literal IP
-passthrough.
 
 ## v0.104 — OpenWrt: firewall-billing.sh was a parse error on nftables 1.0.x
 
