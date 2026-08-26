@@ -1,5 +1,40 @@
 # Changelog
 
+## v0.120 — 深挖轮 6：grant/voucher 天数无上限（时间溢出可致静默吊销）+ 用户数据导出泄漏管理员备注
+
+第六轮独立审计，聚焦 admin API / admin UI 的输入边界与用户可携
+导出的字段投影。修复两类真实缺陷。
+
+A. (MEDIUM, 数据完整性/静默吊销) `days` 上限校验只存在于
+`/api/admin/macs/grant`（1..3650）与套餐保存，其余全部
+grant/voucher 入口均无上界：`/api/admin/macs/import`、
+`/api/admin/users/grant`、`/api/admin/users/grant-by-phone`、
+`/api/admin/vouchers/generate`（days 与 expires_days）、admin UI
+的单个添加 / 单个延期 / 批量延期 / textarea 导入，以及
+`/admin/vouchers/generate` 和 vouchers CSV 导入。超大值（脚本
+化客户端可传到 9e18）流入 `AddDate(0,0,days)` 后溢出
+`time.Time` 内部表示，`expires_at` 可能回卷到过去——本意是
+「延期」的操作实际变成静默吊销（下一次到期扫描即断网）；较小
+但仍荒谬的值（如 100000 天）则造成事实上的永久放行，且单条
+grant API 明确拒绝的输入可以从批量导入绕过。修复：新增共享常
+量 `maxGrantDays = 3650`（10 年，与既有 grant API 一致），在上
+述全部入口按各自的错误风格拒绝——JSON API 返回 400，UI 重定向
+`err=invalid_days`，批量导入按行计入 failed 且不阻断合法行。
+回归测试覆盖全部 9 个入口（含「超限行失败、同批合法行仍导入」
+与「被拒后原 expiry 不变」断言）。
+
+B. (LOW-MEDIUM, 信息泄漏) `/user/account/export` 直接序列化
+`models.MAC` 整个结构体，把两个管理员专用字段带进了用户可下载
+的 JSON：`notes`（v0.82 起的自由文本客服备注——可能含欺诈嫌
+疑、工单号、涉及其他客户的上下文）与 `schedule_json`（管理员
+设置的限时策略内部表示）。这两个字段在用户门户任何页面都不展
+示，属于导出路径独有的越权可见。修复：导出改为显式字段投影
+（mac/label/status/expires_at/created_at/updated_at），行为其
+余不变。回归测试在用户 MAC 上写入敏感 notes 与 schedule 后断
+言导出不含其内容、且用户可见字段仍完整。
+
+`go test ./...` 全绿。
+
 ## v0.119 — 深挖轮 5：用户订单列表 / 会话列表残留静默截断 + 导出文件名
 
 v0.116 把绝大多数查询改到统一 `clampLimit`，但漏了两处仍用「超
