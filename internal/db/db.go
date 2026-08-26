@@ -2410,6 +2410,36 @@ type AuditFilter struct {
 	Limit  int
 }
 
+// ListAuditForUserPhone returns the newest audit entries whose actor is
+// exactly "user:<phone>" or "user-attempt:<phone>" — the two forms the user
+// portal writes. The user-facing activity feed (/user/me, every page load)
+// and the account export previously funneled through SearchAudit with a
+// substring filter, i.e. `actor LIKE '%:<phone>%'`: un-indexable, so SQLite
+// walked the whole audit_log backwards until it collected `limit` matches —
+// a full-table scan per page view for accounts with little history. The
+// exact IN (…) match is equivalent (no other actor form embeds ":<phone>")
+// and walks idx_audit_actor.
+func (d *DB) ListAuditForUserPhone(ctx context.Context, phone string, limit int) ([]AuditEntry, error) {
+	limit = clampLimit(limit, 10)
+	rows, err := d.conn.QueryContext(ctx,
+		`SELECT id, at, actor, action, target, detail FROM audit_log
+		 WHERE actor IN (?, ?) ORDER BY id DESC LIMIT ?`,
+		"user:"+phone, "user-attempt:"+phone, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []AuditEntry
+	for rows.Next() {
+		var e AuditEntry
+		if err := rows.Scan(&e.ID, &e.At, &e.Actor, &e.Action, &e.Target, &e.Detail); err != nil {
+			return nil, err
+		}
+		out = append(out, e)
+	}
+	return out, rows.Err()
+}
+
 func (d *DB) SearchAudit(ctx context.Context, f AuditFilter) ([]AuditEntry, error) {
 	f.Limit = clampLimit(f.Limit, 200)
 	var sb strings.Builder

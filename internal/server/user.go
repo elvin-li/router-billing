@@ -395,13 +395,10 @@ func (a *App) handleUserMe(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Last 10 audit entries for this account — login successes/failures,
-	// 2FA events, password resets, etc. Filter by actor pattern that matches
-	// both "user:<phone>" (real events) and "user-attempt:<phone>" (failed
-	// logins that never got a session).
-	activity, _ := a.DB.SearchAudit(r.Context(), db.AuditFilter{
-		Actor: ":" + user.Phone,
-		Limit: 10,
-	})
+	// 2FA events, password resets, etc. Matches both "user:<phone>" (real
+	// events) and "user-attempt:<phone>" (failed logins that never got a
+	// session) via an indexed exact-actor lookup.
+	activity, _ := a.DB.ListAuditForUserPhone(r.Context(), user.Phone, 10)
 	sessionCount, _ := a.DB.CountUserSessions(r.Context(), uid)
 
 	a.render(w, "user_me.html", a.userCtx(r, "me", map[string]any{
@@ -696,10 +693,7 @@ func (a *App) handleUserAccountExport(w http.ResponseWriter, r *http.Request) {
 	}
 	macs, _ := a.DB.ListMACsForUser(r.Context(), uid)
 	orders, _ := a.DB.ListOrdersForUser(r.Context(), uid, 500)
-	activity, _ := a.DB.SearchAudit(r.Context(), db.AuditFilter{
-		Actor: ":" + user.Phone,
-		Limit: 100,
-	})
+	activity, _ := a.DB.ListAuditForUserPhone(r.Context(), user.Phone, 100)
 
 	// Project MACs into the user-visible shape. models.MAC carries the
 	// admin-only `notes` field (free-text support context — may reference
