@@ -1,5 +1,33 @@
 # Changelog
 
+## v0.127 — 深挖轮 9：正确性验证轮（时区 / SQL date / TOCTOU / 2FA 重放 / 输入边界）
+
+第三轮独立审计，按清单逐面验证此前多轮加固的完整性；本轮未发
+现新的真实缺陷（不为改而改），复查结论如下（均确认无缺陷、不
+改动）：
+
+- 时间/时区：`ExpireDueMACs`/`ListActiveMACs` 的
+  `CURRENT_TIMESTAMP` 字符串比较在秒粒度一致（tx_time_index
+  回归测试在位）；schedule 跨午夜窗与 ISO 周日换算正确；
+  Alipay GMT+8 时间戳（v0.106）与 audit `date()` 过滤（写入端
+  为 SQLite CURRENT_TIMESTAMP 格式，可被 date() 解析）均正确。
+- TOCTOU/竞态：全部 `UpsertMAC` 写路径已收敛到 service 层锁下；
+  用户 2FA 登录、启用确认、关闭三条路径全部走
+  `totp.MatchingStep` + 步进一次性消费（重放按错码处理）；备用
+  码为条件 UPDATE 单次使用；trusted-device 走哈希查找 + 过期
+  校验；finalize/refund 共用 `pollMu` 且 `WithoutCancel`。
+- 输入边界：admin 全部 `Atoi` 入口（days/hours/count/
+  expires_days/price/sort_order/schedule 分钟）均有上下界；
+  CSRF 双提交 cookie + 常数时间比较 + 全局 1MiB body cap
+  （restore 单独放宽）；`SendSMSSensitive` 覆盖全部凭据类短信，
+  其余 5 个发送点均为运营内容。
+- 后台任务：notify 单 worker 的 AttemptTimeout 背压、re-enqueue
+  退避、panic 恢复、nil client 防御、有界 body drain 全部在位；
+  scheduler 双 pass（expire+resync）panic 隔离；备份/恢复固定
+  路径无穿越。
+- UTF-8/截断：全站字节截断残留扫描仅剩 ASCII token/码前缀切片
+  （安全）；自由文本一律 `truncateRunes`。
+
 ## v0.126 — 深挖轮 8：延期重试双倍加天、voucher batch 回显、支付网关无界读取
 
 第二轮独立审计（重点：admin UI/模板回显面、service 错误契约一
