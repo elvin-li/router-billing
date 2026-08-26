@@ -5,6 +5,13 @@ on:
     branches: [main, master]
   pull_request:
 
+# Least privilege: every job only reads the repo. Without this the jobs
+# inherit the repository default, which on older repos is a write-scoped
+# GITHUB_TOKEN — needlessly handed to third-party actions and to any
+# code that runs inside `go test`.
+permissions:
+  contents: read
+
 jobs:
   test:
     name: test
