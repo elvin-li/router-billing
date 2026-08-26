@@ -1,5 +1,58 @@
 # Changelog
 
+## v0.125 — 深挖轮 7：用户门户反射注入、换机甩日程、充值码模偏差、活动流全表扫描
+
+合并 v0.120–v0.124 移植批次后的第一轮独立全库审计（重点：用户
+门户、service/db 复合操作、随机数卫生、热路径查询）。修复四类
+真实缺陷。
+
+A. (MEDIUM, 反射内容注入·公开页) `userErrLabel` 的 default 分
+支把未识别的 `?err=` 码原样返回——与 v0.122 修掉的 admin
+errLabel / redeem 页完全同类，但用户门户（含未登录可访问的
+/user/login、/user/register 公开页）漏掉了：构造链接
+`/user/login?err=维修中请转账13800000000` 即可在受信任的红色
+flash 框里放任意钓鱼文案。修复：补上唯一缺映射的合法码
+`backup_codes_failed`（此前原样渲染成英文码），default 一律折
+叠为「操作失败，请重试」。回归测试断言注入文本不反射、合法码
+有人话文案。
+
+B. (MEDIUM, 策略绕过/规则泄漏) 用户自助换机 `/user/macs/replace`
+的 `ReplaceMAC` 新行不带 `schedule_json` 与 `notes`——管理员给
+设备设的限时策略（宵禁）随换机静默消失，而现代手机的随机 MAC
+让「换机」零成本，等于用户可自助解除管理员限制；管理员备注同
+样丢失。服务层三处配套缺陷一起修：换机后对新 MAC 无条件
+`FW.Add`（继承的日程窗关闭时也直接放行）；旧 MAC 的 `FW.Remove`
+失败只记日志（DB 行已删，设备继续在线直到下次 reconcile，与
+v0.123 修的吊销泄漏同类）；新 MAC `FW.Add` 失败向用户报
+「replace_failed」但换机实际已生效。修复：`ReplaceMAC` 原子迁
+移 schedule/notes；服务层换用 `grantFirewallAdd`（日程感知）+
+`removeWithResyncFallback` / resync 自愈。回归测试覆盖：日程与
+备注随换机迁移、窗口关闭时新 MAC 不上防火墙、FW 全挂时换机仍
+成功且 resync 后内核集合收敛到 DB 真值。
+
+C. (LOW, 密码学卫生) `voucher.New` 用 `byte % 31` 从 31 字符表
+选字——256 % 31 = 8，前 8 个字符概率 9/256、其余 8/256
+（+12.5% 系统性偏差）。充值码是等同现金的 bearer token，与
+v0.121 修 `randomPassword` 的理由一致（虽无实际可利用性，有效
+熵仍 ~59.5 bit）。改为拒绝采样，补 24 万样本均匀性回归测试
+（±8% 容差 ≈ 7σ）。
+
+D. (LOW-MEDIUM, 热路径性能) `/user/me` 每次页面加载与
+`/user/account/export` 用 `SearchAudit{Actor: ":"+phone}` 取活
+动流——生成 `actor LIKE '%:<phone>%'`，前缀通配无法走索引，
+SQLite 只能倒序全表扫 audit_log 直到凑满 LIMIT；历史少的账户
+一次页面加载就是一次全表扫描，audit_log 越大越慢。实际 actor
+只有 `user:<phone>` / `user-attempt:<phone>` 两种形态，改为精
+确 `IN (?, ?)` 查询 + 新增 `idx_audit_actor` 索引（schema.sql
+幂等建索引，老库自动补）。管理端的子串搜索语义不变。回归测试
+断言两种 actor 形态都命中、别人的行不泄入、newest-first 与
+LIMIT 生效。
+
+其余复查确认无缺陷（不改动）：sms Sender nil 防护、totp 常数
+时间比较与步进防重放、ipset build-aside-and-swap、refund 后台
+resync goroutine 有界、backup codes 32 字符表无偏差、
+randomToken hex 无偏差、pay provider 先校验后建单。
+
 ## v0.124 — 移植深挖轮（sms/notify/config）：短信日志泄漏活体凭据、Aliyun TemplateParam 误判、配置校验收尾
 
 针对 sms/notify/scheduler/config/totp/schedule 及 CI/compose 的
