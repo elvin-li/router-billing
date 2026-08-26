@@ -1,5 +1,67 @@
 # Changelog
 
+## v0.123 — 移植深挖轮（firewall/portal）：授权路径日程窗残留、吊销后规则泄漏、ARP exec 边界
+
+对防火墙（nft/ipset）、walled garden、arp/sightings、门户 captive
+流程、OpenWrt 部署脚本与 scheduler 日程执行做第五轮独立审计，修
+复四类真实缺陷。
+
+A. (MEDIUM, 日程执行残留) 全部授权/续费路径无条件 `FW.Add`，
+无视 MAC 上已配置的时段日程：`GrantFromOrder`、
+`GrantFromVoucher`、`Extend`、`ExtendOwned` 在日程窗口**关闭**
+时依然把设备放进内核集合——设备在禁用时段获得最多一分钟的网络
+访问（直到下一个 EnforceSchedules 分钟 tick 移除），且每次付
+款/续费/管理员延期都会重复泄漏。这正是 v0.108 在 Resync、
+v0.110 在 ApplyScheduleNow 修掉的同类问题，授权路径是最后的残
+留。新增 `grantFirewallAdd`：窗口开放才 Add，关闭则防御性
+Remove；损坏的 schedule_json 保持 fail-open（与
+EnforceSchedules/Resync 一致，绝不锁死付费客户）。顺带：
+`enforceSchedulesOnce` 的 DB 列表错误此前被静默吞掉（日程执行
+悄悄停摆无人知晓），现在记日志。回归测试覆盖四条授权路径的关
+窗/开窗/坏 JSON 三种形态。
+
+B. (MEDIUM, 吊销后规则泄漏) `Revoke`/`Delete` 在 DB 已提交后
+`FW.Remove` 一旦瞬时失败（nft netlink 超时、EINTR）只把错误抛
+给调用方，内核集合原样不动：DB 说已拉黑/已删除，设备却继续满
+速上网，最长一小时（等下一次周期 reconcile）。`ExpireDue` 同
+理——逐条 Remove 失败仅记 warn。现在三处全部套用授权路径既有
+的自愈模式：Remove 失败立即回退整表 `resyncLocked`（DB 是唯一
+事实源，重建后被吊销设备必然被冲出集合）；resync 成功则操作如
+实报成功，双双失败才把错误带回调用方。回归测试断言 Remove 失
+败时 resync 兜底恰好一次、集合内不残留被吊销/过期 MAC。
+
+C. (LOW, exec 边界加固 + IPv6 zone 修复) `arp.Lookup` 把原始
+字符串直接放进 `ip neigh show to` 的 argv：今天唯一调用方喂的
+是 socket 派生的 RemoteAddr（不可伪造），但该导出函数是本项目
+的 exec 边界，未来任何拿查询参数调它的代码都会把选项形状/多
+token 字符串送进 ip(8)。现在先 `net.ParseIP` 校验并规范化，非
+IP 字面量在 spawn 进程之前即拒绝；顺带剥离 IPv6 zone 后缀——
+链路本地客户端的 RemoteAddr 形如 `fe80::1%br-paid`，iproute2
+不认 %zone 语法，此前这类门户请求的 MAC 探测**必然失败**并刷
+日志。`ListOnInterface` 同样校验接口名（≤15 字节、无空白/斜
+杠、不以 '-' 开头）；lladdr 输出 token 经 `net.ParseMAC` 验证
+才返回。门户侧 `detectMAC` 的回环判断从字符串前缀
+（`127.` / `::1`，漏掉 `::ffff:127.0.0.1` 与 `::`/`0.0.0.0`）
+改为解析后的 `IsLoopback/IsUnspecified`，并提取成纯函数
+`arpLookupHost` 加表驱动测试。
+
+D. (LOW, 配置校验) `firewall.table`/`table_name`/`set_name` 原
+样内插进 `nft -f` 脚本与 `ipset restore` payload，含空白/大括
+号/换行的名字会改变脚本**结构**而不是干净地报错（配置文件属
+root，属纵深防御）；且 ipset 后端的 set 名超过 27 字符时，原子
+交换的草稿集 `<name>_swp` 超出内核 31 字符上限——每次 Sync 都
+以晦涩的 restore 错误失败。现在 `--check-config` 即拒绝：family
+白名单（ip/ip6/inet/bridge/arp/netdev）、名字限
+`[A-Za-z0-9_-]+`、ipset 后端 set 名 ≤27。
+
+其余复查确认无缺陷（不改动）：nft/ipset 原子 sync 与 5s 超时、
+walled garden 公网过滤/DNS 失败缓存/字面 IP、firewall-billing.sh
+的幂等 apply 与 fwd 遗留清理、uci-defaults 的 REJECT 迁移与
+WiFi 密钥 0600 落盘、init.d/postinst/prerm（含 PKG_UPGRADE 门
+控）、uninstall.sh include 倒序删除、Dockerfile 非 root +
+cap_drop、finalize/refund 互斥、CSRF 与 SameSite、开放重定向
+既有测试面。`go test ./...` 与 `go test -race ./...` 全绿。
+
 ## v0.122 — 移植深挖轮（admin UI/API）：管理端 UI/API/模板全面审计——只读 token 凭据泄露、公开端点信息泄露、flash 反射注入
 
 移植自独立审计分支（原编号 v0.119），聚焦 admin*.go / api_admin.go /
@@ -159,8 +221,7 @@ A. (LOW, 静默数据丢失脚枪) `ListOrdersForUser` 在 `limit > 500`
 
 B. (LOW, 防御) `/user/account/export` 的 `Content-Disposition`
 文件名现在走 `filenameSafe`（与 voucher CSV 同一套），避免未
-来放宽手机号校验时把引号写进响应头。
-## v0.118 — 深挖轮 4：MAC 计数全表扫描收尾
+来放宽手机号校验时把引号写进响应头。## v0.118 — 深挖轮 4：MAC 计数全表扫描收尾
 
 深挖轮 3 收尾：把 v0.111 引入的 `CountMACsByUser`（单条
 GROUP BY）推广到最后两个仍在全表 `ListMACs` 后逐行数数的调用
