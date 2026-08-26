@@ -1,5 +1,46 @@
 # Changelog
 
+## v0.126 — 深挖轮 8：延期重试双倍加天、voucher batch 回显、支付网关无界读取
+
+第二轮独立审计（重点：admin UI/模板回显面、service 错误契约一
+致性、外部 HTTP 响应边界、deploy/CI/compose 复查）。修复三类真
+实缺陷。
+
+A. (MEDIUM, 误导性失败→双倍授予) `Extend`/`ExtendOwned` 在 DB
+已提交后防火墙 `FW.Add` 瞬时失败（nft 超时、EINTR）会把错误原
+样上抛——admin UI 显示「操作失败」、API 返回 5xx，但天数实际
+已经加上了。`UpsertMAC` 的语义是在现有到期时间上累加，所以管理
+员/脚本的自然重试会把天数加两次。grant（v0.106）、revoke/delete
+（v0.123）、replace（v0.125）都已改为「DB 为真值 + resync 自
+愈」，这两个入口漏掉了。修复：与 grant 同契约——失败时记日志
+并立即 resync，操作报告它实际达成的成功。回归测试断言 FW 全挂
+时 Extend/ExtendOwned 仍成功、到期时间恰好 +30 天（不叠加）、
+内核集合经 resync 收敛。
+
+B. (LOW-MEDIUM, 反射内容注入) `/admin/vouchers` 与
+`/admin/vouchers/print` 把自由文本的 `?batch=` 原样渲染进受信
+任的界面 chrome——批量作废的绿色 flash（`已批量作废 batch
+<code>…</code>`）、列表区标题（`batch = …`）与打印页表头。
+v0.122 只清洗了数字型 flash 参数，漏了这个唯一的自由文本键：构
+造链接可在管理界面里放任意钓鱼文案。修复：只回显真实存在的
+batch 名（DB 精确匹配佐证；未知值渲染为空，其列表本来就是空
+的），过滤语义不变。回归测试断言注入文本不反射、真实 batch 名
+照常显示。
+
+C. (LOW, 资源边界) `pay/wechat.go`（precreate/query/证书拉取）
+与 `pay/alipay.go`（precreate/query）对 PSP 网关响应用无界
+`io.ReadAll`——上游异常或中间代理返回超大响应可直接把路由器
+内存打爆。v0.124 已给 Aliyun SMS 客户端加了 64KB LimitReader，
+支付客户端同纪律：统一 1 MiB 上限（多证书 payload 留足余量），
+5 处全部收口。
+
+其余复查确认无缺陷（不改动）：deploy 脚本（install/uninstall/
+firewall-billing/setup-secure-ssid/uci-defaults 权限与幂等）、
+Dockerfile 非 root + compose read-only rootfs + cap_drop、CI
+最小权限与 ipk 结构校验、静态 JS（devices-stream 全插值
+escape）、pay 长轮询 waiter map 的注销配对、flash 一次性 token
+清扫、rate limiter 硬上限。
+
 ## v0.125 — 深挖轮 7：用户门户反射注入、换机甩日程、充值码模偏差、活动流全表扫描
 
 合并 v0.120–v0.124 移植批次后的第一轮独立全库审计（重点：用户
