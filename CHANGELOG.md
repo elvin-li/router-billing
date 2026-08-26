@@ -1,5 +1,78 @@
 # Changelog
 
+## v0.119 — 深挖轮 5：管理端 UI/API/模板全面审计——只读 token 凭据泄露、公开端点信息泄露、flash 反射注入
+
+v0.118 之后的第五轮独立审计，聚焦 admin*.go / api_admin.go /
+SSE 流 / 模板的 XSS·CSRF·开放跳转·CSV 公式注入·token 分级·
+PII/凭据泄露残留。修复五类真实缺陷。
+
+A. (HIGH, 越权/凭据泄露) `/api/admin/sms/log` 向**只读** token
+返回完整短信正文。短信正文里有活凭据：
+`/admin/users/reset-password`（via_sms）把裸临时密码作为整条
+短信发出、`/user/forgot-password` 发送重置码——两者都经
+`SendSMS` 落入 sms_log。一枚泄露的监控级 token 由此升级为
+「收割任意用户临时密码/重置码」的全量 token，与 v0.114 把
+`/api/admin/backup` 锁到 privileged 的理由完全同类，却漏了这
+个 JSON 面。修复：新增 `requireAPITokenReadScoped` 中间件把
+token 的 readonly 位传进 handler；只读 token 仍可见全部行
+（监控用例只需要 sent_at/success/error_msg 判 FAIL 连击），但
+`message` 一律置空并在响应顶层加 `messages_redacted: true`；
+全量 token 行为不变。回归测试覆盖：只读拿不到临时密码正文、
+失败行元数据保留、全量 token 正文完整且无 redaction 标记。
+
+B. (MEDIUM, 信息泄露) 公开无鉴权的 `/health`（/healthz）在 DB
+故障时把驱动原始错误直接放进 503 响应体——SQLite 错误常内嵌
+DB 文件系统路径（"unable to open database file: /srv/…"）与驱
+动内部细节，等于向公网扫描者免费递侦察情报。修复：明细只进
+stderr 日志，响应体固定为 `{"status":"degraded","error":"db
+unreachable"}`。回归测试关闭 DB 后断言 503 且响应不含
+"database is closed"/"sqlite"/".db" 等内部字样。
+
+C. (MEDIUM, 反射内容注入) `errLabel` 的 default 分支把未识别
+的 `?err=` 码原样返回——该值经 `adminCtx` 注入**每个**管理页
+的红色 flash 框。html/template 会转义标签，但攻击者构造链接
+`/admin/orders?err=紧急！请致电138...解锁` 即可在受信任的管理
+界面里放任意钓鱼文案（管理登录页 v0.108 已刻意避免这一点，登
+录后的页面反而全部中招）。修复：补齐 13 个仍走 default 的合法
+码（bad_phone/sms_failed/trim_failed/optimize_failed/
+expire_failed/webhook_not_configured/cancel_stale_failed/
+missing_order/not_pending/empty_note/invalid/digest_no_phone/
+sms_disabled）的人话文案，default 一律折叠为固定的「操作失败，
+请重试」。端到端回归：带注入文本的 ?err= 不再出现在响应体。
+
+D. (MEDIUM, 反射内容注入·公开页) `/redeem` 公开页同类问题更重：
+(1) `?err=` 原文渲染，任何人可给用户发「维修中请转账」式链接；
+(2) `redeemErrLabel` 的 default 返回 `err.Error()`——DB 层意外
+错误（路径、SQL 片段）直接呈现给未登录访客；(3) 成功横幅的
+`days`/`expires_at` 未校验，可注入自由文本。修复：`?err=` 改
+白名单（只放行本服务器 redirect 实际会携带的固定文案集合，未
+知一律换成通用「充值失败，请稍后重试」）；`redeemErrLabel`
+default 换通用文案、原始错误改由 handler 记日志；`days` 过
+`digitsOnly`（≤4 位）、`expires_at` 过严格 YYYY-MM-DD 形状校
+验。回归测试覆盖注入文本不反射、合法文案/日期照常渲染。
+
+E. (LOW, 反射内容注入) 五个管理页把原始 query 参数整包塞进模板
+的 `Query0`，模板将 `reset_uid`/`count`/`added` 等当数字拼进
+绿色成功 flash（「用户 #{{reset_uid}} 的临时密码…」）——构造
+链接可在受信任横幅里插入任意文本。修复：新增
+`queryFlashParams`，对 13 个已知数字键（count/hours/sent/
+skipped/errored/reset_uid/expired/ms/added/failed/revoked/
+ok_n/fail_n）过 `digitsOnly`（≤12 位）后再入模板；users/
+orders/sms-log/maintenance/vouchers 五处统一替换。回归测试断
+言注入文本被剥离、纯数字照常显示。
+
+其余复查确认无缺陷（不改动）：全部 mutate 型 /api/admin 路由
+均挂 requireAPITokenWrite、backup 维持 privileged；SSE 两条流
+（stats/devices）每 tick 复核会话、心跳同样复核；
+/api/admin/sessions 不回传 token（哈希也不回传）、vouchers JSON
+只回 4 位前缀、users/macs/get 剥离 password_hash/totp_secret；
+CSV 导出（macs/users/orders/audit/sms-log/webhook-log/vouchers）
+的自由文本列全部过 csvCell、文件名全部为常量或 filenameSafe；
+Content-Disposition 无 CR/LF/引号注入面；metrics token 常数时
+间比较；safeNextPath 拦截 //host 与反斜杠变体；redirectBack 锁
+定 /admin/ 前缀；模板无 template.HTML/内联脚本（CSP script-src
+'self' 兼容性测试在位）。`go test ./... -race` 全绿。
+
 ## v0.118 — 深挖轮 4：MAC 计数全表扫描收尾
 
 深挖轮 3 收尾：把 v0.111 引入的 `CountMACsByUser`（单条
