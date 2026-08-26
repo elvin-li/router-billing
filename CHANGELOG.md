@@ -1,5 +1,31 @@
 # Changelog
 
+## v0.130 — 深挖轮 10（续 2）：只读 API token 的 write 路由 GET 豁免收紧
+
+(LOW, 纵深防御) `requireAPITokenWrite` 只在 `r.Method != GET` 时拒绝
+只读 token——今天全部 22 个 write 注册的 handler 都强制 POST（已逐一
+核对），所以该豁免对合法调用零影响；但它意味着未来任何一个 write
+handler 若响应信息型 GET（或图方便接受 GET），就会静默向监控级
+token 开放。收紧为：只读 token 在 write 路由上任何方法一律 403
+（scope 错误优先于 handler 内的 405 方法提示）。回归测试遍历 7 条
+代表性 write 路由 × GET/POST，断言只读 token 全部 403、全量 token
+行为不变。
+
+## v0.129 — 深挖轮 10（续）：SSE 设备流 N+1 查询、管理端备份快照权限
+
+A. (PERF, N+1) `/admin/devices/stream` 的 `buildDeviceList` 对
+sightings+ARP 合并出的每台设备各发一次 `GetMAC` 点查——每条已连接
+的管理员 SSE 流每 5 秒重放一遍。`GetMACsIn`（一次分块 IN 查询）
+正是为初始 HTML 渲染修这个 N+1 时加的（v0.107，admin.go），SSE
+路径漏掉了。修复：先收集全部候选 MAC，单次批量查询，再组装。
+行为不变（既有 SSE/设备页测试全部通过）。
+
+B. (LOW, 本地信息泄漏) `/admin/backup` 与 `/api/admin/backup` 的
+`VACUUM INTO` 下载快照按 umask 创建（常见 0644）——文件在下载期间
+带着密码哈希、TOTP 密钥、完整充值码躺在 DB 目录里对本地用户可读。
+夜间轮转器 v0.108 已经为同一问题 chmod 0600，下载路径漏掉了。
+修复：快照创建后立即 `chmod 0600`，与主 DB 和轮转快照一致。
+
 ## v0.128 — 深挖轮 10：客户端断开可撕裂 DB↔防火墙 复合变更（含换机双设备在线、延期重试双倍加天残余窗口）
 
 本轮合并 PR #20（v0.120–v0.127 移植线，干净合入无冲突），并对

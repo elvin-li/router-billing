@@ -49,7 +49,13 @@ func (a *App) requireAPITokenWrite(h func(w http.ResponseWriter, r *http.Request
 		if tok == nil {
 			return
 		}
-		if r.Method != http.MethodGet && tok.ReadOnly {
+		// Read-only tokens are rejected on EVERY method, not just
+		// non-GET: all 22 write-registered handlers are POST-only today,
+		// so the old `r.Method != http.MethodGet` carve-out changed
+		// nothing for legitimate callers — but it meant one future write
+		// handler answering an informational GET (or accepting GET as a
+		// convenience) would silently open to monitoring-grade tokens.
+		if tok.ReadOnly {
 			writeJSON(w, http.StatusForbidden, map[string]string{"error": "token is read-only"})
 			return
 		}
