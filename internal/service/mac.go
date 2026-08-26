@@ -135,7 +135,13 @@ func (s *MACService) GrantFromVoucher(ctx context.Context, mac, label string, da
 	return m, nil
 }
 
-// Extend is the admin-manual version of GrantFromOrder.
+// Extend is the admin-manual version of GrantFromOrder, with the same
+// error contract: an error means NOTHING durable happened. Pre-v0.126 a
+// transient FW.Add failure after the DB committed surfaced as an error —
+// but UpsertMAC accumulates days on top of the current expiry, so the
+// admin's (or API client's) natural retry granted the days TWICE. Now a
+// firewall-only failure self-heals via resync and the extend reports the
+// success it actually is.
 func (s *MACService) Extend(ctx context.Context, mac, label string, days int, userID *int64) (*models.MAC, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -144,7 +150,10 @@ func (s *MACService) Extend(ctx context.Context, mac, label string, days int, us
 		return nil, err
 	}
 	if err := s.grantFirewallAdd(ctx, m); err != nil {
-		return nil, err
+		log.Printf("warn: firewall add %s (extend): %v — attempting resync", m.Mac, err)
+		if rerr := s.resyncLocked(ctx); rerr != nil {
+			log.Printf("ERROR: firewall resync after failed add %s: %v (granted MAC offline until next resync)", m.Mac, rerr)
+		}
 	}
 	return m, nil
 }
@@ -161,8 +170,14 @@ func (s *MACService) ExtendOwned(ctx context.Context, mac, label string, days in
 	if err != nil || m == nil {
 		return nil, err
 	}
+	// Same self-heal contract as Extend: the DB committed, so a transient
+	// firewall failure must not surface as "extend failed" (a retry would
+	// stack the days a second time).
 	if err := s.grantFirewallAdd(ctx, m); err != nil {
-		return nil, err
+		log.Printf("warn: firewall add %s (extend-owned): %v — attempting resync", m.Mac, err)
+		if rerr := s.resyncLocked(ctx); rerr != nil {
+			log.Printf("ERROR: firewall resync after failed add %s: %v (granted MAC offline until next resync)", m.Mac, rerr)
+		}
 	}
 	return m, nil
 }
