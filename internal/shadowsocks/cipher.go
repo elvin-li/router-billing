@@ -28,7 +28,7 @@ package shadowsocks
 import (
 	"crypto/aes"
 	"crypto/cipher"
-	"crypto/md5"
+	"crypto/md5" //nolint:gosec // EVP_BytesToKey(MD5) is the fixed Shadowsocks master-key derivation; required for client interop, not a security hash choice
 	"fmt"
 	"strings"
 
@@ -131,7 +131,8 @@ func DeriveKey(password string, keyLen int) []byte {
 	key := make([]byte, 0, keyLen)
 	var prev []byte
 	for len(key) < keyLen {
-		h := md5.New()
+		h := md5.New() //nolint:gosec // see import comment: mandated by the SS spec
+
 		h.Write(prev)
 		h.Write([]byte(password))
 		prev = h.Sum(nil)

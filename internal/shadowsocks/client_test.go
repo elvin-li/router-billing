@@ -19,9 +19,6 @@ type ssClientConn struct {
 	reader *aeadReader
 	spec   *CipherSpec
 	key    []byte
-
-	writeSaltSent bool
-	readSaltRead  bool
 }
 
 func dialSS(serverAddr, method, password, targetHost string, targetPort int) (*ssClientConn, error) {

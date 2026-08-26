@@ -9,7 +9,7 @@ import (
 // shaNew is the HKDF hash constructor. Shadowsocks AEAD (SIP004) fixes this
 // to SHA-1 for subkey derivation — it's HMAC-SHA1 inside HKDF, not a bare
 // digest, and interoperability requires exactly this choice.
-func shaNew() hash.Hash { return sha1.New() }
+func shaNew() hash.Hash { return sha1.New() } //nolint:gosec // HKDF-SHA1 is mandated by the SS AEAD spec; used inside HMAC, not as a bare digest
 
 var (
 	// errBadLength is returned when a decrypted chunk length is zero or

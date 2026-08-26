@@ -71,8 +71,6 @@ func (aw *aeadWriter) Write(p []byte) (int, error) {
 }
 
 func (aw *aeadWriter) writeChunk(plain []byte) error {
-	overhead := aw.aead.Overhead()
-
 	// [encrypted length(2) + tag]
 	var lenBuf [2]byte
 	binary.BigEndian.PutUint16(lenBuf[:], uint16(len(plain)))
@@ -85,7 +83,6 @@ func (aw *aeadWriter) writeChunk(plain []byte) error {
 	increment(aw.nonce)
 
 	end := off + len(payCipher)
-	_ = overhead
 	_, err := aw.w.Write(aw.buf[:end])
 	return err
 }

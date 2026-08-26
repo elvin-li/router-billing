@@ -16,10 +16,6 @@ const (
 	atypIPv6   = 0x04
 )
 
-// maxAddrLen bounds a parsed address: 1 (atyp) + 1 (domain len) + 255
-// (domain) + 2 (port).
-const maxAddrLen = 1 + 1 + 255 + 2
-
 // targetAddr is a decoded CONNECT target plus its dial string.
 type targetAddr struct {
 	host string

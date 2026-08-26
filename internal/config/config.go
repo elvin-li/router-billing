@@ -556,11 +556,10 @@ func (s Shadowsocks) validate() error {
 	if strings.TrimSpace(s.Listen) == "" {
 		return fmt.Errorf("shadowsocks.enabled but listen is empty (set e.g. 192.168.5.1:8388)")
 	}
-	host, portStr, err := net.SplitHostPort(strings.TrimSpace(s.Listen))
+	_, portStr, err := net.SplitHostPort(strings.TrimSpace(s.Listen))
 	if err != nil {
 		return fmt.Errorf("shadowsocks.listen %q invalid: %w", s.Listen, err)
 	}
-	_ = host
 	port, err := strconv.Atoi(portStr)
 	if err != nil || port <= 0 || port > 65535 {
 		return fmt.Errorf("shadowsocks.listen %q: port must be 1..65535", s.Listen)

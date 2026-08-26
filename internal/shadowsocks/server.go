@@ -103,7 +103,7 @@ func (s *Server) logf(format string, args ...any) {
 }
 
 // ListenAndServe binds opts.-derived listen address and serves until ctx is
-// cancelled. It is a convenience wrapper over Serve.
+// canceled. It is a convenience wrapper over Serve.
 func (s *Server) ListenAndServe(ctx context.Context, listen string) error {
 	lc := net.ListenConfig{}
 	ln, err := lc.Listen(ctx, "tcp", listen)
@@ -113,13 +113,13 @@ func (s *Server) ListenAndServe(ctx context.Context, listen string) error {
 	return s.Serve(ctx, ln)
 }
 
-// Serve accepts connections on ln until ctx is cancelled, then closes ln and
+// Serve accepts connections on ln until ctx is canceled, then closes ln and
 // drains in-flight relays (up to shutdownDrain). Always returns nil on a
 // clean context-cancel shutdown.
 func (s *Server) Serve(ctx context.Context, ln net.Listener) error {
 	s.logf("shadowsocks: listening on %s (method=%s)", ln.Addr(), s.spec.Name)
 
-	// Close the listener when the context is cancelled so Accept unblocks.
+	// Close the listener when the context is canceled so Accept unblocks.
 	go func() {
 		<-ctx.Done()
 		_ = ln.Close()

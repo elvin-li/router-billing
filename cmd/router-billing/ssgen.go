@@ -1,14 +1,64 @@
 package main
 
 import (
+	"context"
 	"crypto/rand"
 	"encoding/base64"
 	"fmt"
+	"log"
 	"os"
 
 	"router-billing/internal/config"
+	"router-billing/internal/firewall"
 	"router-billing/internal/shadowsocks"
 )
+
+// startShadowsocks boots the optional built-in Shadowsocks proxy when
+// enabled in config, wiring it to the process context for graceful shutdown.
+// Returns the live metrics set (nil when disabled) so the HTTP server can
+// expose it on /metrics and the admin page.
+func startShadowsocks(ctx context.Context, cfg *config.Config, fw firewall.API) *shadowsocks.Metrics {
+	if !cfg.Shadowsocks.Enabled {
+		return nil
+	}
+	m := &shadowsocks.Metrics{}
+	cidrs, err := cfg.Shadowsocks.ParsedCIDRs()
+	if err != nil {
+		log.Fatalf("shadowsocks allowed_cidrs: %v", err)
+	}
+	ssrv, err := shadowsocks.NewServer(shadowsocks.Options{
+		Method:       cfg.Shadowsocks.Method,
+		Password:     cfg.Shadowsocks.Password,
+		AllowedCIDRs: cidrs,
+		MaxConns:     cfg.Shadowsocks.MaxConns,
+		Timeout:      cfg.Shadowsocks.Timeout,
+		ReplayWindow: cfg.Shadowsocks.ReplayWindow,
+		Metrics:      m,
+		Logf:         log.Printf,
+	})
+	if err != nil {
+		log.Fatalf("shadowsocks init: %v", err)
+	}
+	// Best-effort firewall opening (nftables backend only).
+	if cfg.Shadowsocks.OpenFirewall {
+		if nftMgr, ok := fw.(*firewall.Manager); ok {
+			if err := nftMgr.EnsureInputAccept(ctx, "ss_in", cfg.Shadowsocks.FirewallIface,
+				cfg.Shadowsocks.ListenPort()); err != nil {
+				log.Printf("shadowsocks: open firewall port: %v (continuing)", err)
+			}
+		} else {
+			log.Printf("shadowsocks: open_firewall set but backend is not nftables — add the rule manually")
+		}
+	}
+	listen := cfg.Shadowsocks.Listen
+	go func() {
+		if err := ssrv.ListenAndServe(ctx, listen); err != nil {
+			log.Printf("shadowsocks: %v", err)
+		}
+	}()
+	log.Printf("shadowsocks: enabled on %s (method=%s)", listen, cfg.Shadowsocks.Method)
+	return m
+}
 
 // runGenSSPassword prints a fresh, strong Shadowsocks password. The value is
 // 32 random bytes base64-encoded (~43 chars) — far beyond brute-force reach.

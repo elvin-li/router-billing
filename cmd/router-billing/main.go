@@ -22,7 +22,6 @@ import (
 	"router-billing/internal/scheduler"
 	"router-billing/internal/server"
 	"router-billing/internal/service"
-	"router-billing/internal/shadowsocks"
 	"router-billing/internal/sightings"
 	"router-billing/internal/walledgarden"
 )
@@ -174,46 +173,7 @@ func main() {
 	// Optional built-in Shadowsocks AEAD proxy. OFF unless explicitly
 	// enabled in config. Shares the process context so SIGINT/SIGTERM
 	// drains it cleanly alongside the HTTP server.
-	var ssMetrics *shadowsocks.Metrics
-	if cfg.Shadowsocks.Enabled {
-		m := &shadowsocks.Metrics{}
-		ssMetrics = m
-		cidrs, cErr := cfg.Shadowsocks.ParsedCIDRs()
-		if cErr != nil {
-			log.Fatalf("shadowsocks allowed_cidrs: %v", cErr)
-		}
-		ssrv, sErr := shadowsocks.NewServer(shadowsocks.Options{
-			Method:       cfg.Shadowsocks.Method,
-			Password:     cfg.Shadowsocks.Password,
-			AllowedCIDRs: cidrs,
-			MaxConns:     cfg.Shadowsocks.MaxConns,
-			Timeout:      cfg.Shadowsocks.Timeout,
-			ReplayWindow: cfg.Shadowsocks.ReplayWindow,
-			Metrics:      m,
-			Logf:         log.Printf,
-		})
-		if sErr != nil {
-			log.Fatalf("shadowsocks init: %v", sErr)
-		}
-		// Best-effort firewall opening (nftables backend only).
-		if cfg.Shadowsocks.OpenFirewall {
-			if nftMgr, ok := fw.(*firewall.Manager); ok {
-				if err := nftMgr.EnsureInputAccept(ctx, "ss_in", cfg.Shadowsocks.FirewallIface,
-					cfg.Shadowsocks.ListenPort()); err != nil {
-					log.Printf("shadowsocks: open firewall port: %v (continuing)", err)
-				}
-			} else {
-				log.Printf("shadowsocks: open_firewall set but backend is not nftables — add the rule manually")
-			}
-		}
-		listen := cfg.Shadowsocks.Listen
-		go func() {
-			if err := ssrv.ListenAndServe(ctx, listen); err != nil {
-				log.Printf("shadowsocks: %v", err)
-			}
-		}()
-		log.Printf("shadowsocks: enabled on %s (method=%s)", listen, cfg.Shadowsocks.Method)
-	}
+	ssMetrics := startShadowsocks(ctx, cfg, fw)
 
 	app, err := server.NewApp(cfg, dbx, svc)
 	if err != nil {
