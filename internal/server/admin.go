@@ -316,9 +316,84 @@ func errLabel(code string) string {
 		return "MAC 格式不正确"
 	case "db":
 		return "数据库错误，请重试"
+	// v0.119: the remaining codes that still fell through to the raw
+	// string.
+	case "bad_phone":
+		return "手机号格式不正确"
+	case "sms_disabled", "sms_unavailable":
+		return "短信服务未配置或不可用"
+	case "sms_failed":
+		return "短信发送失败，请查看短信日志"
+	case "trim_failed":
+		return "日志清理失败，请查看服务日志"
+	case "optimize_failed":
+		return "PRAGMA optimize 执行失败，请查看服务日志"
+	case "expire_failed":
+		return "到期扫描失败，请查看服务日志"
+	case "webhook_not_configured":
+		return "Webhook 未配置，请先在 config 中填写 webhook.url"
+	case "cancel_stale_failed":
+		return "批量取消失败，请查看服务日志"
+	case "missing_order":
+		return "缺少订单号"
+	case "not_pending":
+		return "订单不在 pending 状态，无法取消"
+	case "empty_note":
+		return "备注内容不能为空"
+	case "invalid":
+		return "参数无效，请重试"
+	case "digest_no_phone":
+		return "未配置日报接收手机号（sms.admin_digest_phone）"
 	default:
-		return code
+		// SECURITY: never echo an unrecognized code. ?err= is plain query
+		// input, so `/admin/orders?err=<any text>` used to render
+		// attacker-chosen content inside the trusted red flash box on
+		// every admin page (html/template escapes markup, but verbatim
+		// text in trusted UI chrome is a phishing aid all by itself).
+		return "操作失败，请重试"
 	}
+}
+
+// digitsOnly strips everything but ASCII digits and caps the result at
+// max characters. Used to launder query params that templates render as
+// numbers inside flash messages.
+func digitsOnly(s string, max int) string {
+	var b strings.Builder
+	for _, r := range s {
+		if b.Len() >= max {
+			break
+		}
+		if r >= '0' && r <= '9' {
+			b.WriteRune(r)
+		}
+	}
+	return b.String()
+}
+
+// numericFlashKeys are the query params that admin templates interpolate
+// into flash sentences as counts / ids ("用户 #{{reset_uid}}", "已批量取消
+// {{count}} 条…"). They arrive via redirect query strings — i.e. plain
+// client input — so a crafted link could otherwise plant arbitrary text
+// inside a trusted green flash banner.
+var numericFlashKeys = []string{
+	"count", "hours", "sent", "skipped", "errored", "reset_uid",
+	"expired", "ms", "added", "failed", "revoked", "ok_n", "fail_n",
+}
+
+// queryFlashParams copies the request's query params for template flash
+// blocks (the Query0 map), forcing known-numeric keys down to digits so
+// they can only ever render as numbers.
+func queryFlashParams(r *http.Request) map[string]string {
+	out := map[string]string{}
+	for k := range r.URL.Query() {
+		out[k] = r.URL.Query().Get(k)
+	}
+	for _, k := range numericFlashKeys {
+		if v, ok := out[k]; ok {
+			out[k] = digitsOnly(v, 12)
+		}
+	}
+	return out
 }
 
 func (a *App) handleAdminMACs(w http.ResponseWriter, r *http.Request) {
@@ -620,12 +695,9 @@ func (a *App) handleAdminUsers(w http.ResponseWriter, r *http.Request) {
 	if macCount == nil {
 		macCount = map[int64]int{}
 	}
-	// Allow the template to read raw query params (e.g. flash data from
-	// reset-password redirects). Keeps the data shape simple.
-	rawQuery := map[string]string{}
-	for k := range r.URL.Query() {
-		rawQuery[k] = r.URL.Query().Get(k)
-	}
+	// Allow the template to read query params (e.g. flash data from
+	// reset-password redirects), with numeric flash keys laundered.
+	rawQuery := queryFlashParams(r)
 	a.render(w, "admin_users.html", a.adminCtx(r, "users", map[string]any{
 		"Users":    users,
 		"MacCount": macCount,
@@ -1016,10 +1088,7 @@ func (a *App) handleAdminOrders(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "db", http.StatusInternalServerError)
 		return
 	}
-	rawQuery := map[string]string{}
-	for k := range r.URL.Query() {
-		rawQuery[k] = r.URL.Query().Get(k)
-	}
+	rawQuery := queryFlashParams(r)
 	a.render(w, "admin_orders.html", a.adminCtx(r, "orders", map[string]any{
 		"Orders": orders,
 		"Query":  q,
