@@ -492,9 +492,14 @@ func (d *DB) ReplaceMAC(ctx context.Context, userID int64, oldMac, newMac, label
 		return nil, err
 	}
 	now := time.Now().UTC()
+	// Carry the admin-managed columns over to the new row. schedule_json
+	// especially: dropping it meant a user could shed an admin-imposed
+	// time-of-day restriction just by "replacing" the device with a fresh
+	// randomized MAC (self-service /user/macs/replace) — the paid time
+	// transferred but the curfew silently vanished.
 	if _, err := tx.ExecContext(ctx,
-		`INSERT INTO macs (mac, label, status, expires_at, user_id, created_at, updated_at) VALUES (?, ?, 'active', ?, ?, ?, ?)`,
-		newMac, label, newExpiry, userID, now, now); err != nil {
+		`INSERT INTO macs (mac, label, status, expires_at, user_id, schedule_json, notes, created_at, updated_at) VALUES (?, ?, 'active', ?, ?, ?, ?, ?, ?)`,
+		newMac, label, newExpiry, userID, old.ScheduleJSON, old.Notes, now, now); err != nil {
 		return nil, err
 	}
 	if err := tx.Commit(); err != nil {

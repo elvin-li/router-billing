@@ -219,11 +219,22 @@ func (s *MACService) Replace(ctx context.Context, userID int64, oldMac, newMac, 
 	if err != nil {
 		return nil, err
 	}
-	if err := s.FW.Remove(ctx, oldMac); err != nil {
-		log.Printf("warn: firewall remove %s during replace: %v", oldMac, err)
+	// The old row is already gone from the DB — a failed Remove would leave
+	// the retired MAC online until the next reconcile, the same rule leak
+	// removeWithResyncFallback closes for Revoke/Delete.
+	if err := s.removeWithResyncFallback(ctx, oldMac, "replace"); err != nil {
+		log.Printf("warn: %v", err)
 	}
-	if err := s.FW.Add(ctx, newMac); err != nil {
-		return nil, fmt.Errorf("firewall add %s: %w", newMac, err)
+	// Schedule-aware add + resync self-heal, same as every grant path: the
+	// DB has already committed, so a transient FW.Add failure must not
+	// surface as "replace failed" (it didn't — the time transferred), and
+	// a MAC whose inherited schedule window is closed must not come online
+	// until the window opens.
+	if err := s.grantFirewallAdd(ctx, m); err != nil {
+		log.Printf("warn: firewall add %s (replace): %v — attempting resync", m.Mac, err)
+		if rerr := s.resyncLocked(ctx); rerr != nil {
+			log.Printf("ERROR: firewall resync after failed replace add %s: %v (device offline until next resync)", m.Mac, rerr)
+		}
 	}
 	return m, nil
 }
