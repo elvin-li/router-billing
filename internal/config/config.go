@@ -667,6 +667,24 @@ func (c *Config) validateSecurity() error {
 	if s.AutoCancelStaleOrderHours < 0 || s.AutoCancelStaleOrderHours > 720 {
 		return fmt.Errorf("security.auto_cancel_stale_order_hours %d: must be 0 (disabled) or 1..720", s.AutoCancelStaleOrderHours)
 	}
+	// A malformed trusted_proxies entry used to be skipped at runtime with
+	// only a log line — the operator believed the reverse proxy was trusted
+	// while X-Forwarded-For stayed ignored, so every client shared the
+	// proxy's per-IP rate-limit bucket and audit rows recorded the proxy
+	// address. Fail --check-config like every other config typo does.
+	for _, e := range s.TrustedProxies {
+		e = strings.TrimSpace(e)
+		if e == "" {
+			return fmt.Errorf("security.trusted_proxies: empty entry")
+		}
+		if strings.Contains(e, "/") {
+			if _, _, err := net.ParseCIDR(e); err != nil {
+				return fmt.Errorf("security.trusted_proxies %q: not a valid CIDR (%v)", e, err)
+			}
+		} else if net.ParseIP(e) == nil {
+			return fmt.Errorf("security.trusted_proxies %q: not a valid IP address or CIDR", e)
+		}
+	}
 	return nil
 }
 

@@ -289,6 +289,15 @@ func TestLoadRejections(t *testing.T) {
 		{"webhook without secret",
 			validBase + "webhook:\n  url: \"https://hook.example/rb\"\n",
 			"webhook.secret is empty"},
+		{"trusted proxy garbage",
+			validBase + "security:\n  trusted_proxies: [\"not-a-net\"]\n",
+			"trusted_proxies"},
+		{"trusted proxy bad cidr",
+			validBase + "security:\n  trusted_proxies: [\"10.0.0.0/33\"]\n",
+			"not a valid CIDR"},
+		{"trusted proxy empty entry",
+			validBase + "security:\n  trusted_proxies: [\"\"]\n",
+			"empty entry"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -323,6 +332,7 @@ func TestLoadAcceptsHardenedConfig(t *testing.T) {
 		"  user_session_days: 90\n" +
 		"  audit_log_keep: 50000\n" +
 		"  auto_cancel_stale_order_hours: 48\n" +
+		"  trusted_proxies: [\"127.0.0.1\", \"10.0.0.0/8\", \"::1\", \"fd00::/8\"]\n" +
 		"sms:\n" +
 		"  provider: console\n" +
 		"  admin_login_alert_phone: \"13800138000\"\n" +

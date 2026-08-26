@@ -1,5 +1,27 @@
 # Changelog
 
+## v0.131 — 深挖轮 10（收尾）：trusted_proxies 配置错误静默失效
+
+(LOW, 配置校验缺口) `security.trusted_proxies` 是唯一一个坏值不让
+`--check-config` 失败的安全配置项：`parseTrustedProxies` 在运行时把
+无法解析的条目打一行日志后跳过。运维如果把 CIDR 打错
+（如 `10.0.0.0/33`）或粘了主机名，会以为反向代理已受信——实际
+X-Forwarded-For 被完全忽略，所有经代理的客户端共享代理 IP 的同一个
+限流桶（登录/注册/找回密码限流对真实攻击者失去按客户端隔离的意义，
+同时正常用户互相挤兑），审计日志也全部记成代理地址。其他所有配置
+错别字（SMS 手机号、防火墙表名、时长下限等）都在载入时报错，这里
+不该例外。修复：`validateSecurity` 逐条校验（空条目、非法 IP、
+非法 CIDR 都拒绝），回归测试覆盖三类坏值 + 合法 IPv4/IPv6/CIDR
+混合列表。运行时的跳过逻辑保留作纵深防御。
+
+本轮同时复查了 admin_extra.go（health/audit/批量导入/6 个 CSV 导出，
+csvCell 中和与 maxGrantDays 上限均在位）、`RedeemVoucher`/
+`UnredeemVoucher`（事务 + CAS 双保险、补偿仅限本次兑换）、
+voucher_print.go（过期码过滤 v0.121、QR no-store、batch 反射防护
+均在位）、admin_digest.go（时钟跳变去重、审计 WithoutCancel 在位）、
+Makefile/ci.yml/Dockerfile（版本戳、ipk 结构校验、非 root 容器、
+最小权限 token 均在位）——未发现新缺陷。
+
 ## v0.130 — 深挖轮 10（续 2）：只读 API token 的 write 路由 GET 豁免收紧
 
 (LOW, 纵深防御) `requireAPITokenWrite` 只在 `r.Method != GET` 时拒绝
