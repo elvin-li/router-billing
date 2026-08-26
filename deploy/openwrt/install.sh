@@ -45,6 +45,8 @@ install -m 0755 "${PKG_DIR}/openwrt/usr/share/router-billing/firewall-billing.sh
                 /usr/share/router-billing/firewall-billing.sh
 install -m 0755 "${PKG_DIR}/openwrt/usr/share/router-billing/setup-secure-ssid.sh" \
                 /usr/share/router-billing/setup-secure-ssid.sh
+install -m 0755 "${PKG_DIR}/openwrt/usr/share/router-billing/firewall-shadowsocks.sh" \
+                /usr/share/router-billing/firewall-shadowsocks.sh
 
 UCI_DEFAULT=/etc/uci-defaults/99-router-billing-ssid
 WIFI_KEYS=/etc/router-billing/wifi-keys.txt

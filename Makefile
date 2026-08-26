@@ -64,6 +64,7 @@ ipk: arm64
 	install -m 0755 deploy/openwrt/etc/uci-defaults/99-router-billing-ssid $(BUILD_DIR)/ipk/data/etc/uci-defaults/99-router-billing-ssid
 	install -m 0755 deploy/openwrt/usr/share/router-billing/firewall-billing.sh $(BUILD_DIR)/ipk/data/usr/share/router-billing/firewall-billing.sh
 	install -m 0755 deploy/openwrt/usr/share/router-billing/setup-secure-ssid.sh $(BUILD_DIR)/ipk/data/usr/share/router-billing/setup-secure-ssid.sh
+	install -m 0755 deploy/openwrt/usr/share/router-billing/firewall-shadowsocks.sh $(BUILD_DIR)/ipk/data/usr/share/router-billing/firewall-shadowsocks.sh
 	# control tree
 	install -d $(BUILD_DIR)/ipk/control
 	install -m 0644 deploy/openwrt/ipk/control $(BUILD_DIR)/ipk/control/control

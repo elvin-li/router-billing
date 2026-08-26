@@ -113,11 +113,37 @@ the password can passively decrypt).
 - Every state-changing admin action (login, login_failed, login_suspended,
   grant, revoke, user_suspend, user_unsuspend, user_reset_password,
   user_delete, bulk_*, restore_staged, backup, voucher_batch, voucher_revoke,
-  schedule_set, schedule_clear, plan_save, plan_delete) writes a row to
-  `audit_log` with timestamp + actor + action + target + detail
-  (now including client IP for grant/revoke/login).
+  schedule_set, schedule_clear, plan_save, plan_delete, shadowsocks_uri_view)
+  writes a row to `audit_log` with timestamp + actor + action + target +
+  detail (now including client IP for grant/revoke/login).
 - Browsable + filterable at `/admin/audit`.
 - Purged after 10000 rows.
+
+### Shadowsocks proxy (optional, OFF by default)
+- The built-in Shadowsocks AEAD proxy (`internal/shadowsocks`) is disabled
+  unless an explicit `shadowsocks: {enabled: true, ...}` block is present.
+  `config.Load` refuses to start an enabled proxy with an empty password or
+  an invalid listen address (`--check-config` catches it in CI/pre-deploy).
+- **Authentication is the password** — key derived via the reference
+  EVP_BytesToKey(MD5) + per-connection HKDF-SHA1 subkey. `--gen-ss-password`
+  produces a 256-bit random secret; rotating = replace it and restart, which
+  invalidates every previously shared `ss://` link.
+- **Bind LAN-only.** The recommended (and documented everywhere) listen is
+  the LAN gateway IP. Binding on the paid SSID interface would let unpaid
+  clients tunnel out and bypass the captive portal, so the guidance is
+  explicit in the config comments, README, and admin page. `allowed_cidrs`
+  gives an in-process source-IP allowlist as defense in depth.
+- **Salt replay rejection.** Reused connection salts are dropped within a
+  time window (default 60s) — AEAD salt/nonce reuse is catastrophic, and a
+  legitimate client never repeats one. Counted in `/metrics`.
+- **Secret hygiene.** The password never appears in logs (the HTTP logger
+  records only the request path), audit details, or page HTML. The admin
+  `ss://` link is masked and only revealed on explicit click, which writes a
+  `shadowsocks_uri_view` audit row; the QR is generated server-side so the
+  secret is never carried in a query string.
+- Only AEAD ciphers are offered (`chacha20-ietf-poly1305`, `aes-256-gcm`,
+  `aes-128-gcm`) — the deprecated/broken stream ciphers (RC4, AES-CFB, …)
+  are intentionally not implemented.
 
 ---
 
@@ -197,6 +223,16 @@ to the detail column.
 - **No anti-replay for /redeem from the same IP within the rate-limit
   budget.** The 31^12 code space is large enough that 10 guesses /
   10 minutes effectively makes brute force a multi-billion-year exercise.
+- **Shadowsocks proxy is TCP-only.** No UDP associate — DNS-over-UDP and
+  QUIC won't traverse the tunnel; clients fall back to TCP. This is a
+  deliberate scope choice to avoid disturbing the OpenWrt forward path.
+- **Shadowsocks WAN exposure is the operator's call.** We default to and
+  document LAN-only binding. If you expose the port publicly, a leaked
+  password grants an open proxy — use a long `--gen-ss-password` value,
+  `allowed_cidrs`, and a firewall source restriction.
+- **Shadowsocks-2022 (blake3) is not implemented.** We ship the widely
+  compatible classic AEAD (SIP004) format instead; adding 2022 would need a
+  blake3 dependency and a different handshake for narrower client benefit.
 
 ---
 
@@ -208,6 +244,7 @@ We pin the following — all reputable, all reviewed:
 |---|---|---|
 | `github.com/google/uuid` | order-no generation | BSD-3 |
 | `golang.org/x/crypto/bcrypt` | password hashes | BSD-3 |
+| `golang.org/x/crypto/{chacha20poly1305,hkdf,chacha20}` | Shadowsocks AEAD proxy (same module as bcrypt — no new dependency) | BSD-3 |
 | `gopkg.in/yaml.v3` | config loading | MIT |
 | `modernc.org/sqlite` | pure-Go SQLite (no CGO) | BSD-3 |
 | `rsc.io/qr` | pure-Go QR codes | BSD-3 |

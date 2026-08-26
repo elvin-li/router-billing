@@ -168,6 +168,63 @@ PAID_SECURE_KEY=12345678 PAID_SECURE_SSID=MyShop_Pro \
   sh /usr/share/router-billing/setup-secure-ssid.sh
 ```
 
+## 内置 Shadowsocks 加密代理（可选，默认关闭）
+
+同一个 OpenWrt 二进制可以顺带充当**本地 Shadowsocks AEAD 代理**：给需要出站
+加密代理的设备一个 `ss://` 链接 / 二维码，扫码即可配置。这是产品自带的功能，
+不需要额外安装第三方程序；实现的是通用的 Shadowsocks AEAD（SIP004）协议，与
+Shadowsocks-rust、Outline、Clash、iOS/Android 官方客户端互通。
+
+它与 MAC 计费 / 强制门户**完全独立**：代理靠密码鉴权，绑定在 LAN 接口上，
+不会给未付费设备放行免费上网。
+
+**默认关闭**，需在 `config.yaml` 显式开启：
+
+```yaml
+shadowsocks:
+  enabled: true
+  listen: "192.168.5.1:8388"        # 仅监听 LAN 网关地址！
+  method: "chacha20-ietf-poly1305"   # 或 aes-256-gcm / aes-128-gcm
+  password: "<--gen-ss-password 生成>"
+  # 可选：advertise_host / tag / allowed_cidrs / max_conns / timeout /
+  #      replay_window / open_firewall / firewall_iface
+```
+
+命令行辅助：
+
+```sh
+router-billing --gen-ss-password      # 生成 256-bit 强密码 + 配置片段
+router-billing --ss-uri               # 打印 ss:// 分享链接 + ASCII 二维码
+router-billing --check-config -config /etc/router-billing/config.yaml
+```
+
+管理后台里也有「加密代理」页面：显示状态 / 连接信息 / 运行指标，点击「显示分享链接」
+后按需一次性展示 `ss://` 链接与二维码（该动作会记入审计日志，密码不会出现在
+任何 URL 或日志中）。
+
+支持的加密方式：
+
+| method | key | 说明 |
+|---|---|---|
+| `chacha20-ietf-poly1305` | 32B | 默认，移动端软件实现快，兼容性最好 |
+| `aes-256-gcm` | 32B | 有 AES 硬件加速的设备更快 |
+| `aes-128-gcm` | 16B | 同上，密钥更短 |
+
+**只支持 TCP**（标准 Shadowsocks SOCKS5 CONNECT）；不做 UDP associate，
+以免干扰 OpenWrt 的转发链路。内置连接 salt 重放拒绝（默认 60s 窗口）。
+
+**安全提示**：
+
+- `listen` 只绑 LAN 网关地址（如 br-lan 的 `192.168.5.1`），**切勿**绑定付费
+  SSID 接口 —— 否则未付费用户可绕过门户免费上网。
+- 暴露到公网 (WAN) 有风险；如确需远程，用强密码 + `allowed_cidrs`，并在防火墙
+  限制来源。默认建议：**仅 LAN**。
+- 轮换密码：`--gen-ss-password` 生成新值 → 改配置 → 重启，旧链接立即失效。
+- 端口放行：可设 `open_firewall: true` + `firewall_iface: br-lan` 让本进程用
+  nftables 自动放行，或手动运行
+  `SS_IFACE=br-lan SS_PORT=8388 /usr/share/router-billing/firewall-shadowsocks.sh apply`，
+  或在 `/etc/config/firewall` 里自己加规则。
+
 ## 项目结构
 
 ```
@@ -184,6 +241,7 @@ router-billing/
 │   ├── scheduler/             过期清理
 │   ├── server/                HTTP 路由 (portal/admin/user/pay)
 │   ├── service/               MAC + 防火墙 联合事务
+│   ├── shadowsocks/           内置 Shadowsocks AEAD 代理（可选）
 │   └── sightings/             后台 ARP 历史采集
 ├── web/                       模板 + 静态资源
 └── deploy/openwrt/            UCI defaults / firewall / init / install
