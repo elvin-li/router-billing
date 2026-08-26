@@ -57,7 +57,7 @@
             <br>{{if or .BackupEmpty .BackupLow}}<strong>建议立即重新生成。</strong>{{end}}
           </p>
           <form method="post" action="/user/2fa/regenerate-codes"
-                onsubmit="return confirm('重新生成 10 个备用码？旧的 {{.BackupRemaining}} 个未使用的码会立即失效。')">
+                data-confirm="重新生成 10 个备用码？旧的 {{.BackupRemaining}} 个未使用的码会立即失效。">
             {{template "csrf" .}}
             <button class="btn outline small" type="submit" style="width:auto;">重新生成备用码</button>
           </form>
@@ -91,7 +91,7 @@
             </tbody>
           </table>
           <form method="post" action="/user/2fa/trusted-devices/revoke-all"
-                onsubmit="return confirm('移除所有受信任的设备？所有这些浏览器下次登录都需要重新输入验证码。')"
+                data-confirm="移除所有受信任的设备？所有这些浏览器下次登录都需要重新输入验证码。"
                 style="margin-top:10px;">
             {{template "csrf" .}}
             <button class="btn outline small" type="submit" style="width:auto;">全部移除</button>
@@ -100,7 +100,7 @@
         {{end}}
 
         <form method="post" action="/user/2fa/disable"
-              onsubmit="return confirm('关闭二步验证？关闭后只用密码即可登录，安全性会降低。')">
+              data-confirm="关闭二步验证？关闭后只用密码即可登录，安全性会降低。">
           {{template "csrf" .}}
           <h3 style="margin-bottom:6px;">关闭二步验证</h3>
           <p class="hint" style="font-size:12px; color:var(--text-soft); margin-top:0;">
@@ -156,5 +156,8 @@
       {{end}}
     </section>
   </main>
+  {{/* Confirm/print handlers run via ui.js data-* attributes — the CSP
+       (script-src 'self') blocks inline on*= attributes. */}}
+  <script src="/static/ui.js" defer></script>
 </body>
 </html>

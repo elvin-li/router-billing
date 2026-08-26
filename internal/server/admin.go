@@ -10,6 +10,7 @@ import (
 	"log"
 	"net/http"
 	"net/url"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -45,7 +46,12 @@ type deviceView struct {
 
 func (a *App) handleAdminLogin(w http.ResponseWriter, r *http.Request) {
 	if r.Method == http.MethodGet {
-		a.render(w, "admin_login.html", map[string]any{"Error": ""})
+		// Surface the ?err= codes the 2FA flow redirects back with.
+		// Pre-v0.108 they were ignored, so "your pending 2FA session
+		// expired" bounced admins to a blank form with no explanation.
+		a.render(w, "admin_login.html", map[string]any{
+			"Error": adminLoginErrLabel(r.URL.Query().Get("err")),
+		})
 		return
 	}
 	if r.Method != http.MethodPost {
@@ -170,6 +176,21 @@ func (a *App) maybeAlertAdminLogin(r *http.Request, username string) {
 }
 
 func (a *App) handleAdminLogout(w http.ResponseWriter, r *http.Request) {
+	// POST-only: SameSite=Lax cookies DO ride along on top-level cross-site
+	// GET navigations (and on speculative link prefetches some browsers
+	// issue), so a hostile <a href=".../admin/logout"> — or an eager
+	// prefetcher walking the sidebar — could sign the admin out. GET now
+	// bounces to the dashboard with the session intact.
+	if r.Method != http.MethodPost {
+		http.Redirect(w, r, "/admin/dashboard", http.StatusSeeOther)
+		return
+	}
+	// This route sits outside requireAdmin (logging out with an expired
+	// session must still clear the cookie), so check CSRF here directly.
+	if !verifyCSRF(r) {
+		http.Error(w, "CSRF token invalid — please refresh the page and retry", http.StatusForbidden)
+		return
+	}
 	c, _ := r.Cookie(adminCookieName)
 	if c != nil {
 		_ = a.DB.DeleteSession(r.Context(), c.Value)
@@ -215,10 +236,10 @@ func (a *App) requireAdmin(h http.HandlerFunc) http.HandlerFunc {
 // admins can spot work-needed pages without clicking through.
 func (a *App) adminCtx(r *http.Request, page string, extra map[string]any) map[string]any {
 	// Sidebar attention badges. Best-effort — if the DB query errors, the
-	// badge silently disappears rather than 500-ing the page. The counts
-	// are already cheap (handled by Attention()) so this isn't a perf hit
-	// per render.
-	att, _ := a.DB.Attention(r.Context())
+	// badge silently disappears rather than 500-ing the page. Served from
+	// the short-TTL cache so every page render doesn't refire the 6-COUNT
+	// query set on the router's single SQLite connection.
+	att := a.attention(r.Context())
 
 	out := map[string]any{
 		"Version": a.Version,
@@ -239,6 +260,22 @@ func (a *App) adminCtx(r *http.Request, page string, extra map[string]any) map[s
 		out[k] = v
 	}
 	return out
+}
+
+// adminLoginErrLabel maps the login page's ?err= codes onto user-facing
+// text. Unknown codes render as nothing (never echo attacker-chosen query
+// strings on the unauthenticated login page).
+func adminLoginErrLabel(code string) string {
+	switch code {
+	case "2fa_expired":
+		return "二步验证会话已过期，请重新登录"
+	case "2fa_locked":
+		return "验证码错误次数过多，请重新登录"
+	case "2fa_misconfigured":
+		return "二步验证配置异常，请检查 config 中的 totp_secret"
+	default:
+		return ""
+	}
 }
 
 func errLabel(code string) string {
@@ -263,6 +300,22 @@ func errLabel(code string) string {
 		return "退款失败：请查看服务日志"
 	case "revoked":
 		return ""
+	// v0.108: codes that previously fell through to the raw string —
+	// admins saw literal "bad_key" / "not_found" flashes.
+	case "bad_key":
+		return "套餐 key 只能包含字母 / 数字 / - / _（最长 32 字符）"
+	case "label_too_long":
+		return "显示名过长（最多 64 字符）"
+	case "days_too_large":
+		return "天数过大（最多 3650 天）"
+	case "price_too_large":
+		return "价格过大（超过 ¥100,000 — 请检查是否多打了零）"
+	case "not_found":
+		return "未找到对应记录"
+	case "bad_mac":
+		return "MAC 格式不正确"
+	case "db":
+		return "数据库错误，请重试"
 	default:
 		return code
 	}
@@ -271,13 +324,11 @@ func errLabel(code string) string {
 func (a *App) handleAdminMACs(w http.ResponseWriter, r *http.Request) {
 	q := strings.TrimSpace(r.URL.Query().Get("q"))
 	status := strings.TrimSpace(r.URL.Query().Get("status"))
-	var macs []models.MAC
-	var err error
-	if q == "" && status == "" {
-		macs, err = a.DB.ListMACs(r.Context())
-	} else {
-		macs, err = a.DB.SearchMACs(r.Context(), q, status, 500)
-	}
+	// Always go through SearchMACs so the unfiltered view gets the same
+	// 500-row cap as the filtered one — ListMACs returned EVERY row,
+	// which on a long-running install rendered a multi-megabyte page.
+	// The Stats card still shows the true total.
+	macs, err := a.DB.SearchMACs(r.Context(), q, status, 500)
 	if err != nil {
 		http.Error(w, "db", http.StatusInternalServerError)
 		return
@@ -286,7 +337,7 @@ func (a *App) handleAdminMACs(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		log.Printf("stats: %v", err)
 	}
-	att, _ := a.DB.Attention(r.Context())
+	att := a.attention(r.Context())
 	planSales, _ := a.DB.PlanSalesSince(r.Context(), 30)
 	a.render(w, "admin_macs.html", a.adminCtx(r, "macs", map[string]any{
 		"MACs":      macs,
@@ -325,7 +376,29 @@ func (a *App) handleAdminDevices(w http.ResponseWriter, r *http.Request) {
 	// 4) Per-MAC nftables counters (bytes/packets through forward chain).
 	counters, _ := a.MACSvc.FW.Counters(r.Context())
 
-	// Merge: every sighted MAC + every online MAC.
+	// Merge: every sighted MAC + every online MAC. Billing rows are fetched
+	// in ONE batched query up front instead of a per-device point lookup
+	// (this page can easily list 100+ devices on a busy network).
+	allMACs := make([]string, 0, len(sightings)+len(entries))
+	inList := map[string]bool{}
+	for _, s := range sightings {
+		if !inList[s.MAC] {
+			inList[s.MAC] = true
+			allMACs = append(allMACs, s.MAC)
+		}
+	}
+	for _, e := range entries {
+		if !inList[e.MAC] {
+			inList[e.MAC] = true
+			allMACs = append(allMACs, e.MAC)
+		}
+	}
+	known, err := a.DB.GetMACsIn(r.Context(), allMACs)
+	if err != nil {
+		log.Printf("devices: batch mac lookup: %v", err)
+		known = nil
+	}
+
 	seen := map[string]bool{}
 	devices := make([]deviceView, 0, len(sightings)+len(entries))
 
@@ -341,7 +414,7 @@ func (a *App) handleAdminDevices(w http.ResponseWriter, r *http.Request) {
 				dv.IP = onlineIP
 			}
 		}
-		if m, _ := a.DB.GetMAC(r.Context(), mac); m != nil {
+		if m := known[mac]; m != nil {
 			dv.Known = true
 			dv.Label = m.Label
 			dv.ExpiresAt = m.ExpiresAt
@@ -389,12 +462,9 @@ func sortDevices(d []deviceView) {
 			return 3
 		}
 	}
-	// insertion sort — small lists, stable
-	for i := 1; i < len(d); i++ {
-		for j := i; j > 0 && rank(d[j]) < rank(d[j-1]); j-- {
-			d[j], d[j-1] = d[j-1], d[j]
-		}
-	}
+	// Stable so devices within the same rank keep their sighting order
+	// (most-recently-seen first, as built by the caller).
+	sort.SliceStable(d, func(i, j int) bool { return rank(d[i]) < rank(d[j]) })
 }
 
 // GET /admin/users/detail?id=<id>
@@ -467,7 +537,7 @@ func (a *App) handleAdminUserDetail(w http.ResponseWriter, r *http.Request) {
 func (a *App) handleAdminDashboard(w http.ResponseWriter, r *http.Request) {
 	stats, _ := a.DB.Stats(r.Context())
 	snap, _ := a.DB.DashboardSnapshot(r.Context())
-	att, _ := a.DB.Attention(r.Context())
+	att := a.attention(r.Context())
 	planSales, _ := a.DB.PlanSalesSince(r.Context(), 30)
 	recent, _ := a.DB.SearchAudit(r.Context(), db.AuditFilter{Limit: 10})
 
@@ -546,12 +616,9 @@ func (a *App) handleAdminUsers(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "db", http.StatusInternalServerError)
 		return
 	}
-	macCount := map[int64]int{}
-	macs, _ := a.DB.ListMACs(r.Context())
-	for _, m := range macs {
-		if m.UserID != nil {
-			macCount[*m.UserID]++
-		}
+	macCount, _ := a.DB.CountMACsByUser(r.Context())
+	if macCount == nil {
+		macCount = map[int64]int{}
 	}
 	// Allow the template to read raw query params (e.g. flash data from
 	// reset-password redirects). Keeps the data shape simple.
@@ -560,10 +627,13 @@ func (a *App) handleAdminUsers(w http.ResponseWriter, r *http.Request) {
 		rawQuery[k] = r.URL.Query().Get(k)
 	}
 	a.render(w, "admin_users.html", a.adminCtx(r, "users", map[string]any{
-		"Users":        users,
-		"MacCount":     macCount,
-		"Query":        q,
-		"Query0":       rawQuery,
+		"Users":    users,
+		"MacCount": macCount,
+		"Query":    q,
+		"Query0":   rawQuery,
+		// One-shot temp password from a reset-password redirect. Popping
+		// consumes it — a reload of this page shows nothing.
+		"ResetPwd":     a.popFlash(r.URL.Query().Get("flash")),
 		"SMSAvailable": a.SMS != nil && a.SMS.Available(),
 		"SMSProvider": func() string {
 			if a.SMS == nil {
@@ -680,6 +750,7 @@ func (a *App) handleAdminUserResetPassword(w http.ResponseWriter, r *http.Reques
 	}
 	// Invalidate any existing sessions so the old password is gone.
 	_, _ = a.DB.Exec(r.Context(), `DELETE FROM sessions WHERE kind='user' AND user_id = ?`, id)
+	_ = a.DB.DeleteAllTrustedDevices(r.Context(), id)
 
 	// If SMS is configured AND the admin checked "send via SMS", deliver
 	// the temp password to the user's phone instead of returning it in
@@ -687,7 +758,11 @@ func (a *App) handleAdminUserResetPassword(w http.ResponseWriter, r *http.Reques
 	// when SMS isn't wired or delivery fails.
 	if r.PostForm.Get("via_sms") == "1" && a.SMS != nil && a.SMS.Available() {
 		if user, err := a.DB.GetUser(r.Context(), id); err == nil && user != nil {
-			sErr := a.SendSMS(r.Context(), user.Phone, tmpPwd)
+			// Same rationale as the inline-display comment below: the temp
+			// password is a live credential and must not be persisted. The
+			// sms_log row records THAT a reset SMS went out, never its body
+			// (readable by read-only API tokens via /api/admin/sms/log).
+			sErr := a.SendSMSSensitive(r.Context(), user.Phone, tmpPwd, "[临时密码已发送 — 内容不入库]")
 			if sErr == nil {
 				a.DB.Audit(r.Context(), "admin", "user_reset_password", strconv.FormatInt(id, 10),
 					"via=sms provider="+a.SMS.Name()+" ip="+clientIP(r))
@@ -698,7 +773,11 @@ func (a *App) handleAdminUserResetPassword(w http.ResponseWriter, r *http.Reques
 		}
 	}
 	a.DB.Audit(r.Context(), "admin", "user_reset_password", strconv.FormatInt(id, 10), "via=inline ip="+clientIP(r))
-	http.Redirect(w, r, "/admin/users?reset_pwd="+url.QueryEscape(tmpPwd)+"&reset_uid="+strconv.FormatInt(id, 10), http.StatusSeeOther)
+	// The plaintext goes through the one-time flash store, NOT the URL —
+	// query strings persist in browser history and any intermediary logs,
+	// which is exactly where a live credential must not end up.
+	tok := a.stashFlash(tmpPwd)
+	http.Redirect(w, r, "/admin/users?flash="+url.QueryEscape(tok)+"&reset_uid="+strconv.FormatInt(id, 10), http.StatusSeeOther)
 }
 
 // POST /admin/users/delete  {id}
@@ -995,12 +1074,19 @@ func (a *App) handleAdminMACDetail(w http.ResponseWriter, r *http.Request) {
 	// v0.73: last-seen from the device-sightings table so support can tell
 	// "is this device online right now?" without flipping to /admin/devices.
 	sighting, _ := a.DB.GetSightingForMAC(r.Context(), normalized)
+	// v0.108: a sighting row records the LAST time the device was seen —
+	// it exists forever once written. The template used to show a green
+	// "在线" pill whenever the row existed, which lied for any device
+	// gone for weeks. Only claim "online" inside the same 10-minute
+	// window /admin/devices treats as live.
+	sightingOnline := sighting != nil && time.Since(sighting.LastSeen) <= 10*time.Minute
 	a.render(w, "admin_mac_detail.html", a.adminCtx(r, "macs", map[string]any{
-		"MAC":      m,
-		"Owner":    owner,
-		"Orders":   orders,
-		"Timeline": timeline,
-		"Sighting": sighting,
+		"MAC":            m,
+		"Owner":          owner,
+		"Orders":         orders,
+		"Timeline":       timeline,
+		"Sighting":       sighting,
+		"SightingOnline": sightingOnline,
 	}))
 }
 
@@ -1078,10 +1164,8 @@ func (a *App) handleAdminOrderRefund(w http.ResponseWriter, r *http.Request) {
 		http.Redirect(w, r, "/admin/orders?err=refund_confirm", http.StatusSeeOther)
 		return
 	}
-	if len(reason) > 200 {
-		reason = reason[:200]
-	}
-	mac, err := a.DB.MarkOrderRefunded(r.Context(), orderNo, reason)
+	reason = truncateRunes(reason, 200)
+	mac, err := a.refundOrder(r.Context(), orderNo, reason)
 	if err != nil {
 		log.Printf("refund %s: %v", orderNo, err)
 		// Surface the error type so admins see "order is already refunded"
@@ -1211,9 +1295,7 @@ func (a *App) handleAdminMACNotes(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	notes := strings.TrimSpace(r.PostForm.Get("notes"))
-	if len(notes) > 1000 {
-		notes = notes[:1000]
-	}
+	notes = truncateRunes(notes, 1000)
 	if err := a.DB.SetMACNotes(r.Context(), normalized, notes); err != nil {
 		log.Printf("set mac notes %s: %v", normalized, err)
 		http.Redirect(w, r, "/admin/macs/detail?mac="+normalized+"&err=internal", http.StatusSeeOther)
@@ -1225,6 +1307,13 @@ func (a *App) handleAdminMACNotes(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *App) handleAdminResync(w http.ResponseWriter, r *http.Request) {
+	// POST-only: verifyCSRF skips non-POST requests, so accepting GET here
+	// meant a cross-site <img src=/admin/resync> could trigger a firewall
+	// rebuild with the admin's SameSite=Lax cookie riding along.
+	if r.Method != http.MethodPost {
+		http.Error(w, "method", http.StatusMethodNotAllowed)
+		return
+	}
 	if err := a.MACSvc.Resync(r.Context()); err != nil {
 		log.Printf("admin resync: %v", err)
 		a.DB.Audit(r.Context(), "admin", "firewall_resync_failed", "", "err="+err.Error()+" ip="+clientIP(r))

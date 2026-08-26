@@ -306,6 +306,202 @@ func TestQueueDropsWhenFull(t *testing.T) {
 	close(block)
 }
 
+func TestRetryBackoffDoesNotBlockFreshEvents(t *testing.T) {
+	// A failing event with a long backoff must not stall the worker:
+	// fresh events sent AFTER the failure should be delivered while the
+	// failed one is still waiting for its retry slot. Pre-v0.108 the
+	// worker slept through the backoff in-place, so the fresh event
+	// would not arrive until the retry schedule was exhausted.
+	var mu sync.Mutex
+	seen := []string{}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		var ev Event
+		_ = json.Unmarshal(body, &ev)
+		mu.Lock()
+		seen = append(seen, ev.Type)
+		mu.Unlock()
+		if ev.Type == "poison" {
+			w.WriteHeader(500)
+			return
+		}
+		w.WriteHeader(200)
+	}))
+	t.Cleanup(srv.Close)
+
+	n := New(srv.URL, "")
+	// One retry after a long-ish delay. The fresh event must land well
+	// before this delay elapses.
+	n.BackoffSchedule = []time.Duration{600 * time.Millisecond}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go n.Run(ctx)
+
+	n.Send(Event{Type: "poison"})
+	n.Send(Event{Type: "fresh"})
+
+	freshBy := time.Now().Add(400 * time.Millisecond) // well inside the 600ms backoff
+	for {
+		mu.Lock()
+		gotFresh := false
+		for _, s := range seen {
+			if s == "fresh" {
+				gotFresh = true
+			}
+		}
+		mu.Unlock()
+		if gotFresh {
+			break
+		}
+		if time.Now().After(freshBy) {
+			t.Fatal("fresh event was blocked behind the failing event's backoff")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+
+	// And the poison event's retry should still happen (2 total attempts).
+	deadline := time.After(3 * time.Second)
+	for {
+		mu.Lock()
+		poison := 0
+		for _, s := range seen {
+			if s == "poison" {
+				poison++
+			}
+		}
+		mu.Unlock()
+		if poison >= 2 {
+			return
+		}
+		select {
+		case <-deadline:
+			t.Fatalf("poison retry never fired; deliveries: %v", seen)
+		default:
+			time.Sleep(10 * time.Millisecond)
+		}
+	}
+}
+
+func TestPanicInOnDeliveryDoesNotKillWorker(t *testing.T) {
+	// The server package wires OnDelivery to a DB write. If that hook
+	// panics, the worker must survive and keep delivering later events —
+	// an unrecovered panic in the worker goroutine kills the whole
+	// process.
+	srv := newCaptureSrv(t, nil) // always 200
+	n := New(srv.srv.URL, "")
+	n.BackoffSchedule = []time.Duration{}
+	first := true
+	n.OnDelivery = func(ev Event, attempt, status int, durationMs int64, err error) {
+		if first {
+			first = false
+			panic("boom in delivery log hook")
+		}
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go n.Run(ctx)
+
+	n.Send(Event{Type: "one"})
+	n.Send(Event{Type: "two"})
+
+	deadline := time.After(2 * time.Second)
+	for atomic.LoadInt32(&srv.calls) < 2 {
+		select {
+		case <-deadline:
+			t.Fatalf("worker died after OnDelivery panic; only %d deliveries", atomic.LoadInt32(&srv.calls))
+		default:
+			time.Sleep(5 * time.Millisecond)
+		}
+	}
+}
+
+func TestNilHTTPClientStillDelivers(t *testing.T) {
+	// A Notifier whose HTTPClient was cleared after New (or never set)
+	// used to nil-panic inside deliver on EVERY event — recovered by
+	// deliverSafe, but each event silently dropped. deliver must default
+	// the client instead.
+	srv := newCaptureSrv(t, nil) // always 200
+	n := New(srv.srv.URL, "")
+	n.HTTPClient = nil
+	n.BackoffSchedule = []time.Duration{}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go n.Run(ctx)
+	n.Send(Event{Type: "pay"})
+
+	deadline := time.After(2 * time.Second)
+	for atomic.LoadInt32(&srv.calls) < 1 {
+		select {
+		case <-deadline:
+			t.Fatal("event never delivered with nil HTTPClient")
+		default:
+			time.Sleep(5 * time.Millisecond)
+		}
+	}
+}
+
+func TestHungEndpointBoundedByAttemptTimeout(t *testing.T) {
+	// An endpoint that accepts the connection and never responds must not
+	// wedge the single worker — even when the HTTPClient has NO timeout
+	// (http.DefaultClient-style). AttemptTimeout is the backstop; fresh
+	// events must flow once it fires.
+	release := make(chan struct{})
+	var mu sync.Mutex
+	seen := []string{}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		var ev Event
+		_ = json.Unmarshal(body, &ev)
+		mu.Lock()
+		seen = append(seen, ev.Type)
+		mu.Unlock()
+		if ev.Type == "hang" {
+			<-release // hold the request open until test cleanup
+			return
+		}
+		w.WriteHeader(200)
+	}))
+	t.Cleanup(func() { close(release); srv.Close() })
+
+	n := New(srv.URL, "")
+	n.HTTPClient = &http.Client{} // deliberately no timeout
+	n.AttemptTimeout = 50 * time.Millisecond
+	n.BackoffSchedule = []time.Duration{} // no retries — drop the hung one
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go n.Run(ctx)
+
+	n.Send(Event{Type: "hang"})
+	n.Send(Event{Type: "fresh"})
+
+	// The fresh event must arrive shortly after the 50ms attempt timeout
+	// unblocks the worker — well before the 2s failure deadline.
+	deadline := time.After(2 * time.Second)
+	for {
+		mu.Lock()
+		gotFresh := false
+		for _, s := range seen {
+			if s == "fresh" {
+				gotFresh = true
+			}
+		}
+		mu.Unlock()
+		if gotFresh {
+			return
+		}
+		select {
+		case <-deadline:
+			t.Fatal("worker wedged behind hung request despite AttemptTimeout")
+		default:
+			time.Sleep(5 * time.Millisecond)
+		}
+	}
+}
+
 func TestAtIsSetIfZero(t *testing.T) {
 	srv := newCaptureSrv(t, nil)
 	n := New(srv.srv.URL, "")

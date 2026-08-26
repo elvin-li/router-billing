@@ -215,8 +215,9 @@ func TestUserRegisterLoginLogout(t *testing.T) {
 		t.Error("phone not shown on /user/me")
 	}
 
-	// Logout
-	res, _ = do(t, h, "GET", "/user/logout", nil, jar)
+	// Logout — POST + CSRF (GET no longer ends the session).
+	res, _ = do(t, h, "POST", "/user/logout",
+		url.Values{"_csrf": {jar[csrfCookieName]}}, jar)
 	if res.StatusCode != 303 {
 		t.Errorf("logout: %d", res.StatusCode)
 	}
@@ -451,11 +452,18 @@ func TestPortalAnnouncesPWAAssets(t *testing.T) {
 	for _, want := range []string{
 		`rel="manifest"`,
 		`/static/manifest.json`,
-		`navigator.serviceWorker.register('/sw.js'`,
+		`/static/portal.js`,
 	} {
 		if !strings.Contains(body, want) {
 			t.Errorf("portal missing %q", want)
 		}
+	}
+	// The service-worker registration moved from an inline <script> (which
+	// the CSP script-src 'self' silently blocked — the SW never registered)
+	// into portal.js. Assert it actually lives there.
+	_, js := do(t, h, "GET", "/static/portal.js", nil, nil)
+	if !strings.Contains(js, `navigator.serviceWorker.register('/sw.js'`) {
+		t.Error("portal.js missing service-worker registration")
 	}
 }
 
@@ -620,8 +628,10 @@ func TestAdminLoginRateLimitByUsername(t *testing.T) {
 	h := app.Routes()
 
 	// 3 attempts with wrong password but the SAME username are allowed
-	// (failures, but not rate-limited). Different X-Forwarded-For each time
-	// to defeat the IP-keyed limiter and isolate the per-username one.
+	// (failures, but not rate-limited). X-Forwarded-For is ignored without
+	// trusted_proxies (v0.106) so all four attempts share one IP key — the
+	// default IP budget (8/5min) stays below its cap and the 4th failure
+	// can only come from the per-username limiter.
 	for i := 0; i < 3; i++ {
 		form := url.Values{"username": {"admin"}, "password": {"bad"}}
 		req := httptest.NewRequest("POST", "/admin/login", strings.NewReader(form.Encode()))
@@ -754,7 +764,9 @@ func TestAdminLogin2FAFullFlow(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	res, _ = do(t, h, "POST", "/admin/login/2fa", url.Values{"code": {code}}, jar)
+	resetTOTPReplay() // other tests share this well-known secret
+	res, _ = do(t, h, "POST", "/admin/login/2fa",
+		url.Values{"code": {code}, "_csrf": {jar[csrfCookieName]}}, jar)
 	if res.StatusCode != 303 || !strings.Contains(res.Header.Get("Location"), "/admin/dashboard") {
 		t.Fatalf("2fa stage: status=%d loc=%s", res.StatusCode, res.Header.Get("Location"))
 	}
@@ -786,7 +798,8 @@ func TestAdminLogin2FAWrongCodeRejected(t *testing.T) {
 		url.Values{"username": {"admin"}, "password": {"admin-pw"}}, nil)
 	jar := cookieJar(res)
 
-	res, body := do(t, h, "POST", "/admin/login/2fa", url.Values{"code": {"000000"}}, jar)
+	res, body := do(t, h, "POST", "/admin/login/2fa",
+		url.Values{"code": {"000000"}, "_csrf": {jar[csrfCookieName]}}, jar)
 	if res.StatusCode != 200 {
 		t.Fatalf("wrong code: status=%d", res.StatusCode)
 	}
@@ -809,18 +822,50 @@ func TestAdminLogin2FALocksAfterFiveAttempts(t *testing.T) {
 
 	// 5 wrong attempts → still inline error (status 200).
 	for i := 0; i < 5; i++ {
-		res, _ = do(t, h, "POST", "/admin/login/2fa", url.Values{"code": {"000000"}}, jar)
+		res, _ = do(t, h, "POST", "/admin/login/2fa",
+			url.Values{"code": {"000000"}, "_csrf": {jar[csrfCookieName]}}, jar)
 		if res.StatusCode != 200 {
 			t.Errorf("attempt %d: status=%d (want 200 inline)", i, res.StatusCode)
 		}
 	}
 	// 6th: pending session killed; redirect to /admin/login.
-	res, _ = do(t, h, "POST", "/admin/login/2fa", url.Values{"code": {"000000"}}, jar)
+	res, _ = do(t, h, "POST", "/admin/login/2fa",
+		url.Values{"code": {"000000"}, "_csrf": {jar[csrfCookieName]}}, jar)
 	if res.StatusCode != 303 {
 		t.Fatalf("6th attempt: status=%d", res.StatusCode)
 	}
 	if !strings.Contains(res.Header.Get("Location"), "2fa_locked") {
 		t.Errorf("expected 2fa_locked redirect; got %s", res.Header.Get("Location"))
+	}
+}
+
+func TestAdminLogin2FAPostRequiresCSRF(t *testing.T) {
+	app := setupTestApp(t)
+	app.Cfg.Admin.TOTPSecret = "JBSWY3DPEHPK3PXP"
+	h := app.Routes()
+
+	res, _ := do(t, h, "POST", "/admin/login",
+		url.Values{"username": {"admin"}, "password": {"admin-pw"}}, nil)
+	jar := cookieJar(res)
+
+	// A POST without the _csrf value (the shape a cross-site form would
+	// have) must be rejected outright — and must NOT burn one of the five
+	// 2FA attempts.
+	res2, _ := do(t, h, "POST", "/admin/login/2fa", url.Values{"code": {"000000"}}, jar)
+	if res2.StatusCode != 403 {
+		t.Fatalf("missing csrf: status=%d, want 403", res2.StatusCode)
+	}
+
+	// The pending session is still alive and a proper token still works.
+	code, err := totp.Code("JBSWY3DPEHPK3PXP", time.Now().Unix())
+	if err != nil {
+		t.Fatal(err)
+	}
+	resetTOTPReplay() // TestAdminLogin2FAFullFlow shares this secret
+	res3, _ := do(t, h, "POST", "/admin/login/2fa",
+		url.Values{"code": {code}, "_csrf": {jar[csrfCookieName]}}, jar)
+	if res3.StatusCode != 303 || cookieJar(res3)[adminCookieName] == "" {
+		t.Errorf("valid csrf + code should log in; status=%d", res3.StatusCode)
 	}
 }
 
@@ -873,8 +918,9 @@ func TestAdminSessionRevoke(t *testing.T) {
 		t.Fatal("victim has no session cookie")
 	}
 
-	// Admin revokes the victim's session.
-	form := url.Values{"_csrf": {tok}, "token": {victimTok}}
+	// Admin revokes the victim's session. The sessions page form round-trips
+	// the stored token hash, never the raw cookie value.
+	form := url.Values{"_csrf": {tok}, "token": {db.HashToken(victimTok)}}
 	req := httptest.NewRequest("POST", "/admin/sessions/revoke", strings.NewReader(form.Encode()))
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	for k, v := range jar {
@@ -962,7 +1008,7 @@ func TestRedeemRateLimit(t *testing.T) {
 		if res.StatusCode != 303 {
 			t.Fatalf("attempt %d: %d", i, res.StatusCode)
 		}
-		loc := res.Header.Get("Location")
+		loc := strings.ToLower(res.Header.Get("Location"))
 		if strings.Contains(loc, "尝试过于频繁") || strings.Contains(loc, "%e5%b0%9d") {
 			t.Errorf("attempt %d should not be rate-limited yet: %s", i, loc)
 		}
@@ -970,8 +1016,9 @@ func TestRedeemRateLimit(t *testing.T) {
 	// 4th hit gets the rate-limit redirect.
 	res, _ := do(t, h, "POST", "/redeem",
 		url.Values{"code": {"AAAAAAAAAA22"}, "mac": {"aa:bb:cc:dd:ee:ff"}}, nil)
-	loc := res.Header.Get("Location")
-	// URL-encoded "尝试" prefix
+	// URL-encoded "尝试" prefix (case-insensitive: v0.100 switched from
+	// http.Redirect's implicit lowercase escaping to url.QueryEscape).
+	loc := strings.ToLower(res.Header.Get("Location"))
 	if !strings.Contains(loc, "%e5%b0%9d%e8%af%95") {
 		t.Errorf("4th attempt should be rate-limited; got %s", loc)
 	}

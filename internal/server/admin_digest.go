@@ -43,10 +43,7 @@ func (a *App) adminDigestLoop(ctx context.Context) {
 		return
 	}
 
-	target := time.Date(time.Now().UTC().Year(), time.Now().UTC().Month(), time.Now().UTC().Day(), hour-1, 0, 0, 0, time.UTC)
-	if target.Before(time.Now().UTC()) {
-		target = target.Add(24 * time.Hour)
-	}
+	target := nextDigestAt(time.Now().UTC(), hour)
 	for {
 		wait := time.Until(target)
 		log.Printf("admin digest: next send in %s (at %s UTC)", wait, target.Format(time.RFC3339))
@@ -58,8 +55,28 @@ func (a *App) adminDigestLoop(ctx context.Context) {
 		// Discard return — the function already logs + audits any error.
 		// The loop must continue to the next day regardless.
 		_, _ = a.sendAdminDigest(ctx)
+		// Recompute from the wall clock instead of target.Add(24h): if the
+		// clock jumped forward or the process was suspended across several
+		// days (router hibernate, NTP step), the old +24h-per-iteration
+		// catch-up fired one digest SMS per missed day back-to-back.
+		target = nextDigestAt(time.Now().UTC(), hour)
+	}
+}
+
+// nextDigestAt returns the next wall-clock instant at which the daily
+// digest should fire: the next occurrence of `hour` o'clock UTC strictly
+// after `now`. hour is the config's 1..24 range — 24 means midnight.
+// Pure function so the schedule math is testable without running the loop.
+//
+// Pre-v0.108 the loop used `hour-1`, so a digest configured for 09:00
+// UTC actually fired at 08:00 — one hour before the documented time.
+func nextDigestAt(now time.Time, hour int) time.Time {
+	h := hour % 24 // 24 → 0 (midnight); 1..23 mean the literal hour
+	target := time.Date(now.Year(), now.Month(), now.Day(), h, 0, 0, 0, time.UTC)
+	if !target.After(now) {
 		target = target.Add(24 * time.Hour)
 	}
+	return target
 }
 
 // sendAdminDigest does one pass — gather counts, format SMS, send. Returns
@@ -70,14 +87,20 @@ func (a *App) sendAdminDigest(ctx context.Context) (db.AdminDigestStats, error) 
 		log.Printf("admin digest: stats: %v", err)
 		return stats, err
 	}
+	// Audit rows must land even when ctx dies between "SMS delivered"
+	// and "row inserted" (shutdown, admin disconnect on the manual
+	// trigger) — same rationale as the expiry-reminder pass: the SMS is
+	// out in the real world, and the audit trail is how operators
+	// confirm the daily schedule actually fired.
+	auditCtx := context.WithoutCancel(ctx)
 	body := formatAdminDigestBody(stats)
 	phone := a.Cfg.SMS.AdminLoginAlertPhone
 	if err := a.SendSMS(ctx, phone, body); err != nil {
 		log.Printf("admin digest sms %s: %v", phone, err)
-		a.DB.Audit(ctx, "system", "admin_digest_failed", "", "phone="+phone+" err="+err.Error())
+		a.DB.Audit(auditCtx, "system", "admin_digest_failed", "", "phone="+phone+" err="+err.Error())
 		return stats, err
 	}
-	a.DB.Audit(ctx, "system", "admin_digest_sent", "",
+	a.DB.Audit(auditCtx, "system", "admin_digest_sent", "",
 		"phone="+phone+" revenue="+strconv.Itoa(stats.YesterdayRevenueCents)+
 			" paid="+strconv.Itoa(stats.YesterdayPaidOrders)+
 			" failed="+strconv.Itoa(stats.FailedOrdersToday)+
@@ -116,11 +139,18 @@ func (a *App) handleAdminDigestTrigger(w http.ResponseWriter, r *http.Request) {
 		http.Redirect(w, r, "/admin/sms-log?err=sms_disabled", http.StatusSeeOther)
 		return
 	}
-	if a.Cfg.SMS.AdminLoginAlertPhone == "" {
+	// Same guard as the loop: a malformed configured phone must bounce
+	// with a clear error instead of burning a provider call that the
+	// upstream will reject. (Load-time validation catches this for real
+	// configs; this keeps the manual path safe for hand-built ones.)
+	if !models.ValidPhone(a.Cfg.SMS.AdminLoginAlertPhone) {
 		http.Redirect(w, r, "/admin/sms-log?err=digest_no_phone", http.StatusSeeOther)
 		return
 	}
-	if _, err := a.sendAdminDigest(r.Context()); err != nil {
+	// Detach from the request context (same as the expiry-reminder
+	// trigger): an admin disconnecting mid-send must not abort between
+	// "SMS delivered" and "audit row written".
+	if _, err := a.sendAdminDigest(context.WithoutCancel(r.Context())); err != nil {
 		http.Redirect(w, r, "/admin/sms-log?err=sms_failed", http.StatusSeeOther)
 		return
 	}

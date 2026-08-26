@@ -55,6 +55,19 @@ func TestConsoleProviderSendAndRecent(t *testing.T) {
 	}
 }
 
+// A zero-value Console (struct literal, not NewConsole) must still keep
+// a ring — pre-v0.119 its cap of 0 evicted every record on append.
+func TestConsoleZeroValueKeepsRecords(t *testing.T) {
+	c := &Console{}
+	if err := c.Send(context.Background(), "13800138000", "kept"); err != nil {
+		t.Fatal(err)
+	}
+	recs := c.Recent()
+	if len(recs) != 1 || recs[0].Message != "kept" {
+		t.Fatalf("zero-value Console dropped the record: %+v", recs)
+	}
+}
+
 func TestConsoleDefaultCap(t *testing.T) {
 	c := NewConsole(0)
 	if c.cap != 50 {

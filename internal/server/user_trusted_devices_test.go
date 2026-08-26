@@ -9,6 +9,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"router-billing/internal/db"
 )
 
 // loginWith2FAUntilSession runs through password → /user/login/2fa, optionally
@@ -16,6 +18,9 @@ import (
 // rb_user_trusted) so subsequent tests can issue authed requests.
 func loginWith2FAUntilSession(t *testing.T, h http.Handler, app *App, phone, password string, trustDevice bool) map[string]string {
 	t.Helper()
+	// Tests log in repeatedly inside one 30s TOTP step; a real authenticator
+	// would show a fresh code each login, so lift the one-time-use ledger.
+	resetTOTPReplay()
 	res, _ := do(t, h, "POST", "/user/login",
 		url.Values{"phone": {phone}, "password": {password}}, nil)
 	if res.StatusCode != 303 {
@@ -68,8 +73,11 @@ func TestTrustDeviceCheckboxIssuesCookieAndRow(t *testing.T) {
 	if len(devices) != 1 {
 		t.Fatalf("expected 1 trusted device row; got %d", len(devices))
 	}
-	if devices[0].Token != jar[userTrustedCookie] {
-		t.Error("DB token must match cookie value")
+	if devices[0].Token != db.HashToken(jar[userTrustedCookie]) {
+		t.Error("DB must store the SHA-256 hash of the cookie value")
+	}
+	if devices[0].Token == jar[userTrustedCookie] {
+		t.Error("DB must not store the raw cookie value")
 	}
 }
 
@@ -139,7 +147,7 @@ func TestRevokeOneTrustedDeviceDoesNotKickOthers(t *testing.T) {
 	// Find the row for `first` and revoke it via the authed user endpoint.
 	var firstID int64
 	for _, d := range devices {
-		if d.Token == first[userTrustedCookie] {
+		if d.Token == db.HashToken(first[userTrustedCookie]) {
 			firstID = d.ID
 		}
 	}
@@ -208,7 +216,9 @@ func TestDisable2FAWipesTrustedDevices(t *testing.T) {
 		t.Fatalf("setup: should have 1 trusted device; got %d", len(devs))
 	}
 
-	// Disable 2FA.
+	// Disable 2FA. (Fresh-code simulation: the login above consumed the
+	// current step for one-time-use purposes.)
+	resetTOTPReplay()
 	code := validTOTPForUser(t, app, "13800139035")
 	res, _ := do(t, h, "POST", "/user/2fa/disable",
 		url.Values{"_csrf": {jar[csrfCookieName]}, "password": {"disable-trust-pw"}, "code": {code}}, jar)

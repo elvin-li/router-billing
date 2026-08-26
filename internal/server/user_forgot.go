@@ -137,9 +137,12 @@ func (a *App) handleUserForgotPassword(w http.ResponseWriter, r *http.Request) {
 			a.renderForgot(w, r, 1, phone, "internal")
 			return
 		}
-		body := "【router-billing】您的密码重置验证码：" + code + "，" +
-			padMins(int(pwResetCodeTTL/time.Minute)) + "内有效。若非本人操作，请忽略。"
-		if sErr := a.SendSMS(r.Context(), user.Phone, body); sErr != nil {
+		body := formatPwResetSMSBody(code)
+		// The sms_log row must NOT contain the live code: the table is
+		// readable by read-only API tokens (GET /api/admin/sms/log), and a
+		// stored code is a 10-minute account-takeover credential.
+		logged := formatPwResetSMSBody(strings.Repeat("*", pwResetCodeLen))
+		if sErr := a.SendSMSSensitive(r.Context(), user.Phone, body, logged); sErr != nil {
 			log.Printf("forgot-password sms %s: %v", phone, sErr)
 			a.renderForgot(w, r, 1, phone, "sms_failed")
 			return
@@ -203,8 +206,13 @@ func (a *App) handleUserForgotPasswordVerify(w http.ResponseWriter, r *http.Requ
 		return
 	}
 	if user == nil || user.Suspended {
-		// Uniform response — also matches the silent-success branch above.
-		a.renderForgot(w, r, 2, phone, "bad_code")
+		// Uniform response with the row==nil branch below. Answering
+		// "bad_code" here (as pre-v0.106) while a real-but-idle account got
+		// "expired" let anyone probe /verify with a made-up code and learn
+		// whether a phone is registered — no SMS ever sent. Both no-account
+		// and no-active-reset now say "expired", and neither path runs
+		// bcrypt, so the timing is uniform too.
+		a.renderForgot(w, r, 2, phone, "expired")
 		return
 	}
 	row, err := a.DB.GetActivePasswordReset(r.Context(), user.ID)
@@ -245,6 +253,9 @@ func (a *App) handleUserForgotPasswordVerify(w http.ResponseWriter, r *http.Requ
 	if _, err := a.DB.DeleteSessionsByUserID(r.Context(), user.ID); err != nil {
 		log.Printf("forgot-verify drop sessions %d: %v", user.ID, err)
 	}
+	if err := a.DB.DeleteAllTrustedDevices(r.Context(), user.ID); err != nil {
+		log.Printf("forgot-verify drop trusted devices %d: %v", user.ID, err)
+	}
 	a.DB.Audit(r.Context(), "user:"+user.Phone, "password_reset", "", "via=sms ip="+clientIP(r))
 	http.Redirect(w, r, "/user/login?ok=password_reset", http.StatusSeeOther)
 }
@@ -266,6 +277,13 @@ func (a *App) renderForgot(w http.ResponseWriter, r *http.Request, stage int, ph
 		extra["Err"] = userErrLabel(errCode)
 	}
 	a.render(w, "user_forgot_password.html", a.userCtx(r, "forgot", extra))
+}
+
+// formatPwResetSMSBody builds the reset-code SMS. Pure function shared by
+// the real send and the redacted sms_log copy so the two can never drift.
+func formatPwResetSMSBody(code string) string {
+	return "【router-billing】您的密码重置验证码：" + code + "，" +
+		padMins(int(pwResetCodeTTL/time.Minute)) + "内有效。若非本人操作，请忽略。"
 }
 
 // padMins formats minutes for the SMS body. Single source of truth so we don't

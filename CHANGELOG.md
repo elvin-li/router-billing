@@ -1,5 +1,1355 @@
 # Changelog
 
+## v0.119 — 深挖轮 5：短信日志泄漏活体凭据、Aliyun TemplateParam 误判、配置校验收尾
+
+针对 sms/notify/scheduler/config/totp/schedule 及 CI/compose 的
+专项审计。修复一个高危泄漏与若干真实缺陷。
+
+A. (HIGH, 凭据入库) `App.SendSMS` 把短信全文原样写进 `sms_log`
+表——忘记密码的 6 位重置验证码与管理员代发的临时密码（整条正文
+就是密码本身）全部明文落库。而 `GET /api/admin/sms/log` 明确
+接受**只读** API token（代码注释称该表"只是投递状态、非鉴权材
+料"）：持有只读监控 token 者可对任意手机号发起公开的
+/user/forgot-password，再从日志读出 10 分钟有效期内的活码，
+完成任意账号接管——只读层级的存在意义恰恰是杜绝这类影响。新增
+`SendSMSSensitive(ctx, phone, message, logged)`：投递正文不
+变，落库改用脱敏副本（验证码打星、临时密码只记"已发送"占位）。
+两处调用点（user_forgot、admin reset-password via_sms）全部
+切换；回归测试断言日志行不含活码/临时密码、投递通道（console
+环）保留全文、脱敏后验证码仍可完成端到端重置。
+
+B. (MEDIUM, 投递失败) Aliyun 适配器的 `looksLikeJSON` 只看首尾
+花括号：形如 `{urgent}`、`{紧急}` 的普通文本被当作现成的
+TemplateParam 原样透传，Aliyun 以格式非法拒收，短信静默丢失。
+改为必须 `json.Valid` 才透传，否则照常包成 `{"code": ...}`；
+另将响应体读取从无界 `io.ReadAll` 收敛到 64KB 上限。
+
+C. (MEDIUM, 配置校验遗留) 三处"过检即失效"的静默降级改为
+--check-config 直接报错：(1) `admin_login_alert_phone` 手误
+写错号码时，登录告警与整个每日日报循环都在启动时静默停用（各
+只有一行 stderr）；(2) `admin_digest_hour` 配了小时但没配收件
+号码或 provider 为空/none/off 时日报永远不会发；(3)
+`expire_check_interval`/`backup.interval`/
+`walled_garden.refresh_interval` 漏写单位或 `1s` 手误会让
+DB 查询、VACUUM INTO 全库拷贝、DNS 重解析进入忙循环——新增
+30s/10m/30s 下限（0 仍走默认值）。
+
+D. (LOW, 三处小缺陷) 字面量构造的 `sms.Console{}`（cap=0）每
+次 append 立即被裁剪清空，Recent() 永远为空——Send 内补默认
+值；`notify.Notifier` 绕过 New 构造（URL 有值但无队列）时每条
+事件都误报"queue full"——改为指明未初始化；
+POST /admin/sms-log/digest 手动触发缺少后台循环同款的
+ValidPhone 守卫，会对畸形号码白烧一次 provider 调用。
+
+E. (CI/compose) ci.yml 无 permissions 块，各 job 继承仓库默认
+token 权限（老仓库为 write）——补 `contents: read` 最小权限
+（release.yml 原本就有作用域）；docker-compose 开发容器加
+`read_only: true` + `/tmp` tmpfs（应用只写 state 卷）。
+
+其余复查确认无缺陷（不改动）：webhook URL 仅运营者配置文件可
+设、强制绝对 http(s) 且必须配 secret（无用户可控 SSRF 面）；
+忘记密码两阶段的防枚举统一响应（v0.106）与限流；scheduler 的
+panic 防护/初始 pass/ticker 语义；日报 nextDigestAt 的时钟跳
+变吸收；expiry-reminder 22h 去重窗与互斥；webhook_deliveries
+的逐次记录与 purgeLoop 裁剪；totp 常数时间比较与 step 记录；
+schedule 的 ISO 周日/跨午夜窗口。`go test ./...` 全绿；全部
+相关包（含 server、db）`-race` 绿；config.example.yaml 通过
+--check-config。
+
+## v0.118 — 深挖轮 4：MAC 计数全表扫描收尾
+
+深挖轮 3 收尾：把 v0.111 引入的 `CountMACsByUser`（单条
+GROUP BY）推广到最后两个仍在全表 `ListMACs` 后逐行数数的调用
+点——`/api/admin/users`（每次 API 调用都拉全部 MAC 行到 Go 侧）
+与 `/admin/export/users.csv`。行为不变（同样统计
+`user_id IS NOT NULL` 的全部 MAC，不分状态），仅省去随 MAC 表
+增长的线性内存/CPU。
+
+其余复查确认无缺陷（不改动）：nftables 原子 sync/walled-garden
+payload、WeChat 平台证书缓存与 AES-GCM 解签、Alipay 分账金额
+解析、notify 单 worker 重试管线、sightings/dnsmasq 轮询、
+deploy 脚本（v0.104/v0.110 已加固）、rateLimiter 硬上限 GC。
+`go test ./...` 全绿；server/service/notify/pay 包 `-race` 绿；
+golangci-lint 无告警。
+
+## v0.117 — 深挖轮 3：用户认领 MAC 的 TOCTOU、2FA 计数器泄漏、UTF-8 截断
+
+v0.116 之后的第三轮独立审计，聚焦此前多轮加固后仍残留的
+check-then-write 竞态与慢性资源泄漏。修复三类真实缺陷。
+
+A. (MEDIUM, 竞态/越权) `/user/macs/claim` 的认领路径是非原子的
+GetMAC 检查 → 无条件 `UpsertMAC`：检查与写入之间若发生并发变
+更，会出现两种错误结果——(1) MAC 刚被转移给另一用户时被静默
+抢回（与 v0.111 用 `ExtendMACOwned` 修掉的 user-grant 扇出同
+类，认领路径漏掉了）；(2) 更糟：`UpsertMAC` 的 UPDATE 分支无
+条件写 `status='active'`，认领与管理员 Revoke 并发时会把刚拉
+黑的行翻回 active——下一次每小时防火墙 resync 就把被封设备重
+新放行。新增 `DB.ClaimMAC`：资格条件（active、未过期、无主或
+本人）全部进 WHERE 子句，认领只转移所有权、绝不碰
+status/expiry/label；`/user/macs/label` 同样改为
+`SetMACLabelOwned`（`WHERE user_id = ?` 原子守卫），改名不再
+能落在刚转走的设备上。回归测试覆盖：认领无主、幂等重认领、拒
+绝他人设备、拒绝并保持 blocked（不复活）、拒绝已过期、非属主
+改名被拒（端到端）。
+
+B. (LOW, 慢性内存泄漏) admin/user 两个 2FA 尝试计数 map
+（`twoFAAttempts`/`userTwoFAAttempts`）只在成功或锁定时删除条
+目——被放弃的 pending 登录（关标签页、5 分钟会话自然过期）每
+次泄漏一条，路由器数月不重启会无界增长。改为共享的
+`attemptTracker`：条目带首次尝试时间，map 超过 128 条时在插入
+路径按 15 分钟 TTL 清扫（远超 5 分钟 pending TTL，活跃暴破计
+数绝不会被误清）。回归测试断言过期条目被清、存活条目计数保留。
+
+C. (LOW, 数据损坏) 全部 14 处自由文本长度上限用字节切片截断
+（`label[:60]`、`notes[:1000]`、`reason[:200]`、`msg[:500]`、
+UA `[:80]` 等）——中文输入在边界处被从多字节 rune 中间切开，
+无效 UTF-8 原样入库：html/template 与 JSON 导出渲染成 U+FFFD
+替换符，CSV 导出直接输出坏字节。新增 `truncateRunes`（字节预
+算不变、回退到 rune 边界）并全站替换。回归测试逐字节预算断言
+永不产生无效 UTF-8。
+
+其余复查确认无缺陷（不改动）：pay 轮询/finalize/refund 互斥与
+金额核验、voucher 消耗-补偿链、backup VACUUM INTO+fsync、
+Alipay RSA2 验签与金额解析、scheduler/purge/expiry-reminder
+的 panic 防护与去重、CSRF/安全头/信任代理链、admin 三层 token。
+全量 `go test ./...` 与 `go test -race`（server/db 包）绿。
+
+## v0.116 — 深挖轮 2：管理端 CSV 导出静默截断修复 + 剩余子系统全覆盖复查
+
+v0.115 之后的第二轮独立全库审计（重点覆盖此前审计较少的面：
+sms/config/models/walledgarden/firewall-ipset/db-migrate/backup/
+notify/arp/openwrt 部署脚本/api_admin/SSE 流/模板 XSS 面），发
+现并修复一个真实缺陷。
+
+A. (MEDIUM, 静默数据丢失) 管理端 CSV 导出全线被 DB 层静默截
+断：各导出 handler（orders/users/macs/audit/sms-log/
+webhook-log/vouchers）向 DB 层请求 1000–10000 行，但
+`internal/db` 各查询函数的防御性 clamp 把「超过小阈值（100/
+200/1000）的 limit」直接重置回小默认值——例如
+`ListOrders(5000)` 实际只返回 100 行、`SearchUsers(…, 5000)`
+只返回 200 行。导出文件看起来正常、无任何警告，管理员拿到的
+对账/备份数据不完整（超过 100 单的月度对账即受影响）。修复：
+DB 层引入统一的 `clampLimit(limit, def)`（非正数→默认值，上
+限统一 10000），`ListOrders`/`SearchMACs`/`SearchUsers`/
+`ListVouchers`/`SearchAudit`/`SearchSMSLogs`/
+`SearchWebhookDeliveries`/`SearchOrdersFiltered` 全部改用；
+orders 导出上限提到 5000、vouchers 导出提到 10000。回归测试
+（`admin_export_limits_test.go`）对 6 类导出各插入超过旧阈值
+的行数并断言 CSV 行数不再截断。
+
+其余复查确认无缺陷（不改动）：Aliyun SMS 签名/并发安全与
+Console ring buffer、config 校验全链（bcrypt/totp/token 长
+度/时长负值/SMS provider 白名单）、schedule 跨午夜与 ISO 周
+日、walled garden 公网过滤/字面 IP/缓存 TTL、ipset
+build-aside-and-swap 原子替换、迁移的 user_version 门控 token
+哈希化、backup VACUUM INTO + fsync + .tmp 清扫、notify 单
+worker 的 re-enqueue 退避 + panic 恢复 + nil client 防御、
+模板无 template.HTML/JS 注入面、api_admin 三层 token 权限与
+1MiB 全局 body cap（csrfMiddleware 对含 /api 在内的全部路由
+生效）、SSE 流每 tick 复查会话存活、attention 3s 缓存的锁窗
+口正确。全量 `go test ./...` 与 `go test -race ./...` 绿。
+
+## v0.115 — 深挖轮：微信回调 nonce panic、限流器内存/CPU 上限、竞态测试修复
+
+v0.114 之后再做一轮全子系统深挖（支付回调解密、限流器资源上
+限、只读 token 三层权限、QR 端点、日程复活、walled garden DNS
+缓存、nft 超时、date() 统计、到期扫描原子性、CI/ipk/install.sh
+权限），发现并修复三个真实缺陷。
+
+A. (MEDIUM, 远程 panic DoS) `WeChat.DecodeNotify` 把通知体里攻
+击者可控的 `resource.nonce` 直接传给 `aead.Open`——Go 的 GCM
+在 nonce 长度不等于 12 字节时是 **panic** 而不是返回错误，且
+`/notify/wx` 的头部验签是软失败（平台证书拉取失败时仅记日志、
+继续走 AES-GCM 体认证），所以任何人 POST 一个 nonce 长度异常
+的 JSON 就能触发 panic（net/http 恢复后中断该连接并刷整页栈日
+志）。现在解密前校验 `len(nonce) == aead.NonceSize()`，不符返
+回 `ErrInvalidPayload`；`refreshPlatformCerts` 的证书解密同样
+加防（虽走 TLS 可信通道，防御性跳过坏条目）。回归测试覆盖
+空/过短/过长三种 nonce。顺带：`--check-config` 现在校验
+`pay.wechat.api_v3_key` 必须恰 32 字节（AES-256 要求），否则
+以前要到第一笔回调才在 `aes.NewCipher` 报错。
+
+B. (MEDIUM, 资源耗尽 DoS) IP 键控限流器（登录/找回密码等共 5
+个实例）的 hits map 只清理**过期**条目——窗口期内的活跃 key
+无上限。攻击者轮换 IPv6 源地址（一个 /64 有 2^64 个可用地址）
+以 1000 req/s 灌一小时即 360 万条目（数百 MB），足以打爆内存
+受限的路由器。两处修复：map 超过 8192 时硬性驱逐回 4096（在
+那个量级本来就是洪水，牺牲一点限流精度换不 OOM）；同时把原来
+「超过 4096 后每次插入都全表扫描」的 GC 改为按大小阈值摊销触
+发——修复前那本身就是 O(n)/请求的 CPU 燃烧点（回归测试从
+3.3s 降到 0.02s）。5 万唯一 key 洪水回归测试断言 map 恒
+≤8192。
+
+C. (LOW, 假红 CI) `TestAdminTestWebhookEnqueuesEvent` 的捕获
+服务器先递增 hits 再写 lastBody，而等待方把 hits≥1 当作
+「body 已就绪」——-race 调度下主 goroutine 可在两步之间读到
+空 body；且单次 `r.Body.Read` 本就可能只读到部分分块。改为
+`io.ReadAll` 全量读取后再递增计数。该测试在本轮全量 -race 中
+实际失败过一次，非理论问题。
+
+其余复查确认无缺陷（不改动）：`/api/pay/qr` 仅编码 DB 中
+qr_payload（开放编码器已在 v0.105 关闭）、SSID/voucher QR 均
+在 admin 门禁后、只读 token 的 Read/Write/Privileged 三层
+（备份流属 Privileged）、`/api/admin/sessions` 不回 token、
+voucher 列表只回 4 字符前缀、日程复活已有
+TestScheduleEnforceDoesNotResurrectConcurrentRevoke 覆盖、
+`audit_log.at` 由 SQLite CURRENT_TIMESTAMP 写入故 `date(at)`
+可解析（不属 v0.107 那类 Go 格式回归）、`ExpireDueMACs` 为单
+条原子 UPDATE...RETURNING、walled garden DNS 失败缓存/公网过
+滤/IPv6 映射剥离均有测试、nft/ipset 全部 exec 路径带 5s 超
+时、install.sh 密钥文件用 `install -m 0600 /dev/null` 预建无
+权限窗口、CI 含 -race/ipk 结构与 0600 校验/aarch64 断言/
+Docker 健康检查。全量 `go test -race ./...` 绿。
+
+## v0.114 — 合并收尾 + 全库复audit：VACUUM 快照 fsync、导出文件名注入
+
+v0.113 合并落地后的收尾轮：先把 PR #14 (merge-audit-hardening)
+的 12 个提交全部合入（其 merge-base 即本分支 HEAD，语义无冲
+突，全量测试 + race 通过）；再对 PR #1/#2/#3 与全部 22 条
+origin/cursor/* 分支做最后一遍逐提交内容级比对，确认除下述一
+项外全部已有等价实现；最后对 web 处理器、支付回调、2FA/信任设
+备、防火墙、walled garden、后台任务、DB 事务层做整轮复查。
+
+A. (LOW→MEDIUM, 备份耐久性；PR #3 漏网移植) 备份轮转器的
+`VACUUM INTO` 路径在 rename 发布快照前不做 fsync。SQLite 写
+VACUUM INTO 目标时不保证落盘（synchronous 不作用于目标库），
+在路由器常见的延迟分配文件系统（ext4/f2fs）上，rename 之后断
+电可能留下一个顶着合法快照名的零长度/半截「备份」——恰好是
+v0.108 给 checkpoint+copy 回退路径加 fsync 时修的同一类问题，
+主路径漏掉了。现在 VACUUM INTO 产物同样先 `fsync` 再
+rename，失败则删除临时文件报错（下一轮重拍）。
+
+B. (LOW, 头注入面) `/admin/vouchers/export.csv` 把自由文本的
+`?batch=`/`?status=` 原样拼进 `Content-Disposition` 的
+quoted-string 文件名。net/http 会中和 CR/LF，但双引号原样通
+过：名为 `x";evil="1` 的批次可以逃出引号、向响应头走私附加参
+数，且跨浏览器 RFC 6266 解析行为不一致。其余导出端点在 v0.107
+已统一为常量文件名，唯独 voucher 导出为自描述保留了批次名——
+现在过 `filenameSafe`（仅留 ASCII 字母数字与 `._-`，60 字符封
+顶）。过滤本身仍按原始批次值匹配，导出内容不变。回归测试断言
+头里恰好一对引号、无参数走私、行数据完整。
+
+其余复查确认无缺陷（不改动）：支付金额核验/finalize 防取消/
+退款互斥、session 与 trusted-device 哈希迁移的调用方全部传原
+始 cookie 值、panic 按钮 keep 语义、2FA 登录/确认/关闭的重放
+高水位与尝试上限、webhook 重入队 worker、walled garden 公网
+IP 过滤与部分 DNS 失败缓存、nft 原子事务与 5s 超时、
+purge/expiry/reminder 各 loop 的关机与去重语义、schedule 跨午
+夜窗口、Alipay RSA2 验签 + app_id 校验、WeChat 平台证书验签 +
+AES-GCM + mchid/appid 校验。顺带把 PR #14 带进来的迁移注释中
+过时的「v0.97」版本号改正为实际发布版本 v0.113。
+
+## v0.113 — 合并遗漏修复 + 新一轮审计：voucher 授予竞态、撕裂备份下载、SSID QR 泄漏
+
+两部分工作。第一部分把仍在未合并分支上的真实修复移植进来
+（对照 PR #1/#2/#3 及全部 origin/cursor/* 分支逐提交内容级比
+对，已被等价实现覆盖的不重复合并）；第二部分是新一轮子系统审
+计发现的三个新缺陷。
+
+### 新发现并修复（本轮审计）
+
+A. (HIGH, 并发丢失更新) `GrantFromVoucher` 没有持有 v0.110 引入
+的服务级互斥锁——同族的 GrantFromOrder / Extend / Revoke /
+Resync / ExpireDue 全部在锁内，唯独 voucher 授予路径漏掉。后果
+与 v0.110-A 完全同类：兑换的 `FW.Add` 落在并发 Resync 的
+「读活跃列表 → 全量重建」窗口内时，会被重建直接冲出内核集合
+——充值码已消耗、设备却离线，直到下一次对账。失败路径的
+resync 改用已持锁的 `resyncLocked`（避免自死锁）。确定性 gate
+回归测试（冻结 Resync 于 FW.Sync 内、并发跑 GrantFromVoucher）
+在修复前代码上验证会失败。
+
+B. (MEDIUM, 数据损坏) `/admin/backup` 与 `/api/admin/backup` 下
+载端点仍是 checkpoint 后直接 `io.Copy` 活库文件——v0.109 已给
+夜间轮转备份改用 `VACUUM INTO` 修掉撕裂快照，但按需下载路径漏
+掉了：下载期间落盘的写事务（支付、会话、审计）可撕裂页面，静
+默产出损坏的备份——恰恰是主库丢失后运维要恢复的那份文件。现
+在两个端点都先 `VACUUM INTO` 一致性快照再流式返回（临时文件用
+后即删），仅当 VACUUM INTO 本身报错才回退旧行为，与轮转器策略
+一致。
+
+C. (MEDIUM, 凭据泄漏 + 开放编码器) `/admin/ssid-cards/qr` 从查
+询串接受 `?ssid=&password=` / `?url=`：WPA 密码随 GET URL 进浏
+览器历史与访问日志（每次 <img> 拉取一行）；PNG 响应带
+`Cache-Control: public, max-age=300`，明示共享缓存可存储含密码
+的已认证响应；自由参数还让它成为我们域名上的开放 QR 编码器
+（与 v0.103 修掉的 /api/pay/qr 同类）。现改为枚举参数
+`?card=free|paid|secure|portal`，载荷全部服务端从配置解析，响
+应 `no-store`。回归测试钉住两个属性。
+
+### 从未合并分支移植（内容级比对后仅取 HEAD 仍缺失的）
+
+来自 PR #3 (cursor/comprehensive-optimization)：
+
+- (MEDIUM, sec) 会话令牌与受信设备（「记住此浏览器」跳过 2FA）
+  令牌改为 SHA-256 哈希落库——拿到 DB 文件或备份不再等于拿到可
+  重放的登录/免 2FA cookie。一次性迁移（PRAGMA user_version=1/2）
+  原地改写存量行，设备上的 cookie 继续有效、无人被登出。
+  /admin/sessions 撤销表单改为回传哈希，页面 HTML 不再内嵌每个
+  live 会话的原始 cookie 值。
+- (MEDIUM, sec) /admin/users/reset-password 生成的临时密码不再
+  经重定向 URL（?reset_pwd=...，浏览器历史/中间层日志都会留
+  存）传递，改走进程内一次性 flash 存储（2 分钟 TTL，弹出即
+  删，刷新页面不再显示）。
+- (MEDIUM, 正确性) Resync 现在感知时段计划：窗口关闭的 MAC 不
+  再被启动/手动/周期 resync 放回防火墙（此前会放行至多一分钟，
+  直到分钟级 enforcer 再移除）。到期巡检 cron 每个 tick 额外跑
+  一次 panic 隔离的 Resync，瞬时 nft 失败造成的防火墙漂移一小
+  时内自愈，无需重启或手动 /admin/resync。
+- (perf) attention 计数器 3 秒进程内缓存（此前每次管理页渲染、
+  仪表盘双查、每条 SSE 流每 5 秒各打 6 条 COUNT）；
+  /admin/users 的按用户 MAC 计数改为一条 GROUP BY；无过滤 MAC
+  列表在 SQL 层 LIMIT（此前全表进 Go 再截断）、管理页统一 500
+  行上限；/admin/devices 的计费行改为一条 IN 批量查询（此前每
+  设备一次 GetMAC）；/pay/success 的收据查找改为带 30 分钟反探
+  测窗口（窗口条件下沉到 SQL）的定向索引查询
+  `LatestPaidOrderForMAC`——旧的「扫最新 50 单」在支付后又产生
+  50+ 订单时会静默丢失收据链接。
+
+确认已被等价实现覆盖、未重复合并的：PR #1/#2 的 render 缓冲、
+payqr 编码器、批量导入（v0.102/103 已含）；PR #3 的金额校验、
+VACUUM INTO 轮转备份、webhook 队列排空、nft 原子事务、XFF 信
+任代理、finalize 防取消等；auth-2fa-csrf-port /
+background-jobs-deep-opt / firewall-garden-deploy /
+port-db-tx / port-remaining-fixes 各分支的全部提交（HEAD 均有
+等价实现）。
+
+## v0.112 — Web handler audit: CSP-dead inline JS, unbounded multipart bodies, cacheable voucher QRs
+
+Follow-up hunt over the web handler surface for the usual suspects.
+Confirmed already-correct (no change needed): every mutating UI handler
+is POST-only (no CSRF-exempt mutating GETs remain after the v0.108/109
+logout fixes), every rendered POST form carries the `_csrf` field with
+the right template scope, `missingkey=zero` is in effect and smoke-
+tested, clickjacking headers (X-Frame-Options SAMEORIGIN + CSP
+frame-ancestors 'self') apply to every response, and all session-bearing
+cookies are HttpOnly + Secure-on-TLS + SameSite=Lax. What remained was
+three real bugs:
+
+A. (HIGH, functional + safety) The CSP has shipped `script-src 'self'`
+(no 'unsafe-inline') since v0.8 — but the templates were full of inline
+`<script>` blocks and `onclick=`/`onsubmit=` attributes, ALL of which
+CSP-enforcing browsers silently refuse to run. Consequences in a real
+browser: every `confirm()` guard on a destructive action never fired
+(delete user / delete MAC / revoke session / panic button / cancel-stale
+/ trim logs all executed on first click with no prompt), the orders-page
+refund button did literally nothing (its dialog opener was an inline
+function), the /admin/macs bulk-select toolbar was dead, the backup-codes
+copy button was dead, the redeem-code input formatter never ran, and the
+portal service worker never registered. Fixed by externalizing all of it:
+new `static/ui.js` (delegated `data-confirm` / `data-print` /
+`data-dialog-close` handlers — delegation also covers rows injected by
+the devices SSE stream, whose generated `onsubmit` was equally blocked),
+`static/admin-macs.js` (bulk bar), `static/admin-orders.js` (refund
+dialog), `static/redeem.js`, `static/user-2fa-codes.js`, and the SW
+registration moved into `portal.js`. 43 inline handlers across 19
+templates became `data-*` attributes. `TestTemplatesAreCSPCompatible`
+pins the invariant (no inline scripts / handlers in templates or
+JS-generated markup; every referenced static script exists).
+
+B. (MEDIUM, DoS) `verifyCSRF` reads the token via `r.FormValue`, which
+for multipart bodies runs `ParseMultipartForm` — buffering the WHOLE
+body (everything past 32 MiB spills to temp files) with no total-size
+limit. Because the CSRF check runs in the auth wrappers BEFORE any
+handler code, handler-level `http.MaxBytesReader` caps (e.g. the 256 MiB
+cap in the restore upload) were installed after the body had already
+been consumed and never actually applied. Net effect: any client — even
+unauthenticated, e.g. against /user/forgot-password — could stream
+gigabytes of multipart at a form endpoint and fill the router's
+tmpfs/flash. csrfMiddleware now caps every request body at 1 MiB (far
+above the largest legitimate form, the import textareas) before anything
+parses it; the one genuinely big-body endpoint, `/admin/backup/restore`,
+keeps its advertised 256 MiB. Over-cap uploads now die at the CSRF gate
+with 403.
+
+C. (LOW) `/admin/vouchers/print/qr` served the QR PNG of a full
+unredeemed voucher code — a bearer value redeemable for paid days — with
+`Cache-Control: public, max-age=3600`, explicitly inviting shared proxy
+caches to store an authenticated admin response and leaving codes in
+browser disk cache on shared machines. Now `no-store`.
+
+## v0.111 — Deploy-script audit: uninstall left a dangling fw4 include, ipk broke image builds
+
+Audit pass over deploy/openwrt, the ipk maintainer scripts, Dockerfile
+and docker-compose. Confirmed already-correct: the nftables-1.0
+`fwd`→`forward` rename, the `PKG_UPGRADE` guard in prerm (no firewall
+teardown mid-upgrade), and client isolation on setup-secure-ssid.sh's
+update path. Fixed what remained:
+
+A. `uninstall.sh` removed `/usr/share/router-billing` but left the fw4
+`include` (registered by uci-defaults) pointing at the now-deleted
+`firewall-billing.sh` in `/etc/config/firewall` — every firewall reload
+after uninstall referenced a missing script. Uninstall now deletes the
+matching include section(s) (descending index order) and commits.
+
+B. `ipk/postinst` and `ipk/prerm` ran unconditionally on the build host
+when the package is installed into an image root (`IPKG_INSTROOT`
+set): `/etc/init.d/router-billing` doesn't exist there, so `set -e`
+failed the whole install — and the uci/nft paths would have targeted
+the host, not the image. postinst now creates the rc.d enable symlinks
+(S95/K10) inside the target root and exits; prerm exits immediately
+(nothing is running in a build root). SSID/firewall setup happens via
+uci-defaults at the image's first boot, as OpenWrt intends.
+
+C. All eight deploy scripts were mode 0644 in git (the Makefile papered
+over it with `install -m 0755` at package time, but a git checkout or
+extracted source tree had non-executable scripts). Exec bits set.
+
+D. shellcheck SC2086: unquoted `firewall.@zone[$IDX]` /
+`wireless.@wifi-iface[$SECTION]` uci arguments are glob patterns
+(`[0]` is a character class) and could be rewritten by pathname
+expansion. Quoted in uci-defaults and setup-secure-ssid.sh.
+
+E. `install.sh` generated the Free_WiFi key from 12 random bytes
+(16 base64 chars) — stripping `/+=` could leave fewer than the 12
+chars cut. Bumped to 18 bytes / 24 chars, matching the uci-defaults
+generator (which was already fixed for exactly this reason).
+
+## v0.110 — Concurrency: DB↔firewall lost updates serialized; duplicate reminder SMS
+
+Race-hunting pass over everything that pairs a SQLite mutation with a
+firewall or SMS side effect. The DB layer is transactional and both
+firewall backends serialize their own commands, but the PAIRING of the
+two was not atomic — concurrent actors (payment finalizer, hourly
+expiry scheduler, minute schedule enforcer, admin handlers) could
+interleave into firewall state that contradicts the DB until the next
+resync. All fixes carry deterministic regression tests (a one-shot gate
+freezes one actor inside its firewall/SMS call while the conflicting
+actor runs); each test was verified to fail against the pre-fix code.
+
+A. (HIGH) `MACService` now holds a service-level mutex across every
+composite DB+firewall operation (grant, extend, revoke, delete,
+replace, resync, expiry sweep, schedule enforcement). Closed lost
+updates, each of which knocked a PAYING customer offline (or left a
+blocked one online) for up to an hour:
+
+- a grant landing between `Resync`'s active-list read and its full
+  set rebuild was flushed straight back out of the kernel set;
+- a payment re-activating a MAC between `ExpireDue`'s DB flip and its
+  firewall-removal loop had its fresh `FW.Add` yanked by the sweep;
+- the minute schedule enforcer could re-add a MAC that a concurrent
+  admin revoke had just blocked and removed, for the rest of the
+  schedule window.
+
+`GrantFromOrder`'s failure-path resync now reuses the already-held
+lock (`resyncLocked`) instead of self-deadlocking.
+
+B. The immediate schedule apply (`/admin/macs/schedule` save + clear)
+moved from the handler into the locked service method
+`ApplyScheduleNow`: the v0.108 eligibility check was correct but ran
+unlocked, so a revoke/expiry landing between the row re-read and the
+`FW.Add` was silently overwritten. Clearing a schedule on an
+ineligible MAC now defensively removes it (previously: just didn't
+add).
+
+C. Overlapping expiry-reminder passes double-texted users: the hourly
+loop and the manual /admin/sms-log/expiry-reminders trigger share a
+22h audit-row de-dup window that is only written AFTER each SMS is
+delivered, so two concurrent passes both listed (and texted) the same
+owners. One pass at a time now — the second pass observes the first
+one's de-dup rows and sends nothing. SMS costs real money per message,
+so this was a billable bug, not just noise.
+
+## v0.109 — User logout CSRF + payment/voucher correctness
+
+### User logout CSRF hardening
+
+Deep-review follow-up closing a CSRF-logout vector that the v0.108 admin
+logout hardening left open on the user side. No product features.
+
+A. (MEDIUM) `/user/logout` ended the session on ANY method — including a
+plain GET — and performed no CSRF check, and `user_me.html` triggered it
+via a bare `<a href="/user/logout">` link. Because our session cookies
+are SameSite=Lax, cookies ride along on top-level cross-site GET
+navigations and on the speculative link-prefetches some browsers issue,
+so a hostile `<a>`/`<img>` or an eager prefetcher could silently sign a
+logged-in user out. This is the exact vector v0.108 fixed for
+`/admin/logout`; the user path had been missed. `/user/logout` is now
+POST-only with a CSRF token (GET bounces to `/user/me` with the session
+intact), and the account page renders logout as a POST form carrying the
+CSRF field.
+
+### Payment/voucher correctness: redeem burn compensation, refund/finalize serialization
+
+Deep pass over the money paths (orders, refunds, voucher redemption).
+Two real bugs, both of the "value consumed but not delivered" family
+that v0.106 already closed on the pay-finalize path.
+
+A. (HIGH) A redeemed voucher could be burned with nothing granted.
+`POST /redeem` consumed the code (`RedeemVoucher`) and then applied the
+days via `MACSvc.Extend` — which (a) ran on the request context, so a
+browser disconnect between "consumed" and "granted" aborted the grant,
+and (b) failed hard on a firewall-only error even though the DB grant
+had committed. Either way the customer's code stayed consumed:
+"授权失败请联系管理员", no automatic recovery — the exact hole the pay
+path fixed in v0.106 with `RevertOrderToPending`, missed on redeem.
+Now: the grant runs under `context.WithoutCancel`, uses the new
+`GrantFromVoucher` (same contract as `GrantFromOrder`: error only when
+nothing durable happened; firewall failures log + resync but don't
+fail a durable grant), and on a real grant failure the new
+`UnredeemVoucher` compensation puts the code back to unused (guarded
+by code + redeeming MAC so it can only undo that specific redemption)
+and tells the user to retry.
+
+B. Refunds could interleave with payment finalization. `finalizeOrder`
+serializes on `pollMu`, but both refund handlers (admin UI and the
+programmatic `/api/admin/orders/refund` meant for chargeback
+automation) called `MarkOrderRefunded` directly. A refund landing
+between `MarkOrderPaid` and `GrantFromOrder` saw status=paid, rolled
+back days that had not been granted yet, and then the grant landed
+anyway — a refunded order that kept its access (and, on the
+grant-failure branch, a `RevertOrderToPending` that could no longer
+fire). All refunds now go through `App.refundOrder`, which takes
+`pollMu` so a refund waits for any in-flight finalize and only rolls
+back a fully-granted order.
+
+Regression tests: firewall-down redeem still succeeds (DB is source of
+truth), grant-blocked redeem un-redeems the code and the retry works
+(simulated with a SQLite trigger on `macs`), `UnredeemVoucher` guard
+semantics, and refund blocking on `pollMu` until finalize completes.
+
+## v0.108 — Background-job reliability follow-up: hung-webhook backstop, fsync'd backups
+
+Deep-review follow-up to the v0.107 jobs merge, closing residual gaps
+on the same surface. No product features.
+
+A. (HIGH) The notify worker could still wedge forever on a single
+request: an endpoint that accepts TCP and never responds held the
+single worker goroutine for as long as the HTTP client allowed — and a
+Notifier whose HTTPClient had no Timeout (http.DefaultClient has none)
+allowed forever. Every delivery attempt now runs under a hard
+per-attempt context deadline (`AttemptTimeout`, default 30s)
+independent of the client config; a timed-out attempt still retries on
+schedule. A nil HTTPClient no longer nil-panics per event. Response
+bodies are drained (bounded) before close so keep-alive is reused.
+
+B. Backup fallback copy is fsync'd before rename. Without the flush, a
+power cut shortly after rename could leave a zero-length "backup" on
+ext4/f2fs.
+
+C. A snapshot whose context is already canceled no longer falls through
+to checkpoint+copy without a WAL checkpoint. It aborts cleanly
+(removing `.tmp`).
+
+D. An expiry-reminder pass stops once its context is canceled instead
+of writing one `expiry_reminder_failed` audit row per leftover MAC.
+
+E. Admin-digest audit rows use `context.WithoutCancel`, and the manual
+digest trigger detaches from the request context.
+
+## v0.107 — Consolidated hardening: merge of PRs #5–#13
+
+One combined release merging nine parallel hardening branches (test
+hardening, DB transactions/time/indexes, firewall/portal, background
+jobs, portal/user security, admin API, auth/2FA/CSRF, admin UI,
+config/CI/docker). Where branches fixed the same bug independently the
+stronger fix won:
+
+- nftables List(): the JSON-based parser (firewall branch) replaced the
+  text-anchored parser (test branch); both fixed the dropped-first-MAC
+  bug, and the exec-level regression tests were ported to the JSON API.
+- Client-IP attribution: security.trusted_proxies (auth branch, CIDR
+  allowlist + realIPMiddleware, last-XFF-entry semantics) replaced the
+  portal branch's security.trust_proxy_headers boolean; all call sites
+  now go through the middleware-resolved IP.
+- Walled garden: full-list atomic rebuild with timeout refresh
+  (firewall branch) combined with the public-IPv4 answer filter and
+  literal-IP passthrough (portal branch).
+
+Also includes the test-hardening branch's new coverage for config
+loading, schedule enforcement, arp/sightings exec paths and the JSON
+logger. Details per area below.
+
+### Firewall/portal correctness: 22.03 apply failure, walled-garden 25h death, List drops a MAC, paid-zone router exposure
+
+Correctness pass over the MAC whitelist, the captive-portal redirect
+and the paid/free SSID split. Everything below was verified against a
+live kernel (nft 1.0.9, the OpenWrt 23.05 userspace).
+
+A. (HIGH) firewall-billing.sh failed WHOLESALE on OpenWrt 22.03. The
+`tcp dport 443 reject` sat in the nat/prerouting chain, but kernels
+before 5.11 only allow the reject statement in input/forward/output
+(nft_reject validate; prerouting was added in commit 117ca1f8920c) —
+and 22.03 ships kernel 5.10. The kernel refuses the whole `nft -f`
+transaction at commit time, so apply produced ZERO billing rules and
+every Paid_WiFi device was online for free — the exact failure mode
+v0.104 fixed for the `fwd` keyword, reintroduced one hook down.
+(`nft -c`/"verified parsing" can't catch it: the EOPNOTSUPP comes from
+the kernel at commit.) The 443 reject now lives in the forward chain
+(valid on every kernel this project supports) as `reject with tcp
+reset`, which is also the correct signal for captive-portal probes.
+HTTP redirect stays in prerouting; behavior for clients is unchanged.
+
+B. (HIGH) The walled garden silently died after 25 hours of daemon
+uptime. Elements carry a 25h timeout, but the kernel does NOT refresh
+an element's expiry when it is re-added — and the resolver only pushed
+IPs it hadn't seen before. Stable payment-server IPs (WeChat/Alipay
+resolve very consistently) therefore expired out of the set and were
+never re-added: unpaid devices could no longer reach the payment
+servers, i.e. nobody could pay, until the daemon restarted. The
+resolver now pushes the FULL resolved list every refresh cycle and the
+new Manager.SyncWalledGardenIPs rebuilds the set atomically (one
+`nft -f -` transaction) with fresh 25h timeouts. IPs are validated as
+plain IPv4 before they enter the nft script — DNS answers are
+attacker-influenced input. A total DNS outage leaves the set alone
+(drains via timeout) instead of wiping it.
+
+C. (HIGH) nftables List() dropped the first MAC of every listing (the
+same bug PR #5 fixed on its branch, independently confirmed here
+against real nft output). The text parser cut from the TABLE's opening
+brace, split on commas and truncated tokens at the first space, so the
+first element — glued to "set mac_paid { … elements = {" — was always
+discarded. Any consumer reconciling DB↔firewall from List would
+conclude that MAC was offline. List now parses `nft -j` JSON with the
+same parser Counters uses.
+
+D. (MED) Sync (nft backend) was flush-then-add as two separate nft
+processes: every resync briefly exposed an EMPTY whitelist (paid users
+redirected to the portal mid-session), and an error between the two
+calls left it empty until the next resync. Both operations are now one
+`nft -f -` netlink batch — readers see old or new membership, never
+the gap, and a failed transaction keeps the old set. The ipset backend
+had the same flaw (`ipset restore` replays lines, it is not a
+transaction, despite the comment): it now stages into `mac_paid_swp`
+and uses `swap`, which IS atomic; the live set is never flushed.
+
+E. (MED, security) The fw4 paid zone was created with input=ACCEPT,
+exposing every service on the router itself — dropbear/SSH, LuCI,
+anything listening — to unpaid strangers on the open SSID. The
+explicit Allow-DHCP/DNS/Portal rules that have always been generated
+alongside it only make sense with input=REJECT, which is what the zone
+now gets; the three allows keep DHCP, DNS and the portal working.
+Re-running the uci-defaults script (which an ipk upgrade does
+automatically) migrates existing ACCEPT zones; manual installs can run
+`sh /etc/uci-defaults/99-router-billing-ssid` or flip
+`uci set firewall.@zone[N].input='REJECT'` by hand.
+
+F. (MED) opkg upgrades opened a free-internet window: prerm runs on
+upgrade too (remove-then-install) and purged the whole billing table,
+so redirect/drop rules were gone while the new package unpacked. prerm
+now skips the purge when opkg signals PKG_UPGRADE=1; real removals
+still purge.
+
+G. setup-secure-ssid.sh's "SSID exists, update the key" path had never
+worked: `awk -F'[].[]' {print $2}` extracts the literal "@wifi-iface",
+not the section index, so the subsequent `uci set` always errored out
+under `set -e`. Now extracted with an anchored sed capture (the
+uninstall.sh how-to had the same field bug, plus it deleted sections
+in ascending index order — deletions shift later indices — now
+descending). The key is also recorded into wifi-keys.txt like
+install.sh does.
+
+H. ipk installs brought the Free SSID up OPEN: only install.sh
+generated FREE_KEY, but the uci-defaults script runs with an empty
+environment from postinst / first boot. It now generates the key
+itself when it is about to create the SSID without one, and records it
+in /etc/router-billing/wifi-keys.txt (0600), same as install.sh.
+
+I. Hardening: paid SSIDs get AP client isolation (isolate=1 — the open
+paid network is all strangers; the free/friends SSID stays isolate=0);
+config.yaml is installed 0600 instead of 0644 (it holds the admin
+bcrypt hash and WeChat/Alipay merchant keys) by both install.sh and
+the ipk build, and install.sh tightens existing installs.
+
+New regression tests: real nft-1.0.9 JSON List output keeps the first
+MAC; sync payloads are single transactions (flush-only when empty);
+walled-garden payload validates/rejects IPv6, garbage and nft-script
+injection; the resolver re-pushes the full list every cycle and leaves
+the set alone on DNS outage; the ipset restore script stages+swaps and
+never touches the live set directly.
+
+### DB layer: broken date() stats, expiry-sweep atomicity, tx gaps, indexes
+
+SQLite/Go correctness pass over internal/db.
+
+A. (HIGH) Two daily stats were permanently zero. modernc.org/sqlite
+stores Go-bound time.Time as "2006-01-02 15:04:05.999 +0000 UTC" — a
+format SQLite's date() function returns NULL for. So SnapshotToday's
+`date(paid_at) = date('now')` recorded paid_orders = 0 in every daily
+snapshot ever taken, and Attention's `date(created_at) = date('now')`
+kept the FailedToday dashboard chip at 0 no matter how many orders
+failed. Both now compare against datetime('now','start of day'),
+which works lexicographically on the shared "YYYY-MM-DD HH:MM:SS"
+prefix — the same pattern DashboardSnapshot already used (its comment
+even warned about date(); the two older call sites never got the
+memo). SnapshotToday also no longer swallows the count error.
+
+B. (MED) ExpireDueMACs was a SELECT list followed by a separate
+blanket UPDATE — not atomic. A MAC extended between the two
+statements stayed active but was still in the returned list, so the
+caller revoked firewall access for a customer who had just renewed; a
+MAC expiring between the statements got flipped but was never
+reported, so its revoke webhook/notify never fired; and two
+concurrent sweeps could both report the same MAC (double webhooks).
+Now a single `UPDATE ... RETURNING mac` — flip and report are one
+atomic statement, each due MAC is claimed by exactly one sweep.
+
+C. (MED) ClearUserTOTP ran three separate statements (wipe secret,
+delete backup codes, delete trusted devices). A failure after the
+first left 2FA off WITH live trusted-device tokens that would
+silently bypass the next enrollment's challenge. All three writes now
+commit in one transaction.
+
+D. (MED) SuspendUser's session purge was a separate best-effort
+statement whose error was discarded — a failed delete left the
+suspended user with a working session until natural expiry.
+DeleteUser had the same swallowed-error pattern. Both are now single
+transactions that propagate errors.
+
+E. (LOW) BumpPasswordResetAttempts was UPDATE-then-SELECT; two
+concurrent failed verifies could both read the same post-increment
+value, under-counting attempts against the brute-force cap. Now one
+`UPDATE ... RETURNING attempts`.
+
+F. (PERF) Missing indexes: sessions(user_id) — every per-user session
+op (suspend purge, "sign out other devices", list, count) scanned the
+whole table; and audit_log(action, target) — the daily expiry-
+reminder loop's correlated NOT EXISTS probe re-scanned every
+expiry_reminder row per candidate MAC. Both added via schema.sql's
+idempotent CREATE INDEX IF NOT EXISTS, so existing deploys pick them
+up on next startup.
+
+Regression tests for all of the above, including concurrency tests
+(verified under -race) that fail on the pre-fix code.
+
+internal/db/db.go
+internal/db/schema.sql
+internal/db/tx_time_index_test.go
+
+### Background-job reliability: webhook pipeline stall, SMS spam, torn backups
+
+Reliability pass over the background jobs (scheduler, notify worker,
+SMS loops, backup rotator, purge janitor). Complements v0.107's DB
+fixes; no product features.
+
+A. (HIGH) The webhook notify worker retried failures in-place, sleeping
+through the backoff (up to ~5.5 min per event on the default 2s/30s/5m
+schedule) on the single goroutine that drains the 64-slot queue. One
+dead/slow endpoint stalled the whole pipeline until the queue
+overflowed and later pay/grant/revoke events were silently dropped.
+Retries are now scheduled with a timer and re-enqueued, so fresh
+events keep flowing while a failed one waits its turn. (Retried events
+may arrive out of order relative to newer ones — receivers should key
+on the event payload, not arrival order.)
+
+B. (HIGH) A panic in the notify worker — including the OnDelivery hook
+that persists webhook_deliveries rows — or in one scheduler expiry
+pass was unrecovered, killing the entire process (billing UI, payment
+webhooks, firewall enforcement) over one bad tick. Both now recover,
+log, and continue.
+
+C. (HIGH) Backup snapshots could be silently corrupt: the rotator
+checkpointed the WAL and then byte-copied the live DB file, so any
+write landing mid-copy (order paid, session created) tore pages in the
+copy — discovered only when restoring after losing the primary.
+Snapshots now use `VACUUM INTO` (transactionally consistent under
+concurrent writers), written to a .tmp and renamed, clamped to 0600.
+Falls back to checkpoint+copy only if VACUUM INTO itself errors.
+
+D. Backup rotator could wedge a full flash partition permanently:
+prune only ran after a successful snapshot, so once the disk filled,
+every snapshot failed and nothing was ever freed. Prune now runs even
+when the snapshot fails. Orphaned `*.db.tmp` files from interrupted
+snapshots (which the prune filter used to skip forever) are removed
+once they're an hour old, and a failed copy flush no longer leaks its
+partial .tmp.
+
+E. (SMS spam) The expiry-reminder de-dup marker is an audit row written
+AFTER the SMS goes out — with the caller's context. If that context
+died in between (admin closed the manual-trigger page mid-pass, server
+shutdown), the insert failed silently and every later hourly pass
+re-texted the same users until the MAC expired. De-dup/outcome audit
+rows and the sms_log row now use context.WithoutCancel, and the manual
+trigger detaches from the request context entirely (same rationale as
+the v0.106 payment-finalize fix). /admin/maintenance/expire-now is
+likewise detached so a client disconnect can't split the DB expiry
+flip from the firewall resync.
+
+F. Daily admin digest fired one hour EARLY: the loop scheduled at
+`hour-1` while config documents "at the given UTC hour" (1..24, 24 =
+midnight). Also, after a suspend/clock step of N days the loop's
+`target += 24h` catch-up fired N digest SMSes back-to-back; the next
+send is now recomputed from the wall clock (extracted into testable
+`nextDigestAt`).
+
+G. Reminder SMS body understated remaining time by truncating
+(71h → "2 天"); now rounds up ("3 天").
+
+H. Aliyun SMS adapter: a literal &Aliyun{} (nil nowFn/nonceFn) panicked
+inside whichever background goroutine sent the SMS; lazy in-place
+HTTPClient/Endpoint defaulting inside Send was a data race under the
+concurrent senders (reminder loop, digest loop, login alerts). Both
+fixed with local-variable defaults and nil guards.
+
+I. The purge janitor only ever ran 2h after boot, so routers that get
+power-cycled daily never purged expired sessions / audit / sms /
+webhook logs at all. One housekeeping pass now runs at boot (the
+weekly VACUUM intentionally still waits — a daily-rebooted router
+should not VACUUM daily).
+
+Regression tests cover: fresh events flowing past a failing event's
+backoff, retry completion, OnDelivery-panic survival, scheduler
+panic survival, digest hour semantics + clock-jump absorption,
+reminder de-dup across a mid-pass context cancel, day-count rounding,
+snapshot integrity under a live DB (PRAGMA integrity_check), prune
+running despite snapshot failure, stale .tmp cleanup, boot-time purge
+pass, Aliyun zero-value Send and concurrent-Send race (-race).
+
+### Security: X-Forwarded-For rate-limit bypass, SSE session leak, /pay/success order oracle, walled-garden LAN hole
+
+Four independent portal/user-surface fixes:
+
+A. clientIP() trusted X-Forwarded-For unconditionally. On the default
+deployment (binary listening directly on the router LAN, no reverse
+proxy) that header is client-controlled, so ONE spoofed header per
+request defeated every IP-keyed rate limiter: unlimited voucher-code
+guesses at /redeem (the only brute-force defense on 12-char codes),
+login floods, /api/pay/create order floods, forgot-password SMS
+pumping — and forged the IPs written into the audit log. XFF is now
+only honored behind the new opt-in `security.trust_proxy_headers`
+config (set it ONLY when a proxy you control overwrites the header).
+
+B. /admin/devices/stream and /admin/stats/stream checked the admin
+session only at connect time. A revoked session (panic button,
+revoke-all, logout elsewhere) or an expired one kept receiving live
+device data — MACs, IPs, DHCP hostnames, revenue counters —
+indefinitely, since heartbeats keep the connection open forever. Both
+streams now re-validate the session cookie on every tick/heartbeat
+and close when it's gone.
+
+C. /pay/success?mac= accepted any raw string and always looked up the
+most recent PAID order for it — anyone who knew a neighbor's MAC
+(they're broadcast on the LAN) could fetch their order number and
+from it the full /receipt (amount, plan, order/trade numbers), any
+time. The param now goes through NormalizeMAC, and the receipt link +
+expiry row only render for orders paid in the last 30 minutes (the
+page is only ever reached right after paying) or for the requester's
+own detected device.
+
+D. Walled-garden DNS answers pointing at loopback / RFC1918 /
+link-local / CGNAT / multicast / 240/4 space are rejected before
+entering the nftables bypass set. Previously a misconfigured or
+hostile upstream resolver answering 192.168.1.1 for a garden CDN
+domain let UNPAID devices reach the router itself (or other LAN
+hosts) ahead of the drop rule. Literal IP entries configured in
+`walled_garden.domains` still pass verbatim (explicit admin intent).
+
+Also: db.RedeemVoucher's mark-redeemed UPDATE now re-asserts
+`redeemed_at IS NULL AND revoked = 0` in its WHERE clause
+(compare-and-set), so a double-spend can't win even if the
+SetMaxOpenConns(1) serialization ever changes.
+
+Tests: XFF ignored by default / honored when trusted, redeem limiter
+survives header rotation, both SSE streams close within ticks of
+session revocation (real httptest.Server), fresh-vs-stale receipt
+gating + reflected-garbage mac, 16-goroutine single-winner redeem
+(race detector clean), non-public DNS answers filtered vs literal IP
+passthrough.
+
+### Admin API: backup scope escalation, grant ownership clobber, CSV formula injection
+
+Four admin-API security fixes:
+
+A. /api/admin/backup accepted READ-ONLY Bearer tokens. The raw SQLite
+file contains plaintext session tokens (which mint live admin/user
+cookies), password hashes, TOTP secrets, full unredeemed voucher
+codes, and SMS message bodies — exactly the material every JSON read
+endpoint deliberately strips. A leaked monitoring token was therefore
+a full-scope token in disguise. The route now goes through
+requireAPITokenPrivileged, which rejects readonly tokens with 403 on
+every method. Off-router backup automation must use a non-readonly
+token (which it should have anyway — it holds the whole DB).
+
+B. /api/admin/users/grant and /api/admin/users/grant-by-phone listed a
+user's MACs and then extended each one through the unconditional
+UpsertMAC path, which OVERWRITES macs.user_id. A device transferred
+to a different user between the list and the per-MAC write (user-side
+replace/claim flow) was silently re-extended AND reassigned back to
+the granted user. New db.ExtendMACOwned / MACSvc.ExtendOwned guard
+the update with WHERE user_id = ? in a single statement; a row whose
+ownership changed is skipped (logged, excluded from macs_extended),
+never stolen.
+
+C. CSV exports (/admin/export/{macs,orders,users,audit,sms-log,
+webhook-log}.csv + /admin/vouchers/export.csv) wrote user-influenced
+text raw. MAC labels are settable by END USERS via /user/macs/label;
+audit detail, SMS bodies, and gateway error strings carry external
+text too. A label like =HYPERLINK(...) or a DDE payload executes when
+the admin opens the export in Excel/LibreOffice. All text cells now
+pass through csvCell, which prefixes ' when the first non-space byte
+is one of = + - @ TAB CR. Timestamps/ids/normalized MACs are
+unaffected.
+
+D. /api/admin/orders/cancel-stale silently discarded JSON decode
+errors, so a malformed body ({"older_than_hours":"48"} — string, not
+int) fell back to the 24h default and canceled a MORE aggressive
+window than the caller asked for. Empty body still means the
+documented 24h default; malformed non-empty JSON is now a 400 with
+zero cancellations.
+
+Tests: readonly backup 403 (+ no DB bytes, no audit row, 401 without
+token), ExtendOwned skip/extend matrix + grant-by-phone end-to-end
+isolation, csvCell unit matrix + macs/audit/sms-log export round-trips
+through encoding/csv, cancel-stale malformed-JSON 400 with order
+untouched.
+
+### Auth hardening: TOTP one-time use, backup-code race, XFF rate-limit bypass, admin-2FA CSRF, reset enumeration
+
+Five distinct fixes across login / 2FA / forgot-password, each with
+regression tests:
+
+1. **TOTP codes are now one-time use** (RFC 6238 §5.2). A 6-digit code
+   used to stay valid for its whole ±1-step window (~90 s) — anyone
+   who saw the victim type it (shoulder-surf, phishing relay) could
+   immediately reuse it to open a second session, or to pass the
+   2FA-disable check. `totp.MatchingStep` reports the timestep a code
+   matched and the server keeps a per-secret high-water mark; a replay
+   is treated exactly like a wrong code. Applies to user login 2FA,
+   admin login 2FA, and user 2FA disable.
+
+2. **Backup-code double spend under concurrency.**
+   `MarkBackupCodeUsed` never reported whether the conditional UPDATE
+   actually landed, so two logins racing on the same code could both
+   read it as unused and both pass. It now returns a consumed flag and
+   `verifyAndConsumeBackupCode` requires it — exactly one racer wins.
+
+3. **X-Forwarded-For no longer defeats per-IP rate limits.**
+   `clientIP` trusted the FIRST XFF entry from anyone; a direct client
+   could stamp a fresh fake IP per request and walk through every
+   per-IP limiter (login, register, forgot-password issue/verify) and
+   forge the ip= recorded in audit rows. The header is now ignored
+   unless the request arrives from `security.trusted_proxies` (new
+   config, single IPs or CIDRs, default empty = never trust), and when
+   trusted we take the LAST entry — the one the proxy appended — never
+   client-supplied leading entries. Deployments behind nginx/Caddy
+   should list the proxy address to keep per-client keying.
+
+4. **/admin/login/2fa POST now CSRF-checked** like its user-side
+   counterpart (checked before the attempt counter, so a cross-site
+   form can't silently burn the 5-attempt budget and lock the admin
+   out of a pending login). Template carries the `_csrf` field.
+
+5. **Forgot-password verify no longer enumerates accounts.** Probing
+   `/user/forgot-password/verify` with a made-up code answered
+   验证码错误 for unregistered phones but 已过期 for registered ones —
+   a registration oracle that never sent an SMS. Both now answer
+   已过期, and neither path runs bcrypt so timing is uniform as well.
+   Related: `/user/login` now burns a dummy bcrypt comparison on
+   unknown phones so response timing doesn't reveal registration
+   either.
+
+### Admin UI correctness: logout CSRF, schedule/firewall leak, stale badges, filtered exports
+
+Correctness pass over the admin templates and the handlers that feed
+them.
+
+A. (HIGH) Clearing a MAC's schedule — or saving one whose window is
+currently open — re-added the MAC to the paid nftables set
+unconditionally. A BLOCKED or EXPIRED device regained internet access
+until the next resync tick. Both the clear branch and the
+immediate-apply path (`applyOneSchedule`) now check eligibility
+(status=active AND not expired) first, and the apply path defensively
+removes ineligible MACs instead.
+
+B. (MED) `/admin/logout` was a GET link. SameSite=Lax cookies ride
+along on top-level cross-site GET navigations and on speculative link
+prefetches, so a hostile link — or an eager browser prefetcher walking
+the sidebar — could sign the admin out (session fixation setup /
+denial of service). Logout is now POST + CSRF; the sidebar renders a
+form styled like the old link, and GET bounces to the dashboard with
+the session intact.
+
+C. The 最近在线 pill on `/admin/macs/detail` showed 在线 whenever ANY
+sighting row existed, even one from weeks ago. It now applies the same
+10-minute recency window as `/admin/devices` and shows 离线 otherwise.
+
+D. `/admin/login?err=…` codes from the 2FA flow (`2fa_expired`,
+`2fa_locked`, `2fa_misconfigured`) were silently dropped on the GET
+render — an expired pending-2FA session bounced the admin to a blank
+form with no explanation. They now render as proper messages; unknown
+codes are not echoed. `errLabel` also gained real messages for the
+plan-validation codes (`bad_key`, `label_too_long`, `days_too_large`,
+`price_too_large`) plus `not_found` / `bad_mac` / `db`, which used to
+surface as raw code strings.
+
+E. Filters/links: the orders header's 已过滤 badge ignored the
+`user_id` filter; the `/admin/macs` attention links dropped the status
+filters their dashboard twins carry; `ok=audit_trim` had no flash on
+the audit page; order numbers on the user detail page weren't links.
+
+F. The SSE frames on `/admin/devices` were unsorted, so two seconds
+after page load the carefully ranked list (online-unknown first, then
+online-known, …) reshuffled into DB order. Frames now sort with the
+same ranking as the initial render.
+
+G. CSV exports: `orders.csv` / `audit.csv` are named
+`*-filtered.csv` when any filter is active, so a partial download
+isn't mistaken for the full dataset; the MAC export's in-memory search
+post-filter was case-SENSITIVE (`q=office` missed "Office-Printer")
+while the page itself uses case-insensitive LIKE — now lowercased on
+both sides.
+
+H. Tests: `pages_smoke_test.go` dropped the nonexistent `/admin/2fa`
+URL (it vacuously passed by rendering the portal catch-all), gained
+filtered-URL variants, and now asserts every admin page actually
+renders the admin shell. New regression tests cover the schedule
+firewall eligibility, logout semantics, login error surfacing, the
+sighting recency pill, and export filenames/case-insensitivity.
+
+### Config strictness, packaging fixes, CI stops trusting itself
+
+Platform pass over config validation, the Docker dev path, the .ipk
+packaging, and the CI checks that were quietly green while things were
+broken. Extends v0.104's strict `--check-config` — every item below
+fails at load time instead of misbehaving at runtime.
+
+A. Config validation holes closed (all previously passed --check-config):
+
+- `security.password_strength` typos (e.g. "strong") silently meant
+  lax — a hidden security downgrade. Now only ""/lax/strict validate.
+- Empty `api_tokens[].token` entries were silently ignored at runtime
+  (operator believes a token exists; every request 401s). Tokens now
+  must be ≥16 chars, unique, non-empty; rate_limit_per_min ≥ 0.
+- `password_hash` wasn't checked to be bcrypt — pasting a sha256 hex
+  (or the plaintext) locked the admin out with no diagnostic. Same for
+  non-base32 `totp_secret`: Verify() always false = permanent 2FA
+  lockout discovered at the login prompt. Both are validated at load.
+- Plaintext admin passwords must be ≥8 chars (bcrypt hashes are
+  exempt; `changeme` in the example config remains exactly at the
+  floor). Setting both password AND password_hash is now an error, as
+  are duplicate admin usernames across admin:/admins[].
+- `listen`/`portal_port`/`portal_host` were never validated — a
+  missing colon in listen passed --check-config and died at bind.
+- Negative durations (scheduler/backup/walled-garden intervals) were
+  silently replaced by hardcoded fallbacks deep in each goroutine.
+- `firewall.backend` typos passed --check-config, then log.Fatal'd at
+  boot. Validation mirrors firewall.NewBackend's accepted names.
+- `sms.provider` typos and incomplete aliyun credentials degraded to
+  "SMS disabled" with only a log line — password-reset texts just
+  never arrived in prod. Now rejected, along with out-of-range
+  expiry_reminder_days / admin_digest_hour.
+- `webhook.url` must be an absolute http(s) URL and requires a
+  secret — unsigned webhooks can't be verified by the receiver, so
+  anyone finding the endpoint could forge payment events.
+- Walled-garden domain entries that are URLs ("https://x/path") never
+  resolve; the resolver retried the bogus lookup forever while
+  payment hosts stayed unreachable. Bare domains enforced.
+- Security knob ranges (admin_session_hours, user_session_days,
+  audit_log_keep, auto_cancel_stale_order_hours, hsts_max_age_seconds)
+  are rejected when out of documented range instead of being silently
+  clamped to something the operator didn't ask for.
+
+B. Docker dev path was entirely broken and CI was green: the image put
+web assets at /app/web while the compose-mounted config.example.yaml
+points web_root at /usr/share/router-billing/web — template parsing
+fatal'd on boot, so `docker compose up` never worked. Assets moved to
+the config's path (matching the .ipk layout). Added a /healthz-based
+HEALTHCHECK to the image, and cap_drop ALL + no-new-privileges +
+healthcheck to docker-compose (image already ran non-root as `rb`).
+
+C. .ipk packaging: the control file's hardcoded `Version: 0.6` was
+shipped in every build — `opkg upgrade` never saw a newer version.
+The Makefile now stamps VERSION into the staged control, and
+release.yml passes the tag (v0.108 → 0.108) so the binary's
+--version, the ipk filename and the control field all agree. Also:
+`ipk` added to .PHONY; the old archive is removed before `ar -rc`
+(ar UPDATES an existing archive, risking stale member order —
+debian-binary must be first for opkg); tar uses --numeric-owner; and
+/etc/router-billing/config.yaml ships 0600 instead of world-readable
+0644 (it holds admin credentials, pay keys and API tokens).
+
+D. CI false greens: build-arm64 would happily upload an x86-64 binary
+if GOARCH regressed (now `file`-checked for aarch64); `make ipk`
+exiting 0 said nothing about installability (structure, member order,
+control fields, version/filename agreement and config perms are now
+verified); and the Docker image was never built at all (new job:
+build, assert non-root uid, --check-config in-container, and boot to
+a healthy /healthz with all capabilities dropped).
+
+E. `--gen-password-hash` echoed the password to the terminal despite
+its "no echo if TTY" comment — it now uses term.ReadPassword on TTYs
+(piped stdin still works) and enforces the same 8-char floor as the
+config validator.
+
+Tests: config_test.go grows a Load()-based rejection table covering
+every new validation rule, acceptance tests for hardened configs and
+password_strength case-variants, and a test pinning
+config.example.yaml itself as valid so the example can't drift from
+strict --check-config even if the workflow step is reshuffled.
+
+## v0.106 — Payment hardening: refund-replay resurrection, amount cross-check, lost grants
+
+Money/security pass over the payment finalize path.
+
+A. (HIGH) Redelivered payment notifications could resurrect refunded
+orders. Both WeChat and Alipay redeliver success notifications for up
+to ~24h; MarkOrderPaid had no terminal-state guard, so a redelivery
+(or a replayed capture) arriving AFTER an admin refund flipped the
+order refunded→paid and re-granted the MAC days — the customer kept
+the refund AND the access, and the books showed the order paid.
+`refunded` is now terminal: the notification is acked (so the PSP
+stops retrying) without touching the order or the MAC. The UPDATE is
+additionally guarded on the status that was read, so a refund racing
+a webhook can't be overwritten either.
+
+B. (HIGH) The PSP-confirmed amount was never checked against the
+order — pay.ErrBadAmount existed but nothing used it. PaidNotice now
+carries AmountCents (WeChat notify `amount.total`, WeChat query,
+Alipay notify/query `total_amount`, parsed without floats) and the
+finalizer refuses + audits (`pay_amount_mismatch`) when it doesn't
+match the order's amount_cents. Amount-less payloads still finalize
+(0 = unknown, not "free").
+
+C. (HIGH, reliability) A failed grant after mark-paid was
+unrecoverable: MarkOrderPaid's one transitioned=true signal was
+consumed, so PSP retries and the poller both no-oped and the customer
+paid for nothing. Now: (1) a firewall-only failure no longer fails the
+grant — the DB row is authoritative, an immediate Resync converges the
+set, and the paid signal/audit/notify still fire (previously all three
+were skipped and the webhook 500'd uselessly); (2) if the DB grant
+itself fails, the order is reverted to pending so the next
+notify/poll retries the whole finalize; (3) finalize runs under
+context.WithoutCancel so a browser disconnect on the /status and
+/wait paths can't abort it halfway between "paid" and "granted".
+
+D. WeChat DecodeNotify only accepts event_type=TRANSACTION.SUCCESS —
+refund/other events can't be misread as payments.
+
+E. Alipay request `timestamp` is now GMT+8 (北京时间) as the gateway
+requires; a UTC router used to send it 8 hours off.
+
+F. order_no entropy bumped from 32 to 64 random bits (31 chars total,
+still within WeChat's 32-char out_trade_no cap) — it doubles as the
+bearer token for /api/pay/status, /api/pay/wait and /receipt, and the
+timestamp prefix is guessable. Old 23-char order numbers keep working
+everywhere, including audit-log links.
+
+G. Request-size caps: /api/pay/create body limited to 4KB, /notify/ali
+to 64KB (matching /notify/wx).
+
+Regression tests cover the refund-replay resurrection, the amount
+mismatch (rejected + audited), finalize idempotency, unknown-amount
+acceptance, the Beijing-time timestamp, the event_type filter, and the
+new order_no shape.
+
+## v0.105 — Password change / reset now kills other sessions + trusted devices
+
+Changing password from `/user/me` previously left every other
+`rb_user` session alive. A stolen cookie stayed logged in after the
+victim rotated the password. The change now keeps only the browser
+that submitted the form (`DeleteUserSessionsExcept`) and wipes
+`user_trusted_devices` so a remembered 2FA skip cannot outlive the
+old password.
+
+The same trusted-device wipe now also runs on SMS forgot-password
+verify and on admin reset-password (admin already deleted sessions).
+
+## v0.104 — OpenWrt: firewall-billing.sh was a parse error on nftables 1.0.x
+
+Critical ops fix. The nftables filter chain was named `fwd`, which
+became a reserved keyword in nftables 1.0.x (OpenWrt 22.03+ / 23.05
+ship 1.0.2 / 1.0.8). On those routers the ENTIRE firewall script was
+a parse error — and both init.d and the ipk postinst wrapped the
+apply call in `|| true`, so the failure was completely silent: no
+portal redirect, no drop rule, every Paid_WiFi device online for
+free. Reproduced against nftables 1.0.9 (parse error), verified
+fixed (parses + rules land).
+
+Also fixed while in there:
+
+- apply is now actually idempotent. Rules declared inside a
+  `table { chain { ... } }` block get APPENDED on every apply, so
+  each service restart added 7 duplicate rules. Chains are now
+  declared empty, flushed, and re-added — verified the rule set is
+  identical (4 pre + 3 forward) after repeated applies, and that
+  mac_paid set elements survive re-apply (whitelist preserved).
+- Legacy `fwd` chain (from installs whose nft still parsed it) is
+  deleted on apply so traffic isn't evaluated by two hooks.
+- init.d start and ipk postinst no longer swallow apply failures
+  silently — still non-fatal, but they log to logread/stderr with
+  an explicit "billing rules missing" warning.
+- CI: `--check-config config.example.yaml` is now strict (the
+  `|| true` is gone). Verified: exits 0 on the example config, 2 on
+  parse/validation errors — the example config can no longer drift
+  out of validity unnoticed.
+- README architecture diagram + firewall.Manager doc comment updated
+  to the `forward` chain name. Go code never referenced the chain
+  (it only manages the mac_paid set) — no binary behavior change.
+
+## v0.103 — Security: /api/pay/qr open QR encoder closed; 1000x voucher bulk import
+
+(Incorporates the standalone fix/payqr-and-bulk-vouchers branch.)
+
+A. /api/pay/qr took its payload directly from the URL ?payload=...
+parameter — fetching the order row only to nil-check it. Anyone
+holding any valid order_no could use the endpoint as a free QR
+generator serving phishing URLs from our domain. Now the upstream
+PSP's QR string is stored on orders.qr_payload at create time and
+the handler renders exclusively from the row; the URL parameter is
+ignored. Legacy orders without a stored payload get a clean 404.
+
+- schema.sql + migrate.go: orders.qr_payload TEXT NOT NULL DEFAULT ''
+- db.SetOrderQRPayload(ctx, orderNo, payload)
+- QRPNG URL no longer carries the payload param
+
+B. Voucher bulk import/generate did one implicit transaction (=1
+fsync) per row — a 1000-row batch was several seconds even on SSD,
+worse on router flash. db.CreateVouchersBulk wraps all inserts in
+one transaction with a prepared statement (~1 fsync per import).
+UNIQUE collisions fail only their own row (SQLite stmt-level error
+semantics), so a duplicate paste mid-import doesn't lose the rest.
+
+7 race-clean tests: URL payload must not be load-bearing (identical
+PNG bytes with/without attacker payload), legacy order 404s, bulk
+all-success / partial-duplicate / empty / expires_at round-trip.
+
+## v0.102 — render() buffers output; missingkey=zero; all-pages smoke test
+
+render() previously executed templates straight into the
+ResponseWriter. When ExecuteTemplate emits some bytes and *then*
+errors (e.g. a typo'd struct field halfway through a table — the
+exact shape of the v0.96 dashboard bug), the user got HTTP 200 +
+half a page + "internal\n" appended, because the implicit
+WriteHeader from the first Write beat http.Error's 500. Now the
+template renders into a bytes.Buffer first and only a fully
+successful render is written; errors produce a clean 500.
+(Incorporates the standalone fix/render-buffer-and-missingkey-zero
+branch.)
+
+Template option missingkey=zero: naked {{.MissingKey}} on the
+map[string]any contexts most handlers pass now renders "" instead
+of the literal string "<no value>".
+
+New all-pages smoke test: seeds every table a template ranges over
+(MACs active+expired, orders pending+paid, vouchers incl. expired,
+sessions, trusted devices, sightings, sms/webhook logs, audit rows
+of each actor shape) and renders all 26 admin pages + 6 user/public
+pages, asserting 200 and zero "<no value>" occurrences. Combined
+with buffered render, any future template↔handler field drift fails
+CI instead of silently shipping.
+
+## v0.101 — DB: LIKE wildcard escaping + three missing indexes
+
+Search correctness: every user-facing search (admin MAC/label,
+orders, users-by-phone, audit actor/target/detail) built its LIKE
+pattern as "%"+q+"%" without escaping — so searching for a literal
+"%" matched every row and "a_b" also matched "axb". All six LIKE
+sites now escape \ % _ via escapeLike() and declare ESCAPE '\'.
+(Injection was never possible — patterns were always bound params —
+this is a correctness fix.)
+
+Router-class performance, all served by existing startup migration
+(schema.sql reapplies with IF NOT EXISTS on every boot):
+
+- orders(status, paid_at) — the dashboard runs ~13
+  "status='paid' AND paid_at >= ..." aggregates per page load;
+  previously each one scanned all paid rows.
+- sessions(expires_at) — the purge loop deletes by expiry every
+  few minutes.
+- audit_log(action) — /admin/audit's exact-match action filter and
+  the DISTINCT action dropdown; audit_log is the largest table on
+  long-running installs.
+
+5 race-clean tests: escapeLike unit table + literal-wildcard
+regression coverage on MACs / orders / users / audit searches.
+
+## v0.100 — Fix: redeem/voucher redirects escape user & admin input
+
+Redirect URLs in the voucher paths concatenated raw input:
+
+- POST /redeem echoed the submitted code as-is in the bounce URL —
+  `X&ok=1` injected a fake success flag into /redeem, `X#frag`
+  truncated the query.
+- POST /admin/vouchers/generate embedded the admin-typed batch name
+  raw (`a&b c` → parameter injection + invalid space in Location).
+- POST /admin/vouchers/batch/revoke for the unbatched bucket
+  redirected with a literal `batch=(no batch)` — raw space and
+  parens in the Location header.
+
+Everything now goes through url.QueryEscape. The hand-rolled
+httpEsc() helper (which skipped non-ASCII, leaving raw Chinese
+error text to http.Redirect's implicit escaping) is deleted in
+favor of the stdlib. Flash messages decode identically — only the
+on-the-wire encoding is stricter.
+
+3 race-clean regression tests asserting the injected params do NOT
+appear and values round-trip through url.Parse exactly.
+
+## v0.99 — Security: open redirect at login/2FA, GET-mutable resync, metrics token timing
+
+Three related hardening fixes, each with regression tests:
+
+1. Open redirect at user login. The POST /user/login `next`
+   parameter was only checked with HasPrefix(next, "/") —
+   "//evil.com" (protocol-relative) and "/\evil.com" (backslash
+   normalization) bounced the freshly authenticated user to an
+   attacker-chosen external domain. The 2FA login handler
+   (/user/login/2fa) trusted its query-string `next` with NO
+   validation at all. Both now go through safeNextPath(): single
+   leading slash, no second slash/backslash, no CR/LF; anything
+   else falls back to /user/me. The login form GET no longer
+   echoes a hostile next into the hidden field, and requireUser
+   now query-escapes the RequestURI it embeds in ?next= (a
+   ?a=b&c=d original URL previously leaked its params out of the
+   next value).
+
+2. /admin/resync accepted GET. verifyCSRF only guards POST, and
+   the session cookie is SameSite=Lax — so a cross-site
+   <img src="/admin/resync"> or top-level navigation triggered a
+   firewall rebuild using the admin's ambient cookie. The sidebar
+   button already POSTs with a CSRF token; the handler is now
+   POST-only (405 otherwise).
+
+3. /metrics compared the bearer token with plain string == —
+   remote timing could confirm the token byte-by-byte. Now
+   subtle.ConstantTimeCompare, same as the API-token path.
+
+12 race-clean test cases: safeNextPath shape table, hostile-next
+login + 2FA integration (Location must stay /user/me), form echo,
+resync GET→405 + no audit row + POST-still-works.
+
+## v0.98 — Fix: pay-create no longer leaves orphaned pending orders
+
+Pre-v0.98 `/api/pay/create` inserted the pending order row BEFORE
+validating the payment provider. Any request with an unknown
+provider ("paypal") or a disabled one (WeChat/Alipay not
+configured) got a 400 — but the pending order stayed in the DB,
+was polled by the background loop for 30 minutes, and inflated
+the admin pending/attention counters. On installs with only one
+provider enabled this happened every time a client raced a
+config change.
+
+Now the provider is validated first (unknown / disabled → 400,
+zero DB writes). Additionally, if the upstream Precreate call
+itself fails (WeChat/Alipay 5xx), the just-created pending order
+is canceled — the QR code was never shown, so nobody can pay it.
+
+3 race-clean tests: unknown provider leaves 0 orders, disabled
+wechat/alipay leave 0 orders, bad-MAC/bad-plan validation
+precedence unchanged.
+
+## v0.97 — auditTargetHref recognizes real generated order numbers
+
+Extends v0.92/v0.95's smart-link function. The audit smart-link
+only matched order targets with an "ORD"/"ord" prefix — but
+`newOrderNo()` actually generates "B" + 14-digit UTC timestamp +
+8 hex chars (e.g. B20260825010203deadbeef). Result: every real
+production order audit row (order_refunded / order_canceled /
+pay) rendered as plain text since v0.92; only hand-crafted test
+fixtures ever got linked.
+
+The generated shape is matched strictly (exactly 23 chars,
+digit/hex position checks) so ordinary words starting with "B"
+never get misrouted. The order_no is also query-escaped in the
+generated href now.
+
+Precedence chain stays:
+  MAC → order (ORD prefix | generated shape) → phone → user_id
+
+8 race-clean test cases: generated-shape positive, 5 near-miss
+negatives (length/charset/prefix), query-escaping, plus a
+round-trip test pinning newOrderNo() output to the matcher so
+the two can't silently drift apart again.
+
 ## v0.96 — Fix: dashboard plan-sales table was silently empty
 
 Pre-v0.96 the /admin/dashboard "最近 30 天按套餐" table referenced
