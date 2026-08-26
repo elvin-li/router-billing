@@ -3,12 +3,16 @@ package config
 import (
 	"crypto/subtle"
 	"fmt"
+	"net"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 
 	"golang.org/x/crypto/bcrypt"
 	"gopkg.in/yaml.v3"
+
+	"router-billing/internal/shadowsocks"
 )
 
 type Config struct {
@@ -32,6 +36,107 @@ type Config struct {
 	Webhook      Webhook         `yaml:"webhook"`
 	WalledGarden WalledGarden    `yaml:"walled_garden"`
 	Security     Security        `yaml:"security"`
+	Shadowsocks  Shadowsocks     `yaml:"shadowsocks"` // optional built-in encrypted proxy
+}
+
+// Shadowsocks configures the optional built-in Shadowsocks AEAD proxy. It is
+// OFF by default; enabling requires enabled: true plus a listen address and a
+// password. The proxy is a first-party convenience so the same OpenWrt box
+// can hand out one ss:// URI / QR for devices that need an outbound encrypted
+// proxy — it is entirely separate from MAC billing and the captive portal.
+//
+// SECURITY: bind LAN-only (e.g. 192.168.5.1:8388 or the br-lan/Free_WiFi
+// address). Do NOT bind on the paid SSID interface — that would let unpaid
+// paid-SSID clients tunnel out and bypass the captive portal. Exposing the
+// port on WAN is possible but discouraged; if you do, use a long password
+// and consider allowed_cidrs. See README + SECURITY.md.
+type Shadowsocks struct {
+	// Enabled turns the proxy on. Default false.
+	Enabled bool `yaml:"enabled"`
+	// Listen is the bind address, host:port. Recommended: the router's LAN
+	// IP, e.g. "192.168.5.1:8388". ":8388" binds all interfaces — only use
+	// that if you understand the exposure and have firewall rules in place.
+	Listen string `yaml:"listen"`
+	// Method is the AEAD cipher. One of: aes-128-gcm, aes-256-gcm,
+	// chacha20-ietf-poly1305 (default).
+	Method string `yaml:"method"`
+	// Password is the shared secret. Generate a strong one with
+	// `--gen-ss-password`. Required when enabled.
+	Password string `yaml:"password"`
+	// AllowedCIDRs, when set, restricts which client source IPs may connect
+	// (defense in depth on top of a LAN-only bind). e.g. ["192.168.0.0/16"].
+	AllowedCIDRs []string `yaml:"allowed_cidrs,omitempty"`
+	// MaxConns caps concurrent relays. 0 → internal default (512).
+	MaxConns int `yaml:"max_conns,omitempty"`
+	// Timeout is the per-direction idle timeout for a relay. 0 → default 5m.
+	Timeout time.Duration `yaml:"timeout,omitempty"`
+	// ReplayWindow is how long a connection salt is remembered for replay
+	// rejection. 0 → default 60s; negative → disabled (not recommended).
+	ReplayWindow time.Duration `yaml:"replay_window,omitempty"`
+	// AdvertiseHost is the host clients should dial, embedded in the ss://
+	// share link/QR. Defaults to portal_host when empty. Set to a public
+	// host/DDNS name if you expose the port on WAN.
+	AdvertiseHost string `yaml:"advertise_host,omitempty"`
+	// Tag is the human-friendly label shown in client apps (ss://...#tag).
+	// Defaults to "router-billing" when empty.
+	Tag string `yaml:"tag,omitempty"`
+	// OpenFirewall, when true, asks the nftables backend to add an input
+	// accept rule for the SS port scoped to FirewallIface. Best-effort; on
+	// the iptables backend it is skipped with a log line. Default false —
+	// most OpenWrt deployments manage the port in /etc/config/firewall.
+	OpenFirewall bool `yaml:"open_firewall,omitempty"`
+	// FirewallIface scopes the OpenFirewall accept rule to one interface
+	// (e.g. "br-lan"). Empty + OpenFirewall=true accepts on any iface —
+	// discouraged.
+	FirewallIface string `yaml:"firewall_iface,omitempty"`
+}
+
+// ListenPort extracts the numeric port from Listen, or 0 if unparseable.
+func (s Shadowsocks) ListenPort() int {
+	_, portStr, err := net.SplitHostPort(strings.TrimSpace(s.Listen))
+	if err != nil {
+		return 0
+	}
+	p, err := strconv.Atoi(portStr)
+	if err != nil {
+		return 0
+	}
+	return p
+}
+
+// AdvertiseHostOr returns AdvertiseHost, falling back to the given default
+// (typically portal_host) when empty.
+func (s Shadowsocks) AdvertiseHostOr(fallback string) string {
+	if h := strings.TrimSpace(s.AdvertiseHost); h != "" {
+		return h
+	}
+	return fallback
+}
+
+// TagOr returns Tag or a default label.
+func (s Shadowsocks) TagOr() string {
+	if t := strings.TrimSpace(s.Tag); t != "" {
+		return t
+	}
+	return "router-billing"
+}
+
+// ParsedCIDRs parses AllowedCIDRs into net.IPNet. Returns an error on the
+// first malformed entry (validation catches this at Load time).
+func (s Shadowsocks) ParsedCIDRs() ([]*net.IPNet, error) {
+	var out []*net.IPNet
+	for _, c := range s.AllowedCIDRs {
+		c = strings.TrimSpace(c)
+		if c == "" {
+			continue
+		}
+		_, n, err := net.ParseCIDR(c)
+		if err != nil {
+			return nil, fmt.Errorf("invalid CIDR %q: %w", c, err)
+		}
+		out = append(out, n)
+	}
+	return out, nil
 }
 
 // Security holds opt-in hardening knobs that aren't safe-by-default
@@ -386,6 +491,13 @@ func (c *Config) applyDefaults() {
 			"year":  {Label: "1 年", Days: 365, PriceCents: 1000},
 		}
 	}
+	// Shadowsocks: fill a sensible default cipher so the admin page and
+	// --gen-ss-password have something to show even before the operator
+	// picks one. Listen/password are intentionally left empty — enabling
+	// requires an explicit choice (validated below).
+	if c.Shadowsocks.Method == "" {
+		c.Shadowsocks.Method = "chacha20-ietf-poly1305"
+	}
 }
 
 func (c *Config) validate() error {
@@ -420,6 +532,44 @@ func (c *Config) validate() error {
 		if c.Pay.Alipay.Gateway == "" {
 			c.Pay.Alipay.Gateway = "https://openapi.alipay.com/gateway.do"
 		}
+	}
+	if err := c.Shadowsocks.validate(); err != nil {
+		return err
+	}
+	return nil
+}
+
+// validate checks the Shadowsocks block. When disabled it only sanity-checks
+// a supplied method (so a typo is caught before the admin flips enabled on).
+// When enabled it requires a valid listen address, password, and cipher.
+func (s Shadowsocks) validate() error {
+	if s.Method != "" && !shadowsocks.ValidMethod(s.Method) {
+		return fmt.Errorf("shadowsocks.method %q unsupported (supported: %s)",
+			s.Method, strings.Join(shadowsocks.SupportedMethods(), ", "))
+	}
+	if _, err := s.ParsedCIDRs(); err != nil {
+		return fmt.Errorf("shadowsocks.allowed_cidrs: %w", err)
+	}
+	if !s.Enabled {
+		return nil
+	}
+	if strings.TrimSpace(s.Listen) == "" {
+		return fmt.Errorf("shadowsocks.enabled but listen is empty (set e.g. 192.168.5.1:8388)")
+	}
+	host, portStr, err := net.SplitHostPort(strings.TrimSpace(s.Listen))
+	if err != nil {
+		return fmt.Errorf("shadowsocks.listen %q invalid: %w", s.Listen, err)
+	}
+	_ = host
+	port, err := strconv.Atoi(portStr)
+	if err != nil || port <= 0 || port > 65535 {
+		return fmt.Errorf("shadowsocks.listen %q: port must be 1..65535", s.Listen)
+	}
+	if s.Password == "" {
+		return fmt.Errorf("shadowsocks.enabled but password is empty (generate one with --gen-ss-password)")
+	}
+	if s.Method == "" {
+		return fmt.Errorf("shadowsocks.method is required when enabled")
 	}
 	return nil
 }

@@ -18,6 +18,7 @@ import (
 	"router-billing/internal/notify"
 	"router-billing/internal/pay"
 	"router-billing/internal/service"
+	"router-billing/internal/shadowsocks"
 	"router-billing/internal/sms"
 )
 
@@ -31,7 +32,11 @@ type App struct {
 	SMS      *sms.Sender // wraps a possibly-nil Provider; check .Available()
 	Version  string
 	StartAt  time.Time
-	tpl      *template.Template
+	// SSMetrics is the live Shadowsocks proxy counter set, or nil when the
+	// proxy is disabled. Set by main after NewApp. Read by /metrics and the
+	// admin Shadowsocks page.
+	SSMetrics *shadowsocks.Metrics
+	tpl       *template.Template
 
 	pollMu            sync.Mutex
 	loginLimiter      *rateLimiter // user login, keyed by IP
@@ -243,6 +248,8 @@ func (a *App) Routes() http.Handler {
 	mux.HandleFunc("/admin/sms-log/digest", a.requireAdmin(a.handleAdminDigestTrigger))
 	mux.HandleFunc("/admin/ssid-cards", a.requireAdmin(a.handleAdminSSIDCards))
 	mux.HandleFunc("/admin/ssid-cards/qr", a.requireAdmin(a.handleAdminSSIDCardQR))
+	mux.HandleFunc("/admin/shadowsocks", a.requireAdmin(a.handleAdminShadowsocks))
+	mux.HandleFunc("/admin/shadowsocks/qr", a.requireAdmin(a.handleAdminShadowsocksQR))
 	mux.HandleFunc("/admin/devices/stream", a.requireAdmin(a.handleAdminDevicesStream))
 	mux.HandleFunc("/admin/resync", a.requireAdmin(a.handleAdminResync))
 	mux.HandleFunc("/admin/macs/import", a.requireAdmin(a.handleAdminMACImport))

@@ -174,6 +174,80 @@ func (m *Manager) RemoveWalledGardenIPs(ctx context.Context, setName string, ips
 	return nil
 }
 
+// EnsureInputAccept adds an input-hook accept rule for a TCP port, optionally
+// scoped to one interface. Used to open the Shadowsocks port on the LAN
+// interface without touching the billing nat/forward chains or the mac_paid
+// set. Idempotent: it flushes and re-adds a dedicated chain so repeated calls
+// (and config changes) converge to exactly one rule.
+//
+// chainName is a short label (e.g. "ss_in"). iface, when non-empty, scopes
+// the accept to that interface (e.g. "br-lan") — strongly recommended so the
+// port is not reachable from the paid SSID or WAN.
+func (m *Manager) EnsureInputAccept(ctx context.Context, chainName, iface string, port int) error {
+	if port <= 0 || port > 65535 {
+		return fmt.Errorf("invalid port %d", port)
+	}
+	if !validChainToken(chainName) {
+		return fmt.Errorf("invalid chain name %q", chainName)
+	}
+	if iface != "" && !validIfaceToken(iface) {
+		return fmt.Errorf("invalid iface %q", iface)
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	if err := m.run(ctx, "add", "table", m.Family, m.Table); err != nil {
+		return fmt.Errorf("ensure table: %w", err)
+	}
+	// Dedicated input chain so we own its full contents and can rebuild
+	// idempotently without disturbing the billing chains.
+	if err := m.run(ctx, "add", "chain", m.Family, m.Table, chainName,
+		"{ type filter hook input priority 0; policy accept; }"); err != nil && !isExistsError(err) {
+		return fmt.Errorf("ensure input chain: %w", err)
+	}
+	if err := m.run(ctx, "flush", "chain", m.Family, m.Table, chainName); err != nil {
+		return fmt.Errorf("flush input chain: %w", err)
+	}
+	args := []string{"add", "rule", m.Family, m.Table, chainName}
+	if iface != "" {
+		args = append(args, "iifname", fmt.Sprintf("%q", iface))
+	}
+	args = append(args, "tcp", "dport", fmt.Sprintf("%d", port), "accept")
+	if err := m.run(ctx, args...); err != nil {
+		return fmt.Errorf("add accept rule: %w", err)
+	}
+	log.Printf("firewall: shadowsocks input accept on port %d iface=%q", port, iface)
+	return nil
+}
+
+// validChainToken / validIfaceToken guard the two string inputs that flow
+// into nft args. Both are operator-supplied config values; keeping them to a
+// conservative charset avoids any shell/nft-syntax surprises even though we
+// exec nft directly (no shell).
+func validChainToken(s string) bool {
+	if s == "" || len(s) > 32 {
+		return false
+	}
+	for _, c := range s {
+		if !((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_') {
+			return false
+		}
+	}
+	return true
+}
+
+func validIfaceToken(s string) bool {
+	if len(s) > 32 {
+		return false
+	}
+	for _, c := range s {
+		if !((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_' || c == '-' || c == '.') {
+			return false
+		}
+	}
+	return true
+}
+
 // Sync rebuilds the set atomically from the given list of MACs.
 func (m *Manager) Sync(ctx context.Context, macs []string) error {
 	m.mu.Lock()
