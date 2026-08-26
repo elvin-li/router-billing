@@ -1,5 +1,40 @@
 # Changelog
 
+## v0.121 — 深挖轮 6 收尾：过期充值码仍可打印、临时密码模偏差
+
+深挖轮 6 的第二批修复，以及本轮剩余子系统的复查结论。
+
+A. (LOW, 运营正确性) `/admin/vouchers/print` 的注释承诺只打印
+「未兑换/未撤销/未过期」的充值码，但代码只过滤了前两项——已过
+期（`expires_at` 在过去）的码照常渲染成可打印卡片，客户拿到手
+在 /redeem 一定被拒。修复：打印列表跳过已过期的码。另外：打印
+页与 QR 端点把 code 原样拼进 query string；导入路径的 code 只
+做长度校验（Canon 后 ≥6 位，字符集不限），含 `&` 等字符会拆断
+URL。两处改为 `url.QueryEscape`，常规字母数字码字节不变。回归
+测试断言过期码不出现在打印页、未过期码正常出现。
+
+B. (LOW, 密码学卫生) `randomPassword`（管理员重置用户密码的临
+时密码生成器）用 `byte % 57` 从 57 字符表选字——256 % 57 ≠ 0，
+前 28 个字符的概率是 5/256、其余是 4/256（+11% 系统性偏差）。
+虽无实际可利用性（有效熵仍 ~57 bit），但与备用码路径（32 字符
+表天然无偏）的严谨度不一致。改为拒绝采样，每个字符严格均匀。
+新增均匀性回归测试（20 万样本、±8% 容差 ≈ 4.7σ，可稳定检出修
+复前的 ±11% 偏差且几乎不会误报）。
+
+其余复查确认无缺陷（不改动）：admin_backup（VACUUM INTO 快照、
+两阶段 restore + SQLite magic/schema 校验）、metrics（常数时间
+token 比较）、devices/stats SSE 流（每 tick 复验管理员会话）、
+totp_replay（步进单调防重放）、admin_api_tokens（只读视图仅前
+缀）、forgot-password（枚举防护/限速/尝试上限完整）、trusted
+devices、backup codes（32 字符表无模偏差、条件 UPDATE 单次使
+用门）、attention 缓存、csv_sanitize、admin 维护端点（
+expire-now 已用 WithoutCancel）、dnsmasq/arp 解析、cmd/main、
+web 静态 JS（所有插值经 escape()/textContent，无 innerHTML 注
+入面）、sw.js（仅缓存 /static/）、Dockerfile 与 CI（非 root、
+ipk 结构与 0600 config 校验已有）、db.go 全部 LIMIT 参数化、
+无用户输入拼接 SQL。`go test ./...` 全绿；server/db/pay/
+service/notify 包 `-race` 绿。
+
 ## v0.120 — 深挖轮 6：grant/voucher 天数无上限（时间溢出可致静默吊销）+ 用户数据导出泄漏管理员备注
 
 第六轮独立审计，聚焦 admin API / admin UI 的输入边界与用户可携
