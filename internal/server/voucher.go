@@ -56,9 +56,31 @@ func (a *App) handleAdminVouchers(w http.ResponseWriter, r *http.Request) {
 	// Pass through query params so the import-result flash can read
 	// added=/failed= counts (numeric flash keys laundered to digits).
 	rawQuery := queryFlashParams(r)
+	// ?batch= is free text rendered into trusted chrome (the batch-revoke
+	// green flash and the "batch = <code>…</code>" section heading), so a
+	// crafted link could plant arbitrary phishing copy there — same class
+	// as the numeric-key laundering above. Only echo a batch name that
+	// actually exists; anything else renders empty (its voucher list is
+	// empty anyway). The raw value still drives the DB filter.
+	displayBatch := batch
+	if batch != "" {
+		known := false
+		for _, bs := range batchStats {
+			if bs.Batch == batch {
+				known = true
+				break
+			}
+		}
+		if !known {
+			displayBatch = ""
+		}
+	}
+	if fb, ok := rawQuery["batch"]; ok && fb != "" && fb != displayBatch {
+		rawQuery["batch"] = ""
+	}
 	a.render(w, "admin_vouchers.html", a.adminCtx(r, "vouchers", map[string]any{
 		"Vouchers":   list,
-		"Batch":      batch,
+		"Batch":      displayBatch,
 		"Counts":     map[string]int{"total": total, "redeemed": redeemed, "revoked": revoked, "expired": expired, "unused": total - redeemed - revoked - expired},
 		"BatchStats": batchStats,
 		"Query0":     rawQuery,

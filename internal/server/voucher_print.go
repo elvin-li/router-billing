@@ -48,9 +48,16 @@ func (a *App) handleAdminVouchersPrint(w http.ResponseWriter, r *http.Request) {
 			"QRPath": "/admin/vouchers/print/qr?code=" + url.QueryEscape(v.Code),
 		})
 	}
+	// ?batch= is free text echoed into the page title/header. The DB filter
+	// is an exact match, so any non-empty result proves the name is real;
+	// otherwise render it empty instead of reflecting arbitrary text.
+	displayBatch := ""
+	if batch != "" && len(list) > 0 {
+		displayBatch = batch
+	}
 	a.render(w, "admin_vouchers_print.html", map[string]any{
 		"Vouchers": usable,
-		"Batch":    batch,
+		"Batch":    displayBatch,
 		"Portal":   portal,
 		"Count":    len(usable),
 	})
