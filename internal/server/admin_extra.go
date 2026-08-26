@@ -154,6 +154,10 @@ func (a *App) handleAdminMACImport(w http.ResponseWriter, r *http.Request) {
 	if defaultDays <= 0 {
 		defaultDays = 365
 	}
+	if defaultDays > maxGrantDays {
+		http.Redirect(w, r, "/admin/macs?err=invalid_days", http.StatusSeeOther)
+		return
+	}
 	body := r.PostForm.Get("bulk")
 	added, failed := 0, 0
 	for _, line := range strings.Split(body, "\n") {
@@ -172,6 +176,10 @@ func (a *App) handleAdminMACImport(w http.ResponseWriter, r *http.Request) {
 			if d, err := strconv.Atoi(strings.TrimSpace(parts[1])); err == nil && d > 0 {
 				days = d
 			}
+		}
+		if days > maxGrantDays {
+			failed++
+			continue
 		}
 		label := "imported"
 		if len(parts) > 2 {

@@ -821,7 +821,7 @@ func (a *App) handleAdminMACAdd(w http.ResponseWriter, r *http.Request) {
 			days = p.Days
 		}
 	}
-	if days <= 0 {
+	if days <= 0 || days > maxGrantDays {
 		http.Redirect(w, r, redirectBack(r, "err=invalid_days"), http.StatusSeeOther)
 		return
 	}
@@ -901,7 +901,7 @@ func (a *App) handleAdminMACBulk(w http.ResponseWriter, r *http.Request) {
 		}
 	case "extend":
 		days, _ := strconv.Atoi(r.PostForm.Get("days"))
-		if days <= 0 {
+		if days <= 0 || days > maxGrantDays {
 			http.Redirect(w, r, "/admin/macs?err=invalid_days", http.StatusSeeOther)
 			return
 		}
@@ -942,7 +942,7 @@ func (a *App) handleAdminMACExtend(w http.ResponseWriter, r *http.Request) {
 			days = p.Days
 		}
 	}
-	if days <= 0 {
+	if days <= 0 || days > maxGrantDays {
 		http.Redirect(w, r, redirectBack(r, "err=invalid_days"), http.StatusSeeOther)
 		return
 	}

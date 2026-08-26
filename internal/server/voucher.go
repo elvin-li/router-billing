@@ -120,6 +120,10 @@ func (a *App) handleAdminVouchersImport(w http.ResponseWriter, r *http.Request) 
 				days = n
 			}
 		}
+		if days > maxGrantDays {
+			failed++
+			continue
+		}
 		label := ""
 		if len(parts) >= 3 {
 			label = strings.TrimSpace(parts[2])
@@ -182,7 +186,11 @@ func (a *App) handleAdminVouchersGenerate(w http.ResponseWriter, r *http.Request
 		http.Redirect(w, r, "/admin/vouchers?err=invalid_days", http.StatusSeeOther)
 		return
 	}
-	if days <= 0 {
+	if days <= 0 || days > maxGrantDays {
+		http.Redirect(w, r, "/admin/vouchers?err=invalid_days", http.StatusSeeOther)
+		return
+	}
+	if expiresDays > maxGrantDays {
 		http.Redirect(w, r, "/admin/vouchers?err=invalid_days", http.StatusSeeOther)
 		return
 	}

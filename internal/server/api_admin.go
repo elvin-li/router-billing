@@ -33,6 +33,13 @@ import (
 	"router-billing/internal/voucher"
 )
 
+// maxGrantDays caps every grant/extend/voucher `days` input at 10 years.
+// Beyond typo-guarding, huge values (e.g. 9e18 from a scripted client)
+// overflow time.Time inside AddDate(0,0,days) and can wrap expires_at into
+// the PAST — silently revoking instead of granting. Every entry point that
+// feeds days into UpsertMAC/CreateVoucher must enforce this bound.
+const maxGrantDays = 3650
+
 // requireAPITokenWrite extracts Authorization: Bearer <token>, verifies it
 // against config.api_tokens, and blocks read-only tokens from non-GET
 // methods. Used for endpoints that mutate state.
@@ -1058,7 +1065,7 @@ func (a *App) handleAPIMACGrant(w http.ResponseWriter, r *http.Request, actor st
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid mac"})
 		return
 	}
-	if req.Days <= 0 || req.Days > 3650 {
+	if req.Days <= 0 || req.Days > maxGrantDays {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "days must be in 1..3650"})
 		return
 	}
@@ -1131,6 +1138,13 @@ func (a *App) handleAPIMACImport(w http.ResponseWriter, r *http.Request, actor s
 	if defaultDays <= 0 {
 		defaultDays = 30
 	}
+	// Same 3650-day (10-year) cap as /api/admin/macs/grant — without it a
+	// bulk import could set effectively-permanent expiries (or overflow
+	// time math with absurd values) that the single-grant path rejects.
+	if defaultDays > maxGrantDays {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "default_days too large (max 3650)"})
+		return
+	}
 	added, failed := 0, 0
 	for _, row := range req.MACs {
 		mac, ok := models.NormalizeMAC(row.MAC)
@@ -1141,6 +1155,11 @@ func (a *App) handleAPIMACImport(w http.ResponseWriter, r *http.Request, actor s
 		days := row.Days
 		if days <= 0 {
 			days = defaultDays
+		}
+		if days > maxGrantDays {
+			log.Printf("api mac import %s: days %d exceeds max 3650", mac, days)
+			failed++
+			continue
 		}
 		if _, err := a.MACSvc.Extend(r.Context(), mac, strings.TrimSpace(row.Label), days, nil); err != nil {
 			log.Printf("api mac import %s: %v", mac, err)
@@ -1338,8 +1357,12 @@ func (a *App) handleAPIVoucherGenerate(w http.ResponseWriter, r *http.Request, a
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "count must be 1..1000"})
 		return
 	}
-	if req.Days <= 0 {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "days must be > 0"})
+	if req.Days <= 0 || req.Days > maxGrantDays {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "days must be in 1..3650"})
+		return
+	}
+	if req.ExpiresDays > maxGrantDays {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "expires_days too large (max 3650)"})
 		return
 	}
 	batch := strings.TrimSpace(req.Batch)
@@ -1462,8 +1485,8 @@ func (a *App) handleAPIUserGrant(w http.ResponseWriter, r *http.Request, actor s
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "user_id required"})
 		return
 	}
-	if req.Days <= 0 {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "days must be > 0"})
+	if req.Days <= 0 || req.Days > maxGrantDays {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "days must be in 1..3650"})
 		return
 	}
 
@@ -2013,8 +2036,8 @@ func (a *App) handleAPIUserGrantByPhone(w http.ResponseWriter, r *http.Request, 
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid phone"})
 		return
 	}
-	if req.Days <= 0 {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "days must be > 0"})
+	if req.Days <= 0 || req.Days > maxGrantDays {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "days must be in 1..3650"})
 		return
 	}
 	user, err := a.DB.GetUserByPhone(r.Context(), phone)
