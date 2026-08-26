@@ -52,3 +52,34 @@ func TestValidate(t *testing.T) {
 		}
 	}
 }
+
+// TestNewUniform is a coarse uniformity check on the rejection sampling.
+// The pre-fix modulo bias (256 % 31 = 8) gave the first 8 alphabet symbols
+// probability 9/256 (+12.5% vs uniform) and the rest 8/256. At 240k drawn
+// symbols the per-symbol sampling noise is ~1.1% (1 sigma), so an 8%
+// tolerance is ~7 sigma — essentially never flaky — while the old
+// systematic +12.5% bias trips it reliably.
+func TestNewUniform(t *testing.T) {
+	counts := map[rune]int{}
+	const rounds = 20000
+	for i := 0; i < rounds; i++ {
+		c, err := New()
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, r := range c {
+			counts[r]++
+		}
+	}
+	total := rounds * 12
+	expected := float64(total) / float64(len(alphabet))
+	for _, r := range alphabet {
+		got := counts[r]
+		if got == 0 {
+			t.Errorf("symbol %q never appeared in %d draws", r, total)
+		}
+		if float64(got) > expected*1.08 || float64(got) < expected*0.92 {
+			t.Errorf("symbol %q count %d deviates >8%% from expected %.0f", r, got, expected)
+		}
+	}
+}
