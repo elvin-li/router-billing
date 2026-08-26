@@ -694,6 +694,27 @@ func (a *App) handleUserAccountExport(w http.ResponseWriter, r *http.Request) {
 		Limit: 100,
 	})
 
+	// Project MACs into the user-visible shape. models.MAC carries the
+	// admin-only `notes` field (free-text support context — may reference
+	// other customers, fraud suspicions, internal tickets) and the
+	// admin-set `schedule_json`; neither is shown anywhere in the user
+	// portal, so serializing the raw struct here leaked them.
+	type macEntry struct {
+		Mac       string           `json:"mac"`
+		Label     string           `json:"label"`
+		Status    models.MACStatus `json:"status"`
+		ExpiresAt time.Time        `json:"expires_at"`
+		CreatedAt time.Time        `json:"created_at"`
+		UpdatedAt time.Time        `json:"updated_at"`
+	}
+	macOut := make([]macEntry, 0, len(macs))
+	for _, m := range macs {
+		macOut = append(macOut, macEntry{
+			Mac: m.Mac, Label: m.Label, Status: m.Status,
+			ExpiresAt: m.ExpiresAt, CreatedAt: m.CreatedAt, UpdatedAt: m.UpdatedAt,
+		})
+	}
+
 	type activityEntry struct {
 		At     time.Time `json:"at"`
 		Action string    `json:"action"`
@@ -718,7 +739,7 @@ func (a *App) handleUserAccountExport(w http.ResponseWriter, r *http.Request) {
 			"created_at":   user.CreatedAt,
 			"updated_at":   user.UpdatedAt,
 		},
-		"macs":     macs,
+		"macs":     macOut,
 		"orders":   orders,
 		"activity": actOut,
 	}
