@@ -53,12 +53,9 @@ func (a *App) handleAdminVouchers(w http.ResponseWriter, r *http.Request) {
 	// usable" reconciliation.
 	batchStats, _ := a.DB.VoucherBatchStats(r.Context())
 
-	// Pass through raw query params so the import-result flash can read
-	// added=/failed= counts.
-	rawQuery := map[string]string{}
-	for k := range r.URL.Query() {
-		rawQuery[k] = r.URL.Query().Get(k)
-	}
+	// Pass through query params so the import-result flash can read
+	// added=/failed= counts (numeric flash keys laundered to digits).
+	rawQuery := queryFlashParams(r)
 	a.render(w, "admin_vouchers.html", a.adminCtx(r, "vouchers", map[string]any{
 		"Vouchers":   list,
 		"Batch":      batch,
@@ -366,15 +363,75 @@ func (a *App) handleAdminVouchersExport(w http.ResponseWriter, r *http.Request) 
 // The printed voucher carries a QR like http://router-ip:8080/redeem?code=XXX-XXX
 func (a *App) handleRedeemPage(w http.ResponseWriter, r *http.Request) {
 	a.render(w, "redeem.html", map[string]any{
-		"Code":      r.URL.Query().Get("code"),
-		"MAC":       a.detectMAC(r),
-		"LoggedIn":  a.currentUserID(r) != 0,
-		"OK":        r.URL.Query().Get("ok"),
-		"Err":       r.URL.Query().Get("err"),
-		"Days":      r.URL.Query().Get("days"),
-		"ExpiresAt": r.URL.Query().Get("expires_at"),
+		"Code":     r.URL.Query().Get("code"),
+		"MAC":      a.detectMAC(r),
+		"LoggedIn": a.currentUserID(r) != 0,
+		"OK":       r.URL.Query().Get("ok"),
+		// ?err= is plain query input on an UNAUTHENTICATED page — only
+		// messages this server actually redirects with may render.
+		// Anything else (a crafted link) collapses to the generic label
+		// instead of showing attacker-chosen text in the trusted flash.
+		"Err": redeemFlashText(r.URL.Query().Get("err")),
+		// The success banner interpolates these into "已添加 N 天，到期
+		// YYYY-MM-DD" — force number/date shape so a crafted link can't
+		// plant free text inside it.
+		"Days":      digitsOnly(r.URL.Query().Get("days"), 4),
+		"ExpiresAt": dateOnly(r.URL.Query().Get("expires_at")),
 		"Version":   a.Version,
 	})
+}
+
+// redeemGenericErr is what the public page shows when the specific cause
+// shouldn't (unknown code) or mustn't (raw internal error) be displayed.
+const redeemGenericErr = "充值失败，请稍后重试"
+
+// redeemKnownFlash is the closed set of error strings handleRedeem's
+// redirects can legitimately carry back to the page.
+var redeemKnownFlash = map[string]bool{
+	// redeemErrLabel outputs
+	"充值码不存在或已被作废": true,
+	"该充值码已被使用":    true,
+	"该充值码已作废":     true,
+	"该充值码已过期":     true,
+	// voucher.Validate outputs
+	"充值码必须是 12 位": true,
+	"充值码包含非法字符":   true,
+	// handleRedeem literals
+	"尝试过于频繁，请 10 分钟后再试": true,
+	"无法识别 MAC，请填写":      true,
+	"授权失败请联系管理员":        true,
+	"授权失败，充值码未消耗，请重试":   true,
+	redeemGenericErr:    true,
+}
+
+// redeemFlashText allowlists the ?err= flash on the public redeem page.
+func redeemFlashText(raw string) string {
+	if raw == "" {
+		return ""
+	}
+	if redeemKnownFlash[raw] {
+		return raw
+	}
+	return redeemGenericErr
+}
+
+// dateOnly returns s iff it is exactly a YYYY-MM-DD date, else "".
+func dateOnly(s string) string {
+	if len(s) != 10 {
+		return ""
+	}
+	for i, c := range s {
+		if i == 4 || i == 7 {
+			if c != '-' {
+				return ""
+			}
+			continue
+		}
+		if c < '0' || c > '9' {
+			return ""
+		}
+	}
+	return s
 }
 
 // POST /redeem  {code, mac?}
@@ -420,6 +477,11 @@ func (a *App) handleRedeem(w http.ResponseWriter, r *http.Request) {
 
 	v, err := a.DB.RedeemVoucher(r.Context(), code, mac, userID)
 	if err != nil {
+		if !isKnownRedeemErr(err) {
+			// Unexpected (DB-level) failure — detail goes to the log, not
+			// to the unauthenticated page.
+			log.Printf("redeem %s: %v", mac, err)
+		}
 		http.Redirect(w, r, "/redeem?code="+url.QueryEscape(codeRaw)+"&err="+url.QueryEscape(redeemErrLabel(err)), http.StatusSeeOther)
 		return
 	}
@@ -487,6 +549,15 @@ func filenameSafe(s string) string {
 	return b.String()
 }
 
+// isKnownRedeemErr reports whether err is one of the expected voucher
+// business errors (vs. an unexpected DB failure worth logging).
+func isKnownRedeemErr(err error) bool {
+	return errors.Is(err, db.ErrVoucherNotFound) ||
+		errors.Is(err, db.ErrVoucherUsed) ||
+		errors.Is(err, db.ErrVoucherRevoked) ||
+		errors.Is(err, db.ErrVoucherExpired)
+}
+
 func redeemErrLabel(err error) string {
 	switch {
 	case errors.Is(err, db.ErrVoucherNotFound):
@@ -498,6 +569,10 @@ func redeemErrLabel(err error) string {
 	case errors.Is(err, db.ErrVoucherExpired):
 		return "该充值码已过期"
 	default:
-		return err.Error()
+		// SECURITY: raw err.Error() used to flow into the public /redeem
+		// page's flash via the redirect — SQLite/driver failure text
+		// (paths, SQL fragments) is internal detail. Callers log it;
+		// the visitor gets the generic label.
+		return redeemGenericErr
 	}
 }
