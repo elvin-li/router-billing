@@ -35,6 +35,8 @@ func main() {
 	checkConfig := flag.Bool("check-config", false, "validate the config file and exit")
 	genHash := flag.Bool("gen-password-hash", false, "read a password from stdin and print its bcrypt hash; ideal for admins[].password_hash")
 	genTOTP := flag.String("gen-totp-secret", "", "generate a fresh TOTP secret for the given admin username; prints base32 + otpauth URL + ASCII QR")
+	genSSPassword := flag.Bool("gen-ss-password", false, "generate a strong random Shadowsocks password and print config + guidance")
+	ssURI := flag.Bool("ss-uri", false, "print the ss:// share link + ASCII QR for the configured shadowsocks server")
 	logJSON := flag.Bool("log-json", false, "emit each log line as a JSON object (for ingestion into ELK/Loki/etc.)")
 	flag.Parse()
 
@@ -54,6 +56,14 @@ func main() {
 	}
 	if *genTOTP != "" {
 		runGenTOTP(*genTOTP)
+		return
+	}
+	if *genSSPassword {
+		runGenSSPassword()
+		return
+	}
+	if *ssURI {
+		runSSURI(*cfgPath)
 		return
 	}
 	if *checkConfig {
@@ -160,11 +170,17 @@ func main() {
 		}
 	}()
 
+	// Optional built-in Shadowsocks AEAD proxy. OFF unless explicitly
+	// enabled in config. Shares the process context so SIGINT/SIGTERM
+	// drains it cleanly alongside the HTTP server.
+	ssMetrics := startShadowsocks(ctx, cfg, fw)
+
 	app, err := server.NewApp(cfg, dbx, svc)
 	if err != nil {
 		log.Fatalf("server init: %v", err)
 	}
 	app.Version = version
+	app.SSMetrics = ssMetrics
 	if err := app.Run(ctx); err != nil {
 		log.Fatalf("server: %v", err)
 	}

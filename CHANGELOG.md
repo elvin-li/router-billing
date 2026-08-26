@@ -1,5 +1,68 @@
 # Changelog
 
+## v0.97 — Optional built-in Shadowsocks AEAD proxy
+
+The router-billing binary can now double as a local Shadowsocks AEAD
+(SIP004) proxy so the same OpenWrt box hands out one `ss://` URI / QR
+for devices that need an outbound encrypted proxy. First-party feature,
+**OFF by default** — enabling requires an explicit `shadowsocks:` block
+with a listen address and a password.
+
+New package `internal/shadowsocks` implements the classic Shadowsocks
+AEAD wire format from scratch (no new external modules — reuses the
+`golang.org/x/crypto` we already pin for bcrypt). It interops with
+Shadowsocks-rust, Outline, Clash, and the official iOS/Android clients.
+
+- Ciphers: `chacha20-ietf-poly1305` (default), `aes-256-gcm`,
+  `aes-128-gcm`. Key derivation is the reference EVP_BytesToKey(MD5) +
+  HKDF-SHA1 "ss-subkey"; a pinned known-answer test guards it.
+- TCP only (standard SOCKS5 CONNECT after decrypt). No UDP associate —
+  keeps the OpenWrt forward path untouched; documented.
+- Per-connection salt **replay rejection** (default 60s window,
+  memory-bounded) — salt reuse is fatal for AEAD and a well-behaved
+  client never repeats one.
+- Graceful shutdown wired to the process context in
+  `cmd/router-billing/main.go`; SIGINT/SIGTERM drains in-flight relays.
+- Optional source `allowed_cidrs`, `max_conns`, per-direction idle
+  `timeout` — defense in depth on top of a LAN-only bind.
+- Metrics: connections, active, bytes in/out, handshake/dial errors,
+  replay/ACL rejections — exposed as `router_billing_shadowsocks_*` on
+  the existing `/metrics`.
+
+Config (`internal/config`): new `shadowsocks:` block, validated at Load
+— `--check-config` fails if `enabled: true` but the password is empty or
+the listen address is invalid. New CLI: `--gen-ss-password` (256-bit
+random) and `--ss-uri` (prints the `ss://` share link + ASCII QR),
+mirroring `--gen-totp-secret` / `--gen-password-hash`.
+
+Admin UI: new `/admin/shadowsocks` page (status, connection info, live
+metrics) reusing the SSID-card visual language. The `ss://` link embeds
+the password, so it's masked by default and only rendered — with a
+matching server-side QR that never carries the secret in a URL — on an
+explicit reveal, which writes a `shadowsocks_uri_view` audit row. The
+password never appears in logs, audit details, or page HTML otherwise.
+
+Firewall: new `Manager.EnsureInputAccept` (nftables) opens the SS port
+on a chosen LAN interface via a dedicated `ss_in` input chain, leaving
+the billing nat/forward chains and the `mac_paid` set untouched. Wired
+via `open_firewall` / `firewall_iface`; an equivalent
+`deploy/openwrt/.../firewall-shadowsocks.sh` ships for manual use.
+
+**Security posture unchanged for billing**: the proxy is password-gated
+and meant to bind LAN-only. Binding it on the paid SSID would let unpaid
+clients tunnel out — the docs, admin page, and config comments all call
+this out. WAN exposure is possible but discouraged (long password +
+`allowed_cidrs`).
+
+Tests (race-clean): cipher known-answer + all-cipher AEAD round-trips
+(incl. exact- and multi-chunk boundaries), wrong-key rejection, SOCKS5
+address round-trip + malformed-input rejects, `ss://` (SIP002) encoding,
+replay-filter accept/reject/expiry/bounded, an end-to-end relay per
+cipher through a real TCP echo + an HTTP-over-tunnel test, wrong-password
+/ source-ACL / graceful-shutdown server tests, config validation matrix,
+firewall dry-run + input-guard tests, and admin page mask/reveal/audit +
+`/metrics` gauge tests.
+
 ## v0.96 — Fix: dashboard plan-sales table was silently empty
 
 Pre-v0.96 the /admin/dashboard "最近 30 天按套餐" table referenced

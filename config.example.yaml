@@ -95,6 +95,38 @@ scheduler:
 #   retain_days: 7
 #   interval: 24h
 
+# 内置 Shadowsocks AEAD 加密代理（可选，默认关闭）
+#
+# 让这台 OpenWrt 同时充当本地加密代理：给需要出站 SOCKS 式代理的设备一个
+# ss:// 链接 / 二维码即可配置。它与 MAC 计费 / 强制门户完全独立，不会给未付费
+# 设备放行上网 —— 前提是你把它绑定在 LAN 接口上（见下方安全提示）。
+#
+# 生成强密码：  ./router-billing --gen-ss-password
+# 打印分享链接：./router-billing --ss-uri
+# 支持的加密方式：chacha20-ietf-poly1305（默认）、aes-256-gcm、aes-128-gcm
+#
+# 安全提示：
+#   * listen 只绑定 LAN 网关地址（例如 br-lan 的 192.168.5.1），
+#     千万不要绑定付费 SSID 接口，否则未付费用户可绕过门户免费上网。
+#   * 暴露到公网 (WAN) 有风险；如确需远程使用，请配合强密码 +
+#     allowed_cidrs，并在防火墙限制来源。
+#   * 仅支持 TCP（SOCKS5 CONNECT）。不做 UDP associate。
+#
+# shadowsocks:
+#   enabled: true
+#   listen: "192.168.5.1:8388"        # 仅监听 LAN！
+#   method: "chacha20-ietf-poly1305"
+#   password: "<--gen-ss-password 生成的强密码>"
+#   # 可选项：
+#   # advertise_host: "192.168.5.1"   # ss:// 里对客户端展示的地址（默认取 portal_host）
+#   # tag: "my-router"                # 客户端里显示的名称
+#   # allowed_cidrs: ["192.168.0.0/16"]   # 仅允许这些来源 IP 连接
+#   # max_conns: 512                  # 并发连接上限
+#   # timeout: 5m                     # 单向空闲超时
+#   # replay_window: 60s              # salt 重放拒绝窗口（负值=关闭，不建议）
+#   # open_firewall: true             # 由本进程用 nftables 放行端口
+#   # firewall_iface: "br-lan"        # open_firewall 时限定的接口
+
 # 出站 webhook（任何 payment/redeem/grant/revoke 都会 POST 到这个 URL）
 # 接收端可用 secret 做 HMAC-SHA256 验签：header X-Router-Billing-Signature: sha256=<hex>
 # webhook:

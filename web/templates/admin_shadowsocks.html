@@ -1,0 +1,144 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>加密代理 (Shadowsocks) · router-billing</title>
+  <link rel="stylesheet" href="/static/style.css">
+  <style>
+    .ss-status { display:inline-flex; align-items:center; gap:8px; font-weight:700; }
+    .ss-dot { width:10px; height:10px; border-radius:50%; display:inline-block; }
+    .ss-on  { background:#16a34a; }
+    .ss-off { background:#9ca3af; }
+    .ss-kv { display:grid; grid-template-columns: 140px 1fr; gap:8px 16px; margin:12px 0; }
+    .ss-kv dt { color:var(--text-soft); font-size:13px; }
+    .ss-kv dd { margin:0; font-family:ui-monospace,monospace; font-size:14px; word-break:break-all; }
+    .ss-uri {
+      font-family:ui-monospace,monospace; font-size:13px; background:var(--bg);
+      border:1px solid var(--border); border-radius:8px; padding:12px;
+      word-break:break-all; user-select:all;
+    }
+    .ss-qr { width:200px; height:200px; padding:10px; background:#fff;
+             border:1px solid var(--border); border-radius:12px; margin:12px 0; }
+    .ss-qr img { width:100%; height:100%; display:block; }
+    .ss-metrics { display:grid; grid-template-columns:repeat(auto-fit,minmax(150px,1fr)); gap:12px; }
+    .ss-metric { background:#fff; border:1px solid var(--border); border-radius:12px; padding:14px 16px; }
+    .ss-metric .n { font-size:22px; font-weight:800; }
+    .ss-metric .l { color:var(--text-soft); font-size:12px; margin-top:2px; }
+    .ss-warn { background:#fff7ed; border:1px solid #fed7aa; color:#9a3412;
+               border-radius:8px; padding:10px 12px; font-size:13px; margin:12px 0; }
+  </style>
+</head>
+<body class="admin">
+<div class="admin-shell">
+  {{template "admin-sidebar" .}}
+  <main class="admin-main">
+    <div class="admin-header">
+      <div>
+        <h1>加密代理 (Shadowsocks)</h1>
+        <div class="crumbs">内置的 Shadowsocks AEAD 代理 · 给需要出站加密代理的本地设备一个扫码即用的分享链接</div>
+      </div>
+    </div>
+
+    {{template "flash" .}}
+
+    <section class="admin-card">
+      <p>
+        {{if .Enabled}}
+          <span class="ss-status"><span class="ss-dot ss-on"></span>已启用</span>
+        {{else}}
+          <span class="ss-status"><span class="ss-dot ss-off"></span>未启用</span>
+        {{end}}
+      </p>
+
+      {{if not .Enabled}}
+      <p class="desc" style="margin-top:8px;">
+        Shadowsocks 代理默认关闭。启用后，本机可作为本地加密代理，客户端扫码即可配置。
+        它与 MAC 计费 / 强制门户完全独立，不会影响现有计费逻辑。
+      </p>
+      <p class="hint" style="font-size:13px; color:var(--text-soft);">
+        在 <code>config.yaml</code> 中添加以下配置后重启服务：
+      </p>
+      <pre class="ss-uri" style="user-select:text;">shadowsocks:
+  enabled: true
+  listen: "192.168.5.1:8388"   # 仅监听 LAN 地址，切勿绑定付费 SSID / WAN
+  method: "chacha20-ietf-poly1305"
+  password: "&lt;运行 --gen-ss-password 生成&gt;"</pre>
+      <p class="hint" style="font-size:13px; color:var(--text-soft);">
+        生成强密码：<code>router-billing --gen-ss-password</code>；
+        生成分享链接：<code>router-billing --ss-uri</code>。
+      </p>
+      {{end}}
+    </section>
+
+    {{if .Enabled}}
+    <section class="admin-card">
+      <h2 style="margin:0 0 6px; font-size:16px;">连接信息</h2>
+      <dl class="ss-kv">
+        <dt>监听地址</dt><dd>{{.Listen}}</dd>
+        <dt>加密方式</dt><dd>{{.Method}}</dd>
+        <dt>对外地址</dt><dd>{{.Host}}:{{.Port}}</dd>
+        <dt>标签</dt><dd>{{.Tag}}</dd>
+        {{if .AllowedCIDRs}}<dt>来源限制</dt><dd>{{range .AllowedCIDRs}}{{.}} {{end}}</dd>{{end}}
+        <dt>防火墙</dt><dd>{{if .OpenFirewall}}自动放行 (iface={{if .FirewallIface}}{{.FirewallIface}}{{else}}any{{end}}){{else}}手动 / 由 OpenWrt 管理{{end}}</dd>
+      </dl>
+    </section>
+
+    <section class="admin-card">
+      <h2 style="margin:0 0 6px; font-size:16px;">分享链接 &amp; 二维码</h2>
+      {{if .Reveal}}
+        <div class="ss-warn">
+          ⚠ 下方链接与二维码<strong>包含密码</strong>，请勿截图外发或投屏公开展示。查看动作已记入审计日志。
+        </div>
+        {{if .URI}}
+        <div class="ss-uri" id="ssuri">{{.URI}}</div>
+        <div style="margin:10px 0;">
+          <button type="button" class="btn primary small" style="width:auto;"
+            onclick="navigator.clipboard.writeText(document.getElementById('ssuri').innerText)">复制链接</button>
+          <a href="/admin/shadowsocks" class="btn ghost small" style="width:auto;">隐藏</a>
+        </div>
+        <div class="ss-qr"><img src="/admin/shadowsocks/qr" alt="ss:// QR"></div>
+        <p class="hint" style="font-size:12px; color:var(--text-soft);">
+          使用 Shadowsocks / Outline / Clash / 官方 iOS·Android 客户端扫码导入。
+        </p>
+        {{else}}
+        <p class="desc">无法生成分享链接，请检查配置。</p>
+        {{end}}
+      {{else}}
+        <p class="desc" style="margin-top:0;">分享链接含密码，默认隐藏。</p>
+        <a href="/admin/shadowsocks?reveal=1" class="btn primary small" style="width:auto;">显示分享链接 &amp; 二维码</a>
+      {{end}}
+    </section>
+
+    {{with .Metrics}}
+    <section class="admin-card">
+      <h2 style="margin:0 0 12px; font-size:16px;">运行指标</h2>
+      <div class="ss-metrics">
+        <div class="ss-metric"><div class="n">{{.ConnectionsTotal}}</div><div class="l">累计连接</div></div>
+        <div class="ss-metric"><div class="n">{{.ActiveConns}}</div><div class="l">当前活跃</div></div>
+        <div class="ss-metric"><div class="n">{{.BytesIn}}</div><div class="l">入站字节</div></div>
+        <div class="ss-metric"><div class="n">{{.BytesOut}}</div><div class="l">出站字节</div></div>
+        <div class="ss-metric"><div class="n">{{.HandshakeErrors}}</div><div class="l">握手失败</div></div>
+        <div class="ss-metric"><div class="n">{{.DialErrors}}</div><div class="l">目标连接失败</div></div>
+        <div class="ss-metric"><div class="n">{{.ReplayRejected}}</div><div class="l">重放拒绝</div></div>
+        <div class="ss-metric"><div class="n">{{.BlockedByACL}}</div><div class="l">来源拦截</div></div>
+      </div>
+      <p class="hint" style="font-size:12px; color:var(--text-soft); margin-top:12px;">
+        同样的指标以 <code>router_billing_shadowsocks_*</code> 暴露在 <code>/metrics</code>。
+      </p>
+    </section>
+    {{end}}
+
+    <section class="admin-card">
+      <h2 style="margin:0 0 6px; font-size:16px;">安全建议</h2>
+      <ul class="desc" style="margin:0; padding-left:18px; line-height:1.7;">
+        <li>务必只监听 <strong>LAN 地址</strong>（如 br-lan / Free_WiFi 的网关 IP），<strong>不要</strong>绑定付费 SSID —— 否则未付费用户可绕过门户上网。</li>
+        <li>暴露到公网 (WAN) 有风险；如确需远程使用，请配合强密码与 <code>allowed_cidrs</code>，并在防火墙上限制来源。</li>
+        <li>轮换密码：<code>--gen-ss-password</code> 生成新值，替换 config 后重启；旧链接立即失效。</li>
+      </ul>
+    </section>
+    {{end}}
+  </main>
+</div>
+</body>
+</html>
