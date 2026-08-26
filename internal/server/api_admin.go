@@ -85,6 +85,22 @@ func (a *App) requireAPITokenRead(h func(w http.ResponseWriter, r *http.Request,
 	}
 }
 
+// requireAPITokenReadScoped is requireAPITokenRead for read paths whose
+// PAYLOAD (not just access) must vary by scope: the handler receives the
+// token's read-only bit so it can strip fields a monitoring-grade token
+// shouldn't hold while keeping the endpoint useful for alerting. Today
+// that's /api/admin/sms/log, which redacts message bodies for read-only
+// tokens (see handleAPISMSLog).
+func (a *App) requireAPITokenReadScoped(h func(w http.ResponseWriter, r *http.Request, actor string, readOnly bool)) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		tok := a.matchBearerOrUnauthorized(w, r)
+		if tok == nil {
+			return
+		}
+		h(w, r, "api:"+tokenLabel(tok), tok.ReadOnly)
+	}
+}
+
 // matchBearerOrUnauthorized parses the Authorization header, looks up the
 // token, applies the per-token rate limit (if configured), and writes a
 // 401 / 429 response on failure. Returns nil iff the response is already
@@ -1599,8 +1615,19 @@ type apiSMSLogEntry struct {
 //   - phone=13800...       exact match (support workflows)
 //   - only_failed=1        success=0 only (monitoring alerts)
 //
+// SCOPE: read-only tokens get every row but with `message` REDACTED
+// (empty + top-level "messages_redacted": true). SMS bodies carry live
+// credentials — /admin/users/reset-password (via_sms) texts the raw temp
+// password as the entire message, and /user/forgot-password texts the
+// reset code — so an exfiltrated monitoring token must not double as a
+// credential-harvesting token. Same posture as /api/admin/backup being
+// privileged-only: read/write is a CAPABILITY split, not a formality.
+// The monitoring use-case (alert on FAIL streaks) only needs sent_at /
+// success / error_msg, which stay visible. Full-scope tokens keep the
+// bodies (they could reset the passwords themselves anyway).
+//
 // limit defaults to 100, max 1000. Newest rows first.
-func (a *App) handleAPISMSLog(w http.ResponseWriter, r *http.Request, _ string) {
+func (a *App) handleAPISMSLog(w http.ResponseWriter, r *http.Request, _ string, readOnly bool) {
 	if r.Method != http.MethodGet {
 		writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "GET only"})
 		return
@@ -1625,13 +1652,23 @@ func (a *App) handleAPISMSLog(w http.ResponseWriter, r *http.Request, _ string) 
 	}
 	out := make([]apiSMSLogEntry, 0, len(logs))
 	for _, l := range logs {
-		out = append(out, apiSMSLogEntry{
+		e := apiSMSLogEntry{
 			ID: l.ID, SentAt: l.SentAt, Provider: l.Provider,
 			Phone: l.Phone, Message: l.Message, Success: l.Success,
 			ErrorMsg: l.ErrorMsg,
-		})
+		}
+		if readOnly {
+			// Read-only scope: strip the body — it can be a live temp
+			// password or password-reset code (see handler comment).
+			e.Message = ""
+		}
+		out = append(out, e)
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"logs": out, "count": len(out)})
+	resp := map[string]any{"logs": out, "count": len(out)}
+	if readOnly {
+		resp["messages_redacted"] = true
+	}
+	writeJSON(w, http.StatusOK, resp)
 }
 
 type apiWebhookDelivery struct {
