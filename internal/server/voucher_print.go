@@ -4,7 +4,9 @@ import (
 	"bytes"
 	"image/png"
 	"net/http"
+	"net/url"
 	"strings"
+	"time"
 
 	"router-billing/internal/voucher"
 
@@ -24,8 +26,15 @@ func (a *App) handleAdminVouchersPrint(w http.ResponseWriter, r *http.Request) {
 	// Only print usable ones (not redeemed/revoked/expired).
 	var usable []map[string]string
 	portal := a.Cfg.PortalBase()
+	now := time.Now().UTC()
 	for _, v := range list {
 		if v.Revoked || v.RedeemedAt != nil {
+			continue
+		}
+		// Expired codes are rejected at redeem time — printing them hands
+		// customers dead cards (the comment above always promised this
+		// filter; pre-v0.121 the check was missing).
+		if v.ExpiresAt != nil && v.ExpiresAt.Before(now) {
 			continue
 		}
 		usable = append(usable, map[string]string{
@@ -33,12 +42,22 @@ func (a *App) handleAdminVouchersPrint(w http.ResponseWriter, r *http.Request) {
 			"Pretty": voucher.Pretty(v.Code),
 			"Days":   itoa(v.Days),
 			"Batch":  v.Batch,
-			"QRPath": "/admin/vouchers/print/qr?code=" + v.Code,
+			// QueryEscape: imported codes are only length-checked (≥6
+			// after Canon), so characters like '&' would otherwise split
+			// the query string.
+			"QRPath": "/admin/vouchers/print/qr?code=" + url.QueryEscape(v.Code),
 		})
+	}
+	// ?batch= is free text echoed into the page title/header. The DB filter
+	// is an exact match, so any non-empty result proves the name is real;
+	// otherwise render it empty instead of reflecting arbitrary text.
+	displayBatch := ""
+	if batch != "" && len(list) > 0 {
+		displayBatch = batch
 	}
 	a.render(w, "admin_vouchers_print.html", map[string]any{
 		"Vouchers": usable,
-		"Batch":    batch,
+		"Batch":    displayBatch,
 		"Portal":   portal,
 		"Count":    len(usable),
 	})
@@ -51,7 +70,7 @@ func (a *App) handleAdminVouchersPrintQR(w http.ResponseWriter, r *http.Request)
 		http.Error(w, "missing code", http.StatusBadRequest)
 		return
 	}
-	payload := a.Cfg.PortalBase() + "/redeem?code=" + code
+	payload := a.Cfg.PortalBase() + "/redeem?code=" + url.QueryEscape(code)
 	c, err := qr.Encode(payload, qr.M)
 	if err != nil {
 		http.Error(w, "qr: "+err.Error(), http.StatusInternalServerError)

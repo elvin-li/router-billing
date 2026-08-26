@@ -278,47 +278,99 @@ func adminLoginErrLabel(code string) string {
 	}
 }
 
-func errLabel(code string) string {
-	switch code {
-	case "":
-		return ""
-	case "invalid_mac":
-		return "MAC 格式不正确"
-	case "invalid_days":
-		return "请选择套餐或填入正整数天数"
-	case "internal":
-		return "内部错误，请重试"
-	case "arp":
-		return "无法读取在线设备列表（检查 paid_iface 是否正确）"
-	case "refund_confirm":
-		return "退款失败：请在确认框中输入完整订单号"
-	case "refund_no_order":
-		return "退款失败：找不到该订单"
-	case "refund_not_paid":
-		return "退款失败：只能退款已支付的订单"
-	case "refund_failed":
-		return "退款失败：请查看服务日志"
-	case "revoked":
-		return ""
+// errLabels maps every legitimate ?err= code onto its user-facing flash
+// text. Codes mapping to "" render no banner. A lookup table (rather than
+// the old switch) keeps the function's complexity flat as codes accrue.
+var errLabels = map[string]string{
+	"":                "",
+	"invalid_mac":     "MAC 格式不正确",
+	"invalid_days":    "请选择套餐或填入正整数天数",
+	"internal":        "内部错误，请重试",
+	"arp":             "无法读取在线设备列表（检查 paid_iface 是否正确）",
+	"refund_confirm":  "退款失败：请在确认框中输入完整订单号",
+	"refund_no_order": "退款失败：找不到该订单",
+	"refund_not_paid": "退款失败：只能退款已支付的订单",
+	"refund_failed":   "退款失败：请查看服务日志",
+	"revoked":         "",
 	// v0.108: codes that previously fell through to the raw string —
 	// admins saw literal "bad_key" / "not_found" flashes.
-	case "bad_key":
-		return "套餐 key 只能包含字母 / 数字 / - / _（最长 32 字符）"
-	case "label_too_long":
-		return "显示名过长（最多 64 字符）"
-	case "days_too_large":
-		return "天数过大（最多 3650 天）"
-	case "price_too_large":
-		return "价格过大（超过 ¥100,000 — 请检查是否多打了零）"
-	case "not_found":
-		return "未找到对应记录"
-	case "bad_mac":
-		return "MAC 格式不正确"
-	case "db":
-		return "数据库错误，请重试"
-	default:
-		return code
+	"bad_key":         "套餐 key 只能包含字母 / 数字 / - / _（最长 32 字符）",
+	"label_too_long":  "显示名过长（最多 64 字符）",
+	"days_too_large":  "天数过大（最多 3650 天）",
+	"price_too_large": "价格过大（超过 ¥100,000 — 请检查是否多打了零）",
+	"not_found":       "未找到对应记录",
+	"bad_mac":         "MAC 格式不正确",
+	"db":              "数据库错误，请重试",
+	// v0.119: the remaining codes that still fell through to the raw
+	// string.
+	"bad_phone":              "手机号格式不正确",
+	"sms_disabled":           "短信服务未配置或不可用",
+	"sms_unavailable":        "短信服务未配置或不可用",
+	"sms_failed":             "短信发送失败，请查看短信日志",
+	"trim_failed":            "日志清理失败，请查看服务日志",
+	"optimize_failed":        "PRAGMA optimize 执行失败，请查看服务日志",
+	"expire_failed":          "到期扫描失败，请查看服务日志",
+	"webhook_not_configured": "Webhook 未配置，请先在 config 中填写 webhook.url",
+	"cancel_stale_failed":    "批量取消失败，请查看服务日志",
+	"missing_order":          "缺少订单号",
+	"not_pending":            "订单不在 pending 状态，无法取消",
+	"empty_note":             "备注内容不能为空",
+	"invalid":                "参数无效，请重试",
+	"digest_no_phone":        "未配置日报接收手机号（sms.admin_digest_phone）",
+}
+
+func errLabel(code string) string {
+	if label, ok := errLabels[code]; ok {
+		return label
 	}
+	// SECURITY: never echo an unrecognized code. ?err= is plain query
+	// input, so `/admin/orders?err=<any text>` used to render
+	// attacker-chosen content inside the trusted red flash box on
+	// every admin page (html/template escapes markup, but verbatim
+	// text in trusted UI chrome is a phishing aid all by itself).
+	return "操作失败，请重试"
+}
+
+// digitsOnly strips everything but ASCII digits and caps the result at
+// max characters. Used to launder query params that templates render as
+// numbers inside flash messages.
+func digitsOnly(s string, max int) string {
+	var b strings.Builder
+	for _, r := range s {
+		if b.Len() >= max {
+			break
+		}
+		if r >= '0' && r <= '9' {
+			b.WriteRune(r)
+		}
+	}
+	return b.String()
+}
+
+// numericFlashKeys are the query params that admin templates interpolate
+// into flash sentences as counts / ids ("用户 #{{reset_uid}}", "已批量取消
+// {{count}} 条…"). They arrive via redirect query strings — i.e. plain
+// client input — so a crafted link could otherwise plant arbitrary text
+// inside a trusted green flash banner.
+var numericFlashKeys = []string{
+	"count", "hours", "sent", "skipped", "errored", "reset_uid",
+	"expired", "ms", "added", "failed", "revoked", "ok_n", "fail_n",
+}
+
+// queryFlashParams copies the request's query params for template flash
+// blocks (the Query0 map), forcing known-numeric keys down to digits so
+// they can only ever render as numbers.
+func queryFlashParams(r *http.Request) map[string]string {
+	out := map[string]string{}
+	for k := range r.URL.Query() {
+		out[k] = r.URL.Query().Get(k)
+	}
+	for _, k := range numericFlashKeys {
+		if v, ok := out[k]; ok {
+			out[k] = digitsOnly(v, 12)
+		}
+	}
+	return out
 }
 
 func (a *App) handleAdminMACs(w http.ResponseWriter, r *http.Request) {
@@ -620,12 +672,9 @@ func (a *App) handleAdminUsers(w http.ResponseWriter, r *http.Request) {
 	if macCount == nil {
 		macCount = map[int64]int{}
 	}
-	// Allow the template to read raw query params (e.g. flash data from
-	// reset-password redirects). Keeps the data shape simple.
-	rawQuery := map[string]string{}
-	for k := range r.URL.Query() {
-		rawQuery[k] = r.URL.Query().Get(k)
-	}
+	// Allow the template to read query params (e.g. flash data from
+	// reset-password redirects), with numeric flash keys laundered.
+	rawQuery := queryFlashParams(r)
 	a.render(w, "admin_users.html", a.adminCtx(r, "users", map[string]any{
 		"Users":    users,
 		"MacCount": macCount,
@@ -758,7 +807,11 @@ func (a *App) handleAdminUserResetPassword(w http.ResponseWriter, r *http.Reques
 	// when SMS isn't wired or delivery fails.
 	if r.PostForm.Get("via_sms") == "1" && a.SMS != nil && a.SMS.Available() {
 		if user, err := a.DB.GetUser(r.Context(), id); err == nil && user != nil {
-			sErr := a.SendSMS(r.Context(), user.Phone, tmpPwd)
+			// Same rationale as the inline-display comment below: the temp
+			// password is a live credential and must not be persisted. The
+			// sms_log row records THAT a reset SMS went out, never its body
+			// (readable by read-only API tokens via /api/admin/sms/log).
+			sErr := a.SendSMSSensitive(r.Context(), user.Phone, tmpPwd, "[临时密码已发送 — 内容不入库]")
 			if sErr == nil {
 				a.DB.Audit(r.Context(), "admin", "user_reset_password", strconv.FormatInt(id, 10),
 					"via=sms provider="+a.SMS.Name()+" ip="+clientIP(r))
@@ -821,7 +874,7 @@ func (a *App) handleAdminMACAdd(w http.ResponseWriter, r *http.Request) {
 			days = p.Days
 		}
 	}
-	if days <= 0 {
+	if days <= 0 || days > maxGrantDays {
 		http.Redirect(w, r, redirectBack(r, "err=invalid_days"), http.StatusSeeOther)
 		return
 	}
@@ -901,7 +954,7 @@ func (a *App) handleAdminMACBulk(w http.ResponseWriter, r *http.Request) {
 		}
 	case "extend":
 		days, _ := strconv.Atoi(r.PostForm.Get("days"))
-		if days <= 0 {
+		if days <= 0 || days > maxGrantDays {
 			http.Redirect(w, r, "/admin/macs?err=invalid_days", http.StatusSeeOther)
 			return
 		}
@@ -942,7 +995,7 @@ func (a *App) handleAdminMACExtend(w http.ResponseWriter, r *http.Request) {
 			days = p.Days
 		}
 	}
-	if days <= 0 {
+	if days <= 0 || days > maxGrantDays {
 		http.Redirect(w, r, redirectBack(r, "err=invalid_days"), http.StatusSeeOther)
 		return
 	}
@@ -1016,10 +1069,7 @@ func (a *App) handleAdminOrders(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "db", http.StatusInternalServerError)
 		return
 	}
-	rawQuery := map[string]string{}
-	for k := range r.URL.Query() {
-		rawQuery[k] = r.URL.Query().Get(k)
-	}
+	rawQuery := queryFlashParams(r)
 	a.render(w, "admin_orders.html", a.adminCtx(r, "orders", map[string]any{
 		"Orders": orders,
 		"Query":  q,

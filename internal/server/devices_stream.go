@@ -123,11 +123,37 @@ func (a *App) buildDeviceList(ctx context.Context) []deviceJSON {
 	out := make([]deviceJSON, 0, len(sightings)+len(entries))
 	now := time.Now()
 
-	add := func(mac, ip, host string, last time.Time) {
-		if seen[mac] {
+	// Batch the billing-row lookup: this list rebuilds every 5s per
+	// connected admin stream, and the per-device GetMAC issued one point
+	// query per sighting+ARP entry each tick — the exact N+1 GetMACsIn
+	// was added to fix for the initial HTML render (admin.go), left
+	// behind here.
+	allMACs := make([]string, 0, len(sightings)+len(entries))
+	collect := func(mac string) {
+		if mac == "" || seen[mac] {
 			return
 		}
 		seen[mac] = true
+		allMACs = append(allMACs, mac)
+	}
+	for _, s := range sightings {
+		collect(s.MAC)
+	}
+	for _, e := range entries {
+		collect(e.MAC)
+	}
+	known, err := a.DB.GetMACsIn(ctx, allMACs)
+	if err != nil {
+		log.Printf("stream: batch mac lookup: %v", err)
+		known = map[string]*models.MAC{}
+	}
+
+	added := map[string]bool{}
+	add := func(mac, ip, host string, last time.Time) {
+		if mac == "" || added[mac] {
+			return
+		}
+		added[mac] = true
 		d := deviceJSON{
 			MAC: mac, IP: ip, Hostname: host,
 			LastSeenAt: last.Local().Format("2006-01-02 15:04:05"),
@@ -138,7 +164,7 @@ func (a *App) buildDeviceList(ctx context.Context) []deviceJSON {
 				d.IP = onlineIP
 			}
 		}
-		if m, _ := a.DB.GetMAC(ctx, mac); m != nil {
+		if m := known[mac]; m != nil {
 			d.Known = true
 			d.Label = m.Label
 			d.ExpiresAt = m.ExpiresAt.Local().Format("2006-01-02 15:04")

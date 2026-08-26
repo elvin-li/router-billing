@@ -264,6 +264,27 @@ func TestAdminDigestTriggerNoPhoneReturnsErr(t *testing.T) {
 	}
 }
 
+// A malformed configured phone must bounce the manual trigger the same
+// way the background loop refuses to start — not burn a provider call.
+func TestAdminDigestTriggerBadPhoneReturnsErr(t *testing.T) {
+	app := setupTestApp(t)
+	console := sms.NewConsole(50)
+	app.SMS = &sms.Sender{P: console}
+	app.Cfg.SMS.AdminLoginAlertPhone = "not-a-phone"
+	h := app.Routes()
+	jar := loginAdmin(t, h)
+	csrf := jar[csrfCookieName]
+	type kv = map[string][]string
+	res, _ := do(t, h, "POST", "/admin/sms-log/digest",
+		kv{"_csrf": {csrf}}, jar)
+	if !strings.Contains(res.Header.Get("Location"), "digest_no_phone") {
+		t.Errorf("expected digest_no_phone; got %s", res.Header.Get("Location"))
+	}
+	if n := len(console.Recent()); n != 0 {
+		t.Errorf("no SMS should be sent to a malformed phone; got %d", n)
+	}
+}
+
 func TestAdminDigestLoopShortCircuitsWhenSMSNotConfigured(t *testing.T) {
 	app := setupTestApp(t)
 	app.Cfg.SMS.AdminDigestHour = 3

@@ -101,10 +101,17 @@ func userErrLabel(code string) string {
 		return "未检测到本设备 MAC，请连接到收费 SSID 后重试"
 	case "replace_failed":
 		return "替换失败：可能 MAC 不属于你 / 已过期 / 目标 MAC 已被使用"
+	case "backup_codes_failed":
+		return "二步验证已开启，但备用码生成失败，请在下方重新生成"
 	case "internal":
 		return "内部错误，请重试"
 	default:
-		return code
+		// SECURITY: never echo an unrecognized code. ?err= is plain query
+		// input on public pages (/user/login, /user/register), so
+		// reflecting it verbatim let crafted links plant arbitrary
+		// phishing text inside the trusted red flash box — the exact
+		// bug fixed for the admin pages and /redeem in v0.122.
+		return "操作失败，请重试"
 	}
 }
 
@@ -388,13 +395,10 @@ func (a *App) handleUserMe(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Last 10 audit entries for this account — login successes/failures,
-	// 2FA events, password resets, etc. Filter by actor pattern that matches
-	// both "user:<phone>" (real events) and "user-attempt:<phone>" (failed
-	// logins that never got a session).
-	activity, _ := a.DB.SearchAudit(r.Context(), db.AuditFilter{
-		Actor: ":" + user.Phone,
-		Limit: 10,
-	})
+	// 2FA events, password resets, etc. Matches both "user:<phone>" (real
+	// events) and "user-attempt:<phone>" (failed logins that never got a
+	// session) via an indexed exact-actor lookup.
+	activity, _ := a.DB.ListAuditForUserPhone(r.Context(), user.Phone, 10)
 	sessionCount, _ := a.DB.CountUserSessions(r.Context(), uid)
 
 	a.render(w, "user_me.html", a.userCtx(r, "me", map[string]any{
@@ -689,10 +693,28 @@ func (a *App) handleUserAccountExport(w http.ResponseWriter, r *http.Request) {
 	}
 	macs, _ := a.DB.ListMACsForUser(r.Context(), uid)
 	orders, _ := a.DB.ListOrdersForUser(r.Context(), uid, 500)
-	activity, _ := a.DB.SearchAudit(r.Context(), db.AuditFilter{
-		Actor: ":" + user.Phone,
-		Limit: 100,
-	})
+	activity, _ := a.DB.ListAuditForUserPhone(r.Context(), user.Phone, 100)
+
+	// Project MACs into the user-visible shape. models.MAC carries the
+	// admin-only `notes` field (free-text support context — may reference
+	// other customers, fraud suspicions, internal tickets) and the
+	// admin-set `schedule_json`; neither is shown anywhere in the user
+	// portal, so serializing the raw struct here leaked them.
+	type macEntry struct {
+		Mac       string           `json:"mac"`
+		Label     string           `json:"label"`
+		Status    models.MACStatus `json:"status"`
+		ExpiresAt time.Time        `json:"expires_at"`
+		CreatedAt time.Time        `json:"created_at"`
+		UpdatedAt time.Time        `json:"updated_at"`
+	}
+	macOut := make([]macEntry, 0, len(macs))
+	for _, m := range macs {
+		macOut = append(macOut, macEntry{
+			Mac: m.Mac, Label: m.Label, Status: m.Status,
+			ExpiresAt: m.ExpiresAt, CreatedAt: m.CreatedAt, UpdatedAt: m.UpdatedAt,
+		})
+	}
 
 	type activityEntry struct {
 		At     time.Time `json:"at"`
@@ -718,7 +740,7 @@ func (a *App) handleUserAccountExport(w http.ResponseWriter, r *http.Request) {
 			"created_at":   user.CreatedAt,
 			"updated_at":   user.UpdatedAt,
 		},
-		"macs":     macs,
+		"macs":     macOut,
 		"orders":   orders,
 		"activity": actOut,
 	}

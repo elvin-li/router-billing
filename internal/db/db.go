@@ -492,9 +492,14 @@ func (d *DB) ReplaceMAC(ctx context.Context, userID int64, oldMac, newMac, label
 		return nil, err
 	}
 	now := time.Now().UTC()
+	// Carry the admin-managed columns over to the new row. schedule_json
+	// especially: dropping it meant a user could shed an admin-imposed
+	// time-of-day restriction just by "replacing" the device with a fresh
+	// randomized MAC (self-service /user/macs/replace) — the paid time
+	// transferred but the curfew silently vanished.
 	if _, err := tx.ExecContext(ctx,
-		`INSERT INTO macs (mac, label, status, expires_at, user_id, created_at, updated_at) VALUES (?, ?, 'active', ?, ?, ?, ?)`,
-		newMac, label, newExpiry, userID, now, now); err != nil {
+		`INSERT INTO macs (mac, label, status, expires_at, user_id, schedule_json, notes, created_at, updated_at) VALUES (?, ?, 'active', ?, ?, ?, ?, ?, ?)`,
+		newMac, label, newExpiry, userID, old.ScheduleJSON, old.Notes, now, now); err != nil {
 		return nil, err
 	}
 	if err := tx.Commit(); err != nil {
@@ -2403,6 +2408,36 @@ type AuditFilter struct {
 	Since  string // YYYY-MM-DD (inclusive)
 	Until  string // YYYY-MM-DD (inclusive)
 	Limit  int
+}
+
+// ListAuditForUserPhone returns the newest audit entries whose actor is
+// exactly "user:<phone>" or "user-attempt:<phone>" — the two forms the user
+// portal writes. The user-facing activity feed (/user/me, every page load)
+// and the account export previously funneled through SearchAudit with a
+// substring filter, i.e. `actor LIKE '%:<phone>%'`: un-indexable, so SQLite
+// walked the whole audit_log backwards until it collected `limit` matches —
+// a full-table scan per page view for accounts with little history. The
+// exact IN (…) match is equivalent (no other actor form embeds ":<phone>")
+// and walks idx_audit_actor.
+func (d *DB) ListAuditForUserPhone(ctx context.Context, phone string, limit int) ([]AuditEntry, error) {
+	limit = clampLimit(limit, 10)
+	rows, err := d.conn.QueryContext(ctx,
+		`SELECT id, at, actor, action, target, detail FROM audit_log
+		 WHERE actor IN (?, ?) ORDER BY id DESC LIMIT ?`,
+		"user:"+phone, "user-attempt:"+phone, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []AuditEntry
+	for rows.Next() {
+		var e AuditEntry
+		if err := rows.Scan(&e.ID, &e.At, &e.Actor, &e.Action, &e.Target, &e.Detail); err != nil {
+			return nil, err
+		}
+		out = append(out, e)
+	}
+	return out, rows.Err()
 }
 
 func (d *DB) SearchAudit(ctx context.Context, f AuditFilter) ([]AuditEntry, error) {

@@ -81,6 +81,11 @@ func (a *App) streamBackup(w http.ResponseWriter, r *http.Request, actor, ip str
 			log.Printf("backup: checkpoint failed: %v", err)
 		}
 	} else {
+		// VACUUM INTO creates the snapshot with the umask (often 0644):
+		// clamp to 0600 like the primary DB and the nightly rotator's
+		// snapshots (v0.108) — the file carries password hashes, TOTP
+		// secrets, and full voucher codes for the duration of the download.
+		_ = os.Chmod(snap, 0o600)
 		defer os.Remove(snap)
 	}
 	f, err := os.Open(path)

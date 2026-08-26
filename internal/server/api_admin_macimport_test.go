@@ -85,6 +85,46 @@ func TestAPIMACImportDefaultDays(t *testing.T) {
 	}
 }
 
+func TestAPIMACImportDefaultDaysTooLargeRejected(t *testing.T) {
+	app := setupTestApp(t)
+	app.Cfg.APITokens = []config.APIToken{{Token: "rb_w", Label: "ops"}}
+	h := app.Routes()
+	rr := apiReq(t, h, "POST", "/api/admin/macs/import", "rb_w",
+		`{"default_days":99999,"macs":[{"mac":"AA:BB:CC:00:00:01"}]}`)
+	if rr.Code != 400 {
+		t.Errorf("default_days over cap should 400; got %d body=%s", rr.Code, rr.Body.String())
+	}
+}
+
+func TestAPIMACImportRowDaysTooLargeFails(t *testing.T) {
+	app := setupTestApp(t)
+	app.Cfg.APITokens = []config.APIToken{{Token: "rb_w", Label: "ops"}}
+	h := app.Routes()
+
+	// Row 1 exceeds the 3650-day cap (would overflow time math with big
+	// enough values); row 2 is fine. Row 1 must fail without blocking row 2.
+	rr := apiReq(t, h, "POST", "/api/admin/macs/import", "rb_w",
+		`{"macs":[{"mac":"AA:BB:CC:00:00:01","days":100000},{"mac":"AA:BB:CC:00:00:02","days":30}]}`)
+	if rr.Code != 200 {
+		t.Fatalf("status: %d body=%s", rr.Code, rr.Body.String())
+	}
+	var resp struct {
+		Added  int `json:"added"`
+		Failed int `json:"failed"`
+	}
+	_ = json.Unmarshal(rr.Body.Bytes(), &resp)
+	if resp.Added != 1 || resp.Failed != 1 {
+		t.Errorf("added=%d failed=%d; want 1/1", resp.Added, resp.Failed)
+	}
+	ctx := context.Background()
+	if m, _ := app.DB.GetMAC(ctx, "AA:BB:CC:00:00:01"); m != nil {
+		t.Error("over-cap row should not create a MAC")
+	}
+	if m, _ := app.DB.GetMAC(ctx, "AA:BB:CC:00:00:02"); m == nil {
+		t.Error("valid row should still be created")
+	}
+}
+
 func TestAPIMACImportReadOnlyTokenRejected(t *testing.T) {
 	app := setupTestApp(t)
 	app.Cfg.APITokens = []config.APIToken{{Token: "rb_ro", Label: "monitor", ReadOnly: true}}

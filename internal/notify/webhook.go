@@ -171,6 +171,14 @@ func (n *Notifier) Send(ev Event) {
 	if n == nil || n.URL == "" {
 		return
 	}
+	if n.queue == nil {
+		// A Notifier built as a struct literal with URL set (bypassing
+		// New) has no queue: a send on a nil channel never proceeds, so
+		// the select below fell through to `default` and logged a
+		// misleading "queue full" for EVERY event. Name the real problem.
+		log.Printf("notify: dropping %s/%s — Notifier not initialized via notify.New (no queue)", ev.Type, ev.MAC)
+		return
+	}
 	if ev.At.IsZero() {
 		ev.At = time.Now().UTC()
 	}

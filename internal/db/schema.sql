@@ -186,6 +186,9 @@ CREATE TABLE IF NOT EXISTS audit_log (
     detail      TEXT NOT NULL DEFAULT ''
 );
 CREATE INDEX IF NOT EXISTS idx_audit_at ON audit_log(at);
+-- v0.125: exact-actor lookups (user portal activity feed / account export)
+-- walk this index instead of a reverse full-table LIKE '%…%' scan.
+CREATE INDEX IF NOT EXISTS idx_audit_actor ON audit_log(actor);
 -- /admin/audit exact-match action filter + DISTINCT action dropdown; the
 -- audit log is the largest table on long-running installs.
 CREATE INDEX IF NOT EXISTS idx_audit_action ON audit_log(action);

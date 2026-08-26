@@ -33,6 +33,13 @@ import (
 	"router-billing/internal/voucher"
 )
 
+// maxGrantDays caps every grant/extend/voucher `days` input at 10 years.
+// Beyond typo-guarding, huge values (e.g. 9e18 from a scripted client)
+// overflow time.Time inside AddDate(0,0,days) and can wrap expires_at into
+// the PAST — silently revoking instead of granting. Every entry point that
+// feeds days into UpsertMAC/CreateVoucher must enforce this bound.
+const maxGrantDays = 3650
+
 // requireAPITokenWrite extracts Authorization: Bearer <token>, verifies it
 // against config.api_tokens, and blocks read-only tokens from non-GET
 // methods. Used for endpoints that mutate state.
@@ -42,7 +49,13 @@ func (a *App) requireAPITokenWrite(h func(w http.ResponseWriter, r *http.Request
 		if tok == nil {
 			return
 		}
-		if r.Method != http.MethodGet && tok.ReadOnly {
+		// Read-only tokens are rejected on EVERY method, not just
+		// non-GET: all 22 write-registered handlers are POST-only today,
+		// so the old `r.Method != http.MethodGet` carve-out changed
+		// nothing for legitimate callers — but it meant one future write
+		// handler answering an informational GET (or accepting GET as a
+		// convenience) would silently open to monitoring-grade tokens.
+		if tok.ReadOnly {
 			writeJSON(w, http.StatusForbidden, map[string]string{"error": "token is read-only"})
 			return
 		}
@@ -82,6 +95,22 @@ func (a *App) requireAPITokenRead(h func(w http.ResponseWriter, r *http.Request,
 			return
 		}
 		h(w, r, "api:"+tokenLabel(tok))
+	}
+}
+
+// requireAPITokenReadScoped is requireAPITokenRead for read paths whose
+// PAYLOAD (not just access) must vary by scope: the handler receives the
+// token's read-only bit so it can strip fields a monitoring-grade token
+// shouldn't hold while keeping the endpoint useful for alerting. Today
+// that's /api/admin/sms/log, which redacts message bodies for read-only
+// tokens (see handleAPISMSLog).
+func (a *App) requireAPITokenReadScoped(h func(w http.ResponseWriter, r *http.Request, actor string, readOnly bool)) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		tok := a.matchBearerOrUnauthorized(w, r)
+		if tok == nil {
+			return
+		}
+		h(w, r, "api:"+tokenLabel(tok), tok.ReadOnly)
 	}
 }
 
@@ -1058,7 +1087,7 @@ func (a *App) handleAPIMACGrant(w http.ResponseWriter, r *http.Request, actor st
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid mac"})
 		return
 	}
-	if req.Days <= 0 || req.Days > 3650 {
+	if req.Days <= 0 || req.Days > maxGrantDays {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "days must be in 1..3650"})
 		return
 	}
@@ -1131,6 +1160,13 @@ func (a *App) handleAPIMACImport(w http.ResponseWriter, r *http.Request, actor s
 	if defaultDays <= 0 {
 		defaultDays = 30
 	}
+	// Same 3650-day (10-year) cap as /api/admin/macs/grant — without it a
+	// bulk import could set effectively-permanent expiries (or overflow
+	// time math with absurd values) that the single-grant path rejects.
+	if defaultDays > maxGrantDays {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "default_days too large (max 3650)"})
+		return
+	}
 	added, failed := 0, 0
 	for _, row := range req.MACs {
 		mac, ok := models.NormalizeMAC(row.MAC)
@@ -1141,6 +1177,11 @@ func (a *App) handleAPIMACImport(w http.ResponseWriter, r *http.Request, actor s
 		days := row.Days
 		if days <= 0 {
 			days = defaultDays
+		}
+		if days > maxGrantDays {
+			log.Printf("api mac import %s: days %d exceeds max 3650", mac, days)
+			failed++
+			continue
 		}
 		if _, err := a.MACSvc.Extend(r.Context(), mac, strings.TrimSpace(row.Label), days, nil); err != nil {
 			log.Printf("api mac import %s: %v", mac, err)
@@ -1338,8 +1379,12 @@ func (a *App) handleAPIVoucherGenerate(w http.ResponseWriter, r *http.Request, a
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "count must be 1..1000"})
 		return
 	}
-	if req.Days <= 0 {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "days must be > 0"})
+	if req.Days <= 0 || req.Days > maxGrantDays {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "days must be in 1..3650"})
+		return
+	}
+	if req.ExpiresDays > maxGrantDays {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "expires_days too large (max 3650)"})
 		return
 	}
 	batch := strings.TrimSpace(req.Batch)
@@ -1462,8 +1507,8 @@ func (a *App) handleAPIUserGrant(w http.ResponseWriter, r *http.Request, actor s
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "user_id required"})
 		return
 	}
-	if req.Days <= 0 {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "days must be > 0"})
+	if req.Days <= 0 || req.Days > maxGrantDays {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "days must be in 1..3650"})
 		return
 	}
 
@@ -1599,8 +1644,19 @@ type apiSMSLogEntry struct {
 //   - phone=13800...       exact match (support workflows)
 //   - only_failed=1        success=0 only (monitoring alerts)
 //
+// SCOPE: read-only tokens get every row but with `message` REDACTED
+// (empty + top-level "messages_redacted": true). SMS bodies carry live
+// credentials — /admin/users/reset-password (via_sms) texts the raw temp
+// password as the entire message, and /user/forgot-password texts the
+// reset code — so an exfiltrated monitoring token must not double as a
+// credential-harvesting token. Same posture as /api/admin/backup being
+// privileged-only: read/write is a CAPABILITY split, not a formality.
+// The monitoring use-case (alert on FAIL streaks) only needs sent_at /
+// success / error_msg, which stay visible. Full-scope tokens keep the
+// bodies (they could reset the passwords themselves anyway).
+//
 // limit defaults to 100, max 1000. Newest rows first.
-func (a *App) handleAPISMSLog(w http.ResponseWriter, r *http.Request, _ string) {
+func (a *App) handleAPISMSLog(w http.ResponseWriter, r *http.Request, _ string, readOnly bool) {
 	if r.Method != http.MethodGet {
 		writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "GET only"})
 		return
@@ -1625,13 +1681,23 @@ func (a *App) handleAPISMSLog(w http.ResponseWriter, r *http.Request, _ string) 
 	}
 	out := make([]apiSMSLogEntry, 0, len(logs))
 	for _, l := range logs {
-		out = append(out, apiSMSLogEntry{
+		e := apiSMSLogEntry{
 			ID: l.ID, SentAt: l.SentAt, Provider: l.Provider,
 			Phone: l.Phone, Message: l.Message, Success: l.Success,
 			ErrorMsg: l.ErrorMsg,
-		})
+		}
+		if readOnly {
+			// Read-only scope: strip the body — it can be a live temp
+			// password or password-reset code (see handler comment).
+			e.Message = ""
+		}
+		out = append(out, e)
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"logs": out, "count": len(out)})
+	resp := map[string]any{"logs": out, "count": len(out)}
+	if readOnly {
+		resp["messages_redacted"] = true
+	}
+	writeJSON(w, http.StatusOK, resp)
 }
 
 type apiWebhookDelivery struct {
@@ -2013,8 +2079,8 @@ func (a *App) handleAPIUserGrantByPhone(w http.ResponseWriter, r *http.Request, 
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid phone"})
 		return
 	}
-	if req.Days <= 0 {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "days must be > 0"})
+	if req.Days <= 0 || req.Days > maxGrantDays {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "days must be in 1..3650"})
 		return
 	}
 	user, err := a.DB.GetUserByPhone(r.Context(), phone)

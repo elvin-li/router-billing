@@ -23,11 +23,9 @@ func (a *App) handleAdminMaintenance(w http.ResponseWriter, r *http.Request) {
 		dbSize = uint64(st.Size())
 	}
 	// Pass-through query params so the manual-trigger flash blocks can
-	// read the result count ({{index .Query0 "expired"}}).
-	rawQuery := map[string]string{}
-	for k := range r.URL.Query() {
-		rawQuery[k] = r.URL.Query().Get(k)
-	}
+	// read the result count ({{index .Query0 "expired"}}); numeric flash
+	// keys are laundered to digits.
+	rawQuery := queryFlashParams(r)
 	a.render(w, "admin_maintenance.html", a.adminCtx(r, "maintenance", map[string]any{
 		"DBPath":        a.Cfg.DBPath,
 		"DBSize":        dbSize,
