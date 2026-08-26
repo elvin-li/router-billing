@@ -101,10 +101,17 @@ func userErrLabel(code string) string {
 		return "未检测到本设备 MAC，请连接到收费 SSID 后重试"
 	case "replace_failed":
 		return "替换失败：可能 MAC 不属于你 / 已过期 / 目标 MAC 已被使用"
+	case "backup_codes_failed":
+		return "二步验证已开启，但备用码生成失败，请在下方重新生成"
 	case "internal":
 		return "内部错误，请重试"
 	default:
-		return code
+		// SECURITY: never echo an unrecognized code. ?err= is plain query
+		// input on public pages (/user/login, /user/register), so
+		// reflecting it verbatim let crafted links plant arbitrary
+		// phishing text inside the trusted red flash box — the exact
+		// bug fixed for the admin pages and /redeem in v0.122.
+		return "操作失败，请重试"
 	}
 }
 
