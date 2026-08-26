@@ -2,6 +2,7 @@ package db
 
 import (
 	"context"
+	"fmt"
 	"testing"
 	"time"
 
@@ -149,5 +150,44 @@ func TestLatestPaidOrderForMAC(t *testing.T) {
 	}
 	if o != nil {
 		t.Fatalf("unexpected order for foreign MAC: %+v", o)
+	}
+}
+
+// Pre-v0.119 ListOrdersForUser reset any limit > 500 back to 50 (same
+// silent-truncate class as the pre-clampLimit CSV exports). GDPR export
+// asks for 500 (exactly at the old cap) but any future caller asking for
+// more would quietly get 50 rows.
+func TestListOrdersForUserHonorsLimitAboveOldCap(t *testing.T) {
+	d := openTestDB(t)
+	ctx := context.Background()
+	u, err := d.CreateUser(ctx, "13800138999", "h")
+	if err != nil {
+		t.Fatal(err)
+	}
+	const n = 80
+	for i := 0; i < n; i++ {
+		o := &models.Order{
+			OrderNo: fmt.Sprintf("U-ORD-%03d", i), Mac: "AA:BB:CC:00:00:01",
+			Plan: "month", Days: 30, AmountCents: 100,
+			Status: models.OrderPending, PaymentMethod: "wechat", UserID: &u.ID,
+		}
+		if err := d.CreateOrder(ctx, o); err != nil {
+			t.Fatal(err)
+		}
+	}
+	got, err := d.ListOrdersForUser(ctx, u.ID, 2000)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != n {
+		t.Fatalf("ListOrdersForUser(2000) returned %d rows; want all %d (not the old silent 50)", len(got), n)
+	}
+	// Non-positive still falls back to the documented default of 50.
+	got, err = d.ListOrdersForUser(ctx, u.ID, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 50 {
+		t.Fatalf("ListOrdersForUser(0) returned %d; want default 50", len(got))
 	}
 }

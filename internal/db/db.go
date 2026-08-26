@@ -688,9 +688,7 @@ func (d *DB) SearchOrdersFiltered(ctx context.Context, f OrderFilter) ([]models.
 }
 
 func (d *DB) ListOrdersForUser(ctx context.Context, userID int64, limit int) ([]models.Order, error) {
-	if limit <= 0 || limit > 500 {
-		limit = 50
-	}
+	limit = clampLimit(limit, 50)
 	return d.queryOrders(ctx, `SELECT `+orderCols+` FROM orders WHERE user_id = ? ORDER BY created_at DESC LIMIT ?`, userID, limit)
 }
 
@@ -705,7 +703,7 @@ func (d *DB) ListPendingOrdersToPoll(ctx context.Context, staleAfter time.Durati
 	        AND (last_queried_at IS NULL OR last_queried_at < ?)
 	      ORDER BY created_at DESC
 	      LIMIT ?`
-	return d.queryOrders(ctx, q, cutoffAge, cutoffStale, limit)
+	return d.queryOrders(ctx, q, cutoffAge, cutoffStale, clampLimit(limit, 50))
 }
 
 func (d *DB) MarkOrderQueried(ctx context.Context, orderNo string) error {
@@ -1059,9 +1057,7 @@ type SessionRecord struct {
 // ListActiveSessions returns every unexpired session. Sort: most-recently-
 // expiring last (so the soon-to-die ones surface first).
 func (d *DB) ListActiveSessions(ctx context.Context, limit int) ([]SessionRecord, error) {
-	if limit <= 0 || limit > 500 {
-		limit = 200
-	}
+	limit = clampLimit(limit, 200)
 	rows, err := d.conn.QueryContext(ctx, `
 		SELECT token, kind, subject, user_id, expires_at
 		FROM sessions

@@ -1,5 +1,23 @@
 # Changelog
 
+## v0.119 — 深挖轮 5：用户订单列表 / 会话列表残留静默截断 + 导出文件名
+
+v0.116 把绝大多数查询改到统一 `clampLimit`，但漏了两处仍用「超
+过 500 就重置回默认」的旧策略：
+
+A. (LOW, 静默数据丢失脚枪) `ListOrdersForUser` 在 `limit > 500`
+时把请求重置为 50 行。`/user/account/export` 目前恰好传 500，
+刚好踩在旧上限上所以现网没截断；任何把可携导出或用户订单页提
+到 501+ 的改动都会静默只返回 50 单。现改为 `clampLimit`（默认
+50、硬顶 10000）。`ListActiveSessions` 与
+`ListPendingOrdersToPoll` 同样并入该策略（现网调用分别是 500 /
+50，行为不变）。回归测试插入 80 单后断言 `ListOrdersForUser(2000)`
+返回全部 80 行、不再是 50。
+
+B. (LOW, 防御) `/user/account/export` 的 `Content-Disposition`
+文件名现在走 `filenameSafe`（与 voucher CSV 同一套），避免未
+来放宽手机号校验时把引号写进响应头。
+
 ## v0.118 — 深挖轮 4：MAC 计数全表扫描收尾
 
 深挖轮 3 收尾：把 v0.111 引入的 `CountMACsByUser`（单条

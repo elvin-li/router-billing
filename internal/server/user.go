@@ -724,7 +724,7 @@ func (a *App) handleUserAccountExport(w http.ResponseWriter, r *http.Request) {
 	}
 
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
-	w.Header().Set("Content-Disposition", `attachment; filename="router-billing-data-`+user.Phone+`.json"`)
+	w.Header().Set("Content-Disposition", `attachment; filename="router-billing-data-`+filenameSafe(user.Phone)+`.json"`)
 	enc := json.NewEncoder(w)
 	enc.SetIndent("", "  ")
 	if err := enc.Encode(export); err != nil {

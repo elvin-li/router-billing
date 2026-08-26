@@ -128,3 +128,21 @@ func TestUserAccountDeleteMACsLoseOwnerNotDeleted(t *testing.T) {
 		t.Errorf("MAC.UserID should be NULL after user delete; got %v", *m.UserID)
 	}
 }
+
+func TestUserAccountExportFilenameIsQuotedConstantShape(t *testing.T) {
+	app := setupTestApp(t)
+	h := app.Routes()
+	res, _ := do(t, h, "POST", "/user/register",
+		url.Values{"phone": {"13800145003"}, "password": {"export-pw"}}, nil)
+	jar := cookieJar(res)
+	res2, body := do(t, h, "GET", "/user/account/export", nil, jar)
+	_ = body
+	cd := res2.Header.Get("Content-Disposition")
+	want := `attachment; filename="router-billing-data-13800145003.json"`
+	if cd != want {
+		t.Errorf("Content-Disposition = %q, want %q", cd, want)
+	}
+	if strings.Count(cd, `"`) != 2 {
+		t.Errorf("filename must be a single quoted-string; got %q", cd)
+	}
+}
