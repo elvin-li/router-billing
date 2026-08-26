@@ -1,5 +1,61 @@
 # Changelog
 
+## v0.119 — 深挖轮 5：短信日志泄漏活体凭据、Aliyun TemplateParam 误判、配置校验收尾
+
+针对 sms/notify/scheduler/config/totp/schedule 及 CI/compose 的
+专项审计。修复一个高危泄漏与若干真实缺陷。
+
+A. (HIGH, 凭据入库) `App.SendSMS` 把短信全文原样写进 `sms_log`
+表——忘记密码的 6 位重置验证码与管理员代发的临时密码（整条正文
+就是密码本身）全部明文落库。而 `GET /api/admin/sms/log` 明确
+接受**只读** API token（代码注释称该表"只是投递状态、非鉴权材
+料"）：持有只读监控 token 者可对任意手机号发起公开的
+/user/forgot-password，再从日志读出 10 分钟有效期内的活码，
+完成任意账号接管——只读层级的存在意义恰恰是杜绝这类影响。新增
+`SendSMSSensitive(ctx, phone, message, logged)`：投递正文不
+变，落库改用脱敏副本（验证码打星、临时密码只记"已发送"占位）。
+两处调用点（user_forgot、admin reset-password via_sms）全部
+切换；回归测试断言日志行不含活码/临时密码、投递通道（console
+环）保留全文、脱敏后验证码仍可完成端到端重置。
+
+B. (MEDIUM, 投递失败) Aliyun 适配器的 `looksLikeJSON` 只看首尾
+花括号：形如 `{urgent}`、`{紧急}` 的普通文本被当作现成的
+TemplateParam 原样透传，Aliyun 以格式非法拒收，短信静默丢失。
+改为必须 `json.Valid` 才透传，否则照常包成 `{"code": ...}`；
+另将响应体读取从无界 `io.ReadAll` 收敛到 64KB 上限。
+
+C. (MEDIUM, 配置校验遗留) 三处"过检即失效"的静默降级改为
+--check-config 直接报错：(1) `admin_login_alert_phone` 手误
+写错号码时，登录告警与整个每日日报循环都在启动时静默停用（各
+只有一行 stderr）；(2) `admin_digest_hour` 配了小时但没配收件
+号码或 provider 为空/none/off 时日报永远不会发；(3)
+`expire_check_interval`/`backup.interval`/
+`walled_garden.refresh_interval` 漏写单位或 `1s` 手误会让
+DB 查询、VACUUM INTO 全库拷贝、DNS 重解析进入忙循环——新增
+30s/10m/30s 下限（0 仍走默认值）。
+
+D. (LOW, 三处小缺陷) 字面量构造的 `sms.Console{}`（cap=0）每
+次 append 立即被裁剪清空，Recent() 永远为空——Send 内补默认
+值；`notify.Notifier` 绕过 New 构造（URL 有值但无队列）时每条
+事件都误报"queue full"——改为指明未初始化；
+POST /admin/sms-log/digest 手动触发缺少后台循环同款的
+ValidPhone 守卫，会对畸形号码白烧一次 provider 调用。
+
+E. (CI/compose) ci.yml 无 permissions 块，各 job 继承仓库默认
+token 权限（老仓库为 write）——补 `contents: read` 最小权限
+（release.yml 原本就有作用域）；docker-compose 开发容器加
+`read_only: true` + `/tmp` tmpfs（应用只写 state 卷）。
+
+其余复查确认无缺陷（不改动）：webhook URL 仅运营者配置文件可
+设、强制绝对 http(s) 且必须配 secret（无用户可控 SSRF 面）；
+忘记密码两阶段的防枚举统一响应（v0.106）与限流；scheduler 的
+panic 防护/初始 pass/ticker 语义；日报 nextDigestAt 的时钟跳
+变吸收；expiry-reminder 22h 去重窗与互斥；webhook_deliveries
+的逐次记录与 purgeLoop 裁剪；totp 常数时间比较与 step 记录；
+schedule 的 ISO 周日/跨午夜窗口。`go test ./...` 全绿；全部
+相关包（含 server、db）`-race` 绿；config.example.yaml 通过
+--check-config。
+
 ## v0.118 — 深挖轮 4：MAC 计数全表扫描收尾
 
 深挖轮 3 收尾：把 v0.111 引入的 `CountMACsByUser`（单条
