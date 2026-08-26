@@ -830,7 +830,11 @@ func (a *App) handleAdminUserResetPassword(w http.ResponseWriter, r *http.Reques
 	// when SMS isn't wired or delivery fails.
 	if r.PostForm.Get("via_sms") == "1" && a.SMS != nil && a.SMS.Available() {
 		if user, err := a.DB.GetUser(r.Context(), id); err == nil && user != nil {
-			sErr := a.SendSMS(r.Context(), user.Phone, tmpPwd)
+			// Same rationale as the inline-display comment below: the temp
+			// password is a live credential and must not be persisted. The
+			// sms_log row records THAT a reset SMS went out, never its body
+			// (readable by read-only API tokens via /api/admin/sms/log).
+			sErr := a.SendSMSSensitive(r.Context(), user.Phone, tmpPwd, "[临时密码已发送 — 内容不入库]")
 			if sErr == nil {
 				a.DB.Audit(r.Context(), "admin", "user_reset_password", strconv.FormatInt(id, 10),
 					"via=sms provider="+a.SMS.Name()+" ip="+clientIP(r))
