@@ -278,80 +278,57 @@ func adminLoginErrLabel(code string) string {
 	}
 }
 
-func errLabel(code string) string {
-	switch code {
-	case "":
-		return ""
-	case "invalid_mac":
-		return "MAC 格式不正确"
-	case "invalid_days":
-		return "请选择套餐或填入正整数天数"
-	case "internal":
-		return "内部错误，请重试"
-	case "arp":
-		return "无法读取在线设备列表（检查 paid_iface 是否正确）"
-	case "refund_confirm":
-		return "退款失败：请在确认框中输入完整订单号"
-	case "refund_no_order":
-		return "退款失败：找不到该订单"
-	case "refund_not_paid":
-		return "退款失败：只能退款已支付的订单"
-	case "refund_failed":
-		return "退款失败：请查看服务日志"
-	case "revoked":
-		return ""
+// errLabels maps every legitimate ?err= code onto its user-facing flash
+// text. Codes mapping to "" render no banner. A lookup table (rather than
+// the old switch) keeps the function's complexity flat as codes accrue.
+var errLabels = map[string]string{
+	"":                "",
+	"invalid_mac":     "MAC 格式不正确",
+	"invalid_days":    "请选择套餐或填入正整数天数",
+	"internal":        "内部错误，请重试",
+	"arp":             "无法读取在线设备列表（检查 paid_iface 是否正确）",
+	"refund_confirm":  "退款失败：请在确认框中输入完整订单号",
+	"refund_no_order": "退款失败：找不到该订单",
+	"refund_not_paid": "退款失败：只能退款已支付的订单",
+	"refund_failed":   "退款失败：请查看服务日志",
+	"revoked":         "",
 	// v0.108: codes that previously fell through to the raw string —
 	// admins saw literal "bad_key" / "not_found" flashes.
-	case "bad_key":
-		return "套餐 key 只能包含字母 / 数字 / - / _（最长 32 字符）"
-	case "label_too_long":
-		return "显示名过长（最多 64 字符）"
-	case "days_too_large":
-		return "天数过大（最多 3650 天）"
-	case "price_too_large":
-		return "价格过大（超过 ¥100,000 — 请检查是否多打了零）"
-	case "not_found":
-		return "未找到对应记录"
-	case "bad_mac":
-		return "MAC 格式不正确"
-	case "db":
-		return "数据库错误，请重试"
+	"bad_key":         "套餐 key 只能包含字母 / 数字 / - / _（最长 32 字符）",
+	"label_too_long":  "显示名过长（最多 64 字符）",
+	"days_too_large":  "天数过大（最多 3650 天）",
+	"price_too_large": "价格过大（超过 ¥100,000 — 请检查是否多打了零）",
+	"not_found":       "未找到对应记录",
+	"bad_mac":         "MAC 格式不正确",
+	"db":              "数据库错误，请重试",
 	// v0.119: the remaining codes that still fell through to the raw
 	// string.
-	case "bad_phone":
-		return "手机号格式不正确"
-	case "sms_disabled", "sms_unavailable":
-		return "短信服务未配置或不可用"
-	case "sms_failed":
-		return "短信发送失败，请查看短信日志"
-	case "trim_failed":
-		return "日志清理失败，请查看服务日志"
-	case "optimize_failed":
-		return "PRAGMA optimize 执行失败，请查看服务日志"
-	case "expire_failed":
-		return "到期扫描失败，请查看服务日志"
-	case "webhook_not_configured":
-		return "Webhook 未配置，请先在 config 中填写 webhook.url"
-	case "cancel_stale_failed":
-		return "批量取消失败，请查看服务日志"
-	case "missing_order":
-		return "缺少订单号"
-	case "not_pending":
-		return "订单不在 pending 状态，无法取消"
-	case "empty_note":
-		return "备注内容不能为空"
-	case "invalid":
-		return "参数无效，请重试"
-	case "digest_no_phone":
-		return "未配置日报接收手机号（sms.admin_digest_phone）"
-	default:
-		// SECURITY: never echo an unrecognized code. ?err= is plain query
-		// input, so `/admin/orders?err=<any text>` used to render
-		// attacker-chosen content inside the trusted red flash box on
-		// every admin page (html/template escapes markup, but verbatim
-		// text in trusted UI chrome is a phishing aid all by itself).
-		return "操作失败，请重试"
+	"bad_phone":              "手机号格式不正确",
+	"sms_disabled":           "短信服务未配置或不可用",
+	"sms_unavailable":        "短信服务未配置或不可用",
+	"sms_failed":             "短信发送失败，请查看短信日志",
+	"trim_failed":            "日志清理失败，请查看服务日志",
+	"optimize_failed":        "PRAGMA optimize 执行失败，请查看服务日志",
+	"expire_failed":          "到期扫描失败，请查看服务日志",
+	"webhook_not_configured": "Webhook 未配置，请先在 config 中填写 webhook.url",
+	"cancel_stale_failed":    "批量取消失败，请查看服务日志",
+	"missing_order":          "缺少订单号",
+	"not_pending":            "订单不在 pending 状态，无法取消",
+	"empty_note":             "备注内容不能为空",
+	"invalid":                "参数无效，请重试",
+	"digest_no_phone":        "未配置日报接收手机号（sms.admin_digest_phone）",
+}
+
+func errLabel(code string) string {
+	if label, ok := errLabels[code]; ok {
+		return label
 	}
+	// SECURITY: never echo an unrecognized code. ?err= is plain query
+	// input, so `/admin/orders?err=<any text>` used to render
+	// attacker-chosen content inside the trusted red flash box on
+	// every admin page (html/template escapes markup, but verbatim
+	// text in trusted UI chrome is a phishing aid all by itself).
+	return "操作失败，请重试"
 }
 
 // digitsOnly strips everything but ASCII digits and caps the result at
