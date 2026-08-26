@@ -13,6 +13,7 @@ import (
 	"golang.org/x/crypto/bcrypt"
 	"gopkg.in/yaml.v3"
 
+	"router-billing/internal/models"
 	"router-billing/internal/totp"
 )
 
@@ -610,18 +611,34 @@ func validFirewallName(s string) bool {
 // validateDurations rejects negative intervals. applyDefaults only fills
 // zero values, so a negative typo used to pass --check-config and then be
 // silently replaced by a hardcoded fallback deep in each goroutine.
+//
+// Sub-second typos are rejected too (e.g. `expire_check_interval: 1s`
+// meant as `1h`, or a forgotten unit yaml parses as nanoseconds): each of
+// these intervals drives a loop that hits the DB, forks nft, or
+// re-resolves DNS — at a near-zero cadence they busy-loop a
+// resource-constrained router into the ground while --check-config
+// stayed green.
 func (c *Config) validateDurations() error {
 	if c.Scheduler.ExpireCheckInterval < 0 {
 		return fmt.Errorf("scheduler.expire_check_interval must not be negative")
 	}
+	if c.Scheduler.ExpireCheckInterval != 0 && c.Scheduler.ExpireCheckInterval < 30*time.Second {
+		return fmt.Errorf("scheduler.expire_check_interval %s: must be at least 30s (each pass queries the DB and reconciles the firewall)", c.Scheduler.ExpireCheckInterval)
+	}
 	if c.Backup.Interval < 0 {
 		return fmt.Errorf("backup.interval must not be negative")
+	}
+	if c.Backup.Interval != 0 && c.Backup.Interval < 10*time.Minute {
+		return fmt.Errorf("backup.interval %s: must be at least 10m (each pass copies the whole DB via VACUUM INTO)", c.Backup.Interval)
 	}
 	if c.Backup.RetainDays < 0 {
 		return fmt.Errorf("backup.retain_days must not be negative")
 	}
 	if c.WalledGarden.RefreshInterval < 0 {
 		return fmt.Errorf("walled_garden.refresh_interval must not be negative")
+	}
+	if c.WalledGarden.RefreshInterval != 0 && c.WalledGarden.RefreshInterval < 30*time.Second {
+		return fmt.Errorf("walled_garden.refresh_interval %s: must be at least 30s (each pass re-resolves every garden domain)", c.WalledGarden.RefreshInterval)
 	}
 	return nil
 }
@@ -671,6 +688,25 @@ func (c *Config) validateSMS() error {
 	}
 	if c.SMS.AdminDigestHour < 0 || c.SMS.AdminDigestHour > 24 {
 		return fmt.Errorf("sms.admin_digest_hour %d: must be 0 (disabled) or 1..24", c.SMS.AdminDigestHour)
+	}
+	// A malformed alert phone used to pass --check-config and then
+	// silently disable BOTH the login-alert SMS and the entire daily
+	// digest loop at boot (one stderr line each) — the operator believed
+	// the 3am-login alarm was armed when it wasn't.
+	if p := strings.TrimSpace(c.SMS.AdminLoginAlertPhone); p != "" && !models.ValidPhone(p) {
+		return fmt.Errorf("sms.admin_login_alert_phone %q: not a valid mobile number", c.SMS.AdminLoginAlertPhone)
+	}
+	if c.SMS.AdminDigestHour > 0 {
+		// The digest can only ever fire with a target phone and a real
+		// provider; setting the hour without them silently disabled the
+		// loop at boot instead of failing --check-config.
+		if strings.TrimSpace(c.SMS.AdminLoginAlertPhone) == "" {
+			return fmt.Errorf("sms.admin_digest_hour is set but admin_login_alert_phone is empty — the digest has nowhere to go")
+		}
+		switch strings.ToLower(strings.TrimSpace(c.SMS.Provider)) {
+		case "", "none", "off":
+			return fmt.Errorf("sms.admin_digest_hour is set but sms.provider is disabled — the digest could never send")
+		}
 	}
 	return nil
 }
