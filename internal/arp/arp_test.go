@@ -82,3 +82,42 @@ func TestParseNeighOutputEmpty(t *testing.T) {
 		t.Errorf("empty should yield nil; got %+v", got)
 	}
 }
+
+func TestCanonicalIP(t *testing.T) {
+	cases := []struct {
+		in   string
+		want string
+		ok   bool
+	}{
+		{"192.168.5.42", "192.168.5.42", true},
+		{"  192.168.5.42 ", "192.168.5.42", true},
+		{"fe80::1%br-paid", "fe80::1", true},
+		{"FE80::ABCD", "fe80::abcd", true},
+		{"::ffff:192.168.5.42", "192.168.5.42", true}, // mapped → canonical dotted quad
+		{"", "", false},
+		{"not-an-ip", "", false},
+		{"192.168.5.42;reboot", "", false},
+		{"-V", "", false},
+		{"192.168.5.0/24", "", false},
+		{"192.168.5.42 lladdr", "", false},
+	}
+	for _, c := range cases {
+		got, ok := canonicalIP(c.in)
+		if ok != c.ok || got != c.want {
+			t.Errorf("canonicalIP(%q) = (%q, %v), want (%q, %v)", c.in, got, ok, c.want, c.ok)
+		}
+	}
+}
+
+func TestValidIface(t *testing.T) {
+	for _, good := range []string{"br-paid", "wl0", "eth0.5", "wl-paidsec"} {
+		if !validIface(good) {
+			t.Errorf("validIface(%q) = false, want true", good)
+		}
+	}
+	for _, bad := range []string{"", "-flag", "br paid", "br/paid", "0123456789abcdef", "br\npaid"} {
+		if validIface(bad) {
+			t.Errorf("validIface(%q) = true, want false", bad)
+		}
+	}
+}

@@ -71,11 +71,8 @@ func (a *App) planViews(ctx context.Context) []planView {
 
 // detectMAC resolves remote IP → MAC via `ip neigh`. Returns "" on failure.
 func (a *App) detectMAC(r *http.Request) string {
-	host, _, err := net.SplitHostPort(r.RemoteAddr)
-	if err != nil {
-		host = r.RemoteAddr
-	}
-	if host == "" || strings.HasPrefix(host, "127.") || host == "::1" {
+	host := arpLookupHost(r.RemoteAddr)
+	if host == "" {
 		return ""
 	}
 	ctx, cancel := context.WithTimeout(r.Context(), 2*time.Second)
@@ -86,6 +83,30 @@ func (a *App) detectMAC(r *http.Request) string {
 		return ""
 	}
 	return mac
+}
+
+// arpLookupHost extracts the peer address worth ARP-resolving from a
+// RemoteAddr. Returns "" for anything that can never have a neighbor entry.
+//
+// Parse-based instead of the previous string-prefix check: `127.` / `::1`
+// missed IPv4-mapped loopback (::ffff:127.0.0.1) and the unspecified
+// address, and an IPv6 link-local peer arrives with a zone
+// ("fe80::1%br-paid") that must be stripped before net.ParseIP — pre-v0.119
+// those either wasted an `ip neigh` exec per request or failed detection
+// with log noise.
+func arpLookupHost(remoteAddr string) string {
+	host, _, err := net.SplitHostPort(remoteAddr)
+	if err != nil {
+		host = remoteAddr
+	}
+	if i := strings.IndexByte(host, '%'); i >= 0 {
+		host = host[:i]
+	}
+	ip := net.ParseIP(strings.TrimSpace(host))
+	if ip == nil || ip.IsLoopback() || ip.IsUnspecified() {
+		return ""
+	}
+	return ip.String()
 }
 
 // /api/me returns current detected MAC + active expiry if any.
