@@ -14,6 +14,7 @@ package server
 
 import (
 	"context"
+	"log"
 	"net/http"
 	"time"
 )
@@ -38,11 +39,18 @@ func (a *App) handlePublicHealth(w http.ResponseWriter, r *http.Request) {
 	// `SELECT 1` round-trip to validate the connection. If sqlite is wedged
 	// or the file is gone, this returns ctx.DeadlineExceeded or a driver
 	// error and we surface that as 503 so monitors can page.
+	//
+	// The driver error text stays OUT of the response body: this endpoint
+	// is unauthenticated, and sqlite errors routinely embed the DB's
+	// filesystem path ("unable to open database file: /srv/...") plus
+	// driver internals — free recon for anyone probing the open internet.
+	// Monitors only need the 503; the operator gets the detail on stderr.
 	_, err := a.DB.Exec(ctx, `SELECT 1`)
 	if err != nil {
+		log.Printf("public health: db ping failed: %v", err)
 		writeJSON(w, http.StatusServiceUnavailable, map[string]any{
 			"status": "degraded",
-			"error":  "db ping: " + err.Error(),
+			"error":  "db unreachable",
 		})
 		return
 	}
