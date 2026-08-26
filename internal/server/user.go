@@ -569,19 +569,28 @@ func (a *App) handleUserClaimMAC(w http.ResponseWriter, r *http.Request) {
 		http.Redirect(w, r, "/user/me?err=no_mac", http.StatusSeeOther)
 		return
 	}
+	// Pre-checks for friendly routing only — the authoritative eligibility
+	// test is inside ClaimMAC's WHERE clause, so nothing that changes
+	// between here and the UPDATE can be exploited.
 	existing, _ := a.DB.GetMAC(r.Context(), mac)
 	if existing == nil || existing.Status != models.MACActive || existing.ExpiresAt.Before(time.Now()) {
 		// Nothing to claim — direct users to buy time instead.
 		http.Redirect(w, r, "/portal?mac="+mac, http.StatusSeeOther)
 		return
 	}
-	if existing.UserID != nil && *existing.UserID != uid {
-		http.Redirect(w, r, "/user/me?err=replace_failed", http.StatusSeeOther)
+	// Take ownership atomically, without touching status/expiry/label. The
+	// old GetMAC-check → UpsertMAC sequence was a TOCTOU: a concurrent
+	// transfer to another user was clobbered back, and a concurrent admin
+	// Revoke was flipped back to status='active' (UpsertMAC stamps it),
+	// putting the blocked device back online at the next firewall resync.
+	claimed, err := a.DB.ClaimMAC(r.Context(), mac, uid)
+	if err != nil {
+		http.Redirect(w, r, "/user/me?err=internal", http.StatusSeeOther)
 		return
 	}
-	// Take ownership without changing expiry/days (days=0 + active+future-expiry → no-op).
-	if _, err := a.DB.UpsertMAC(r.Context(), mac, "", 0, &uid); err != nil {
-		http.Redirect(w, r, "/user/me?err=internal", http.StatusSeeOther)
+	if !claimed {
+		// Owned by someone else, or no longer active/unexpired.
+		http.Redirect(w, r, "/user/me?err=replace_failed", http.StatusSeeOther)
 		return
 	}
 	a.DB.Audit(r.Context(), "user:"+user.Phone, "claim", mac, "")
@@ -610,18 +619,18 @@ func (a *App) handleUserLabelMAC(w http.ResponseWriter, r *http.Request) {
 		http.Redirect(w, r, "/user/me?err=replace_failed", http.StatusSeeOther)
 		return
 	}
-	label := strings.TrimSpace(r.PostForm.Get("label"))
-	if len(label) > 60 {
-		label = label[:60]
-	}
-	existing, _ := a.DB.GetMAC(r.Context(), mac)
-	if existing == nil || existing.UserID == nil || *existing.UserID != uid {
-		http.Redirect(w, r, "/user/me?err=replace_failed", http.StatusSeeOther)
-		return
-	}
-	if err := a.DB.SetMACLabel(r.Context(), mac, label); err != nil {
+	label := truncateRunes(strings.TrimSpace(r.PostForm.Get("label")), 60)
+	// Ownership check and write are one atomic UPDATE ... WHERE user_id = ?
+	// — the previous GetMAC-check → SetMACLabel pair let a rename land on a
+	// MAC that had just been transferred to another user.
+	ok, err = a.DB.SetMACLabelOwned(r.Context(), mac, label, uid)
+	if err != nil {
 		log.Printf("user label %s: %v", mac, err)
 		http.Redirect(w, r, "/user/me?err=internal", http.StatusSeeOther)
+		return
+	}
+	if !ok {
+		http.Redirect(w, r, "/user/me?err=replace_failed", http.StatusSeeOther)
 		return
 	}
 	a.DB.Audit(r.Context(), "user:"+user.Phone, "label", mac, label)

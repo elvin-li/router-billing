@@ -414,6 +414,50 @@ func (d *DB) SetMACLabel(ctx context.Context, mac, label string) error {
 	return err
 }
 
+// SetMACLabelOwned renames a MAC only while it is still owned by ownerID.
+// Returns false when the row is gone or ownership changed since the caller
+// checked — the same atomic WHERE-guard pattern as ExtendMACOwned, so the
+// user-side label form can't rename a device that was transferred away
+// between its ownership check and the write.
+func (d *DB) SetMACLabelOwned(ctx context.Context, mac, label string, ownerID int64) (bool, error) {
+	res, err := d.conn.ExecContext(ctx,
+		`UPDATE macs SET label = ?, updated_at = CURRENT_TIMESTAMP WHERE mac = ? AND user_id = ?`,
+		label, mac, ownerID)
+	if err != nil {
+		return false, err
+	}
+	n, err := res.RowsAffected()
+	return n > 0, err
+}
+
+// ClaimMAC atomically takes ownership of a MAC for userID without touching
+// its status, expiry, or label. The eligibility conditions live in the WHERE
+// clause — the row must still be active, unexpired, and either unowned or
+// already owned by this user — so the check and the write are one statement.
+//
+// The previous claim path did GetMAC → checks → unconditional UpsertMAC,
+// which had two TOCTOU holes: a MAC transferred to another user in between
+// was silently stolen back, and (worse) UpsertMAC's UPDATE branch stamps
+// status='active', so a claim racing an admin Revoke flipped the freshly
+// blocked row back to active — the next firewall resync then put the
+// blocked device back online.
+//
+// Returns true iff the claim landed.
+func (d *DB) ClaimMAC(ctx context.Context, mac string, userID int64) (bool, error) {
+	res, err := d.conn.ExecContext(ctx, `
+		UPDATE macs SET user_id = ?, updated_at = CURRENT_TIMESTAMP
+		 WHERE mac = ?
+		   AND status = 'active'
+		   AND expires_at > CURRENT_TIMESTAMP
+		   AND (user_id IS NULL OR user_id = ?)`,
+		userID, mac, userID)
+	if err != nil {
+		return false, err
+	}
+	n, err := res.RowsAffected()
+	return n > 0, err
+}
+
 // ReplaceMAC atomically transfers a user's active MAC to a new MAC. The old MAC
 // is deleted from DB. Returns the new MAC row.
 func (d *DB) ReplaceMAC(ctx context.Context, userID int64, oldMac, newMac, label string) (*models.MAC, error) {
