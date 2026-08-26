@@ -105,7 +105,7 @@ func (a *Alipay) Precreate(ctx context.Context, outTradeNo, subject string, tota
 		return nil, err
 	}
 	defer resp.Body.Close()
-	body, _ := io.ReadAll(resp.Body)
+	body, _ := io.ReadAll(io.LimitReader(resp.Body, maxRespBytes))
 	if resp.StatusCode/100 != 2 {
 		return nil, fmt.Errorf("alipay precreate: http %d: %s", resp.StatusCode, string(body))
 	}
@@ -167,7 +167,7 @@ func (a *Alipay) Query(ctx context.Context, outTradeNo string) (*PaidNotice, boo
 		return nil, false, err
 	}
 	defer resp.Body.Close()
-	body, _ := io.ReadAll(resp.Body)
+	body, _ := io.ReadAll(io.LimitReader(resp.Body, maxRespBytes))
 	if resp.StatusCode/100 != 2 {
 		return nil, false, fmt.Errorf("alipay query: http %d: %s", resp.StatusCode, string(body))
 	}

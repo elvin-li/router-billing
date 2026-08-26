@@ -2,6 +2,15 @@ package pay
 
 import "errors"
 
+// maxRespBytes bounds how much of a PSP gateway response we read into
+// memory. Legitimate WeChat/Alipay JSON responses are a few KB (the
+// platform-cert list tops out well under 100 KB); reading an unbounded
+// body meant a misbehaving upstream or an interposed proxy could feed an
+// arbitrarily large response and OOM the router. Same discipline the
+// Aliyun SMS client applies (64 KB there; 1 MiB here leaves margin for
+// multi-cert payloads).
+const maxRespBytes = 1 << 20
+
 // PaidNotice is emitted by either provider when a webhook confirms a payment.
 type PaidNotice struct {
 	OrderNo  string
