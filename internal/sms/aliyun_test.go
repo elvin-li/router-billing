@@ -131,6 +131,29 @@ func TestAliyunSendPassesJSONThrough(t *testing.T) {
 	}
 }
 
+// Brace-wrapped plain text is NOT JSON — it must be wrapped as
+// {"code": ...} like any other free-text message, otherwise Aliyun
+// rejects the malformed TemplateParam and delivery silently fails.
+func TestAliyunSendWrapsBraceWrappedNonJSON(t *testing.T) {
+	gotParam := ""
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = r.ParseForm()
+		gotParam = r.PostFormValue("TemplateParam")
+		_, _ = w.Write([]byte(`{"Code":"OK","Message":"OK","RequestId":"r"}`))
+	}))
+	defer srv.Close()
+
+	a := NewAliyun("ak", "secret", "MyApp", "T1")
+	a.Endpoint = srv.URL
+
+	if err := a.Send(context.Background(), "13800138000", "{urgent}"); err != nil {
+		t.Fatal(err)
+	}
+	if gotParam != `{"code":"{urgent}"}` {
+		t.Errorf("template param = %q, want the wrapped form", gotParam)
+	}
+}
+
 func TestAliyunSendReturnsErrorOnAPIFailure(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		_, _ = w.Write([]byte(`{"Code":"isv.SMS_TEMPLATE_ILLEGAL","Message":"bad template","RequestId":"r"}`))
@@ -218,7 +241,10 @@ func TestAliyunConcurrentSendsNoRace(t *testing.T) {
 
 func TestLooksLikeJSON(t *testing.T) {
 	yes := []string{`{"a":1}`, `  { "x": "y" }  `, "{}"}
-	no := []string{"", "abc", "[1,2]", "{abc"}
+	// Brace-wrapped but NOT valid JSON must be wrapped as {"code": ...},
+	// not passed through raw (Aliyun rejects malformed TemplateParam and
+	// the message silently never reaches the user).
+	no := []string{"", "abc", "[1,2]", "{abc", "{urgent}", `{"a":}`, "{紧急}"}
 	for _, s := range yes {
 		if !looksLikeJSON(s) {
 			t.Errorf("looksLikeJSON(%q) = false", s)
