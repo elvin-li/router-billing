@@ -81,9 +81,7 @@ func (a *App) handleAdminAuditNote(w http.ResponseWriter, r *http.Request) {
 		http.Redirect(w, r, "/admin/audit?err=empty_note", http.StatusSeeOther)
 		return
 	}
-	if len(note) > 1000 {
-		note = note[:1000]
-	}
+	note = truncateRunes(note, 1000)
 	// Try to attribute to the actual admin username — read it from the
 	// session subject.
 	actor := "admin"
@@ -187,9 +185,7 @@ func (a *App) handleAdminMACImport(w http.ResponseWriter, r *http.Request) {
 		if len(parts) > 3 {
 			if v := strings.TrimSpace(parts[3]); v != "" {
 				notes = v
-				if len(notes) > 1000 {
-					notes = notes[:1000]
-				}
+				notes = truncateRunes(notes, 1000)
 			}
 		}
 		if _, err := a.MACSvc.Extend(r.Context(), mac, label, days, nil); err != nil {

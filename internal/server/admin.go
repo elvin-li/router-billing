@@ -1160,9 +1160,7 @@ func (a *App) handleAdminOrderRefund(w http.ResponseWriter, r *http.Request) {
 		http.Redirect(w, r, "/admin/orders?err=refund_confirm", http.StatusSeeOther)
 		return
 	}
-	if len(reason) > 200 {
-		reason = reason[:200]
-	}
+	reason = truncateRunes(reason, 200)
 	mac, err := a.refundOrder(r.Context(), orderNo, reason)
 	if err != nil {
 		log.Printf("refund %s: %v", orderNo, err)
@@ -1293,9 +1291,7 @@ func (a *App) handleAdminMACNotes(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	notes := strings.TrimSpace(r.PostForm.Get("notes"))
-	if len(notes) > 1000 {
-		notes = notes[:1000]
-	}
+	notes = truncateRunes(notes, 1000)
 	if err := a.DB.SetMACNotes(r.Context(), normalized, notes); err != nil {
 		log.Printf("set mac notes %s: %v", normalized, err)
 		http.Redirect(w, r, "/admin/macs/detail?mac="+normalized+"&err=internal", http.StatusSeeOther)

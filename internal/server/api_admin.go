@@ -324,9 +324,7 @@ func (a *App) handleAPIMACLabel(w http.ResponseWriter, r *http.Request, actor st
 		return
 	}
 	label := strings.TrimSpace(req.Label)
-	if len(label) > 64 {
-		label = label[:64]
-	}
+	label = truncateRunes(label, 64)
 	if err := a.DB.SetMACLabel(r.Context(), normalized, label); err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 		return
@@ -383,9 +381,7 @@ func (a *App) handleAPIMACNotes(w http.ResponseWriter, r *http.Request, actor st
 		return
 	}
 	notes := strings.TrimSpace(req.Notes)
-	if len(notes) > 1000 {
-		notes = notes[:1000]
-	}
+	notes = truncateRunes(notes, 1000)
 	if err := a.DB.SetMACNotes(r.Context(), normalized, notes); err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 		return
@@ -1156,9 +1152,7 @@ func (a *App) handleAPIMACImport(w http.ResponseWriter, r *http.Request, actor s
 		// existing notes untouched (would overwrite to empty otherwise
 		// on re-import, which is a footgun).
 		if notes := strings.TrimSpace(row.Notes); notes != "" {
-			if len(notes) > 1000 {
-				notes = notes[:1000]
-			}
+			notes = truncateRunes(notes, 1000)
 			if err := a.DB.SetMACNotes(r.Context(), mac, notes); err != nil {
 				log.Printf("api mac import notes %s: %v", mac, err)
 			}
@@ -1202,9 +1196,7 @@ func (a *App) handleAPIOrderRefund(w http.ResponseWriter, r *http.Request, actor
 		return
 	}
 	reason := strings.TrimSpace(req.Reason)
-	if len(reason) > 200 {
-		reason = reason[:200]
-	}
+	reason = truncateRunes(reason, 200)
 	mac, err := a.refundOrder(r.Context(), orderNo, reason)
 	if err != nil {
 		log.Printf("api refund %s: %v", orderNo, err)
@@ -1267,9 +1259,7 @@ func (a *App) handleAPISMSSend(w http.ResponseWriter, r *http.Request, actor str
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "message is required"})
 		return
 	}
-	if len(msg) > 500 {
-		msg = msg[:500]
-	}
+	msg = truncateRunes(msg, 500)
 	if err := a.SendSMS(r.Context(), phone, msg); err != nil {
 		log.Printf("api sms %s: %v", phone, err)
 		a.DB.Audit(r.Context(), actor, "sms_test_failed", phone,
@@ -1934,9 +1924,7 @@ func (a *App) handleAPIAuditNote(w http.ResponseWriter, r *http.Request, actor s
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "note required"})
 		return
 	}
-	if len(note) > 1000 {
-		note = note[:1000]
-	}
+	note = truncateRunes(note, 1000)
 	action := strings.TrimSpace(req.Action)
 	if action == "" {
 		action = "manual_note"
@@ -1957,9 +1945,7 @@ func (a *App) handleAPIAuditNote(w http.ResponseWriter, r *http.Request, actor s
 		}
 	}
 	target := strings.TrimSpace(req.Target)
-	if len(target) > 200 {
-		target = target[:200]
-	}
+	target = truncateRunes(target, 200)
 	a.DB.Audit(r.Context(), actor, action, target, note+" via=api ip="+clientIP(r))
 	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 }
