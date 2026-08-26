@@ -88,6 +88,12 @@ func (c *Console) Name() string { return "console" }
 func (c *Console) Send(_ context.Context, phone, message string) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	// A zero-value &Console{} (bypassing NewConsole) has cap 0, and the
+	// trim below would immediately evict every record — Recent() silently
+	// always empty. Apply the default here too.
+	if c.cap <= 0 {
+		c.cap = 50
+	}
 	c.log = append(c.log, Record{At: time.Now().UTC(), Phone: phone, Message: message})
 	if len(c.log) > c.cap {
 		c.log = c.log[len(c.log)-c.cap:]
