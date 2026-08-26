@@ -1015,13 +1015,12 @@ func (a *App) handleAPIUserList(w http.ResponseWriter, r *http.Request, _ string
 		users = filtered
 	}
 
-	macCount := map[int64]int{}
-	if macs, _ := a.DB.ListMACs(r.Context()); macs != nil {
-		for _, m := range macs {
-			if m.UserID != nil {
-				macCount[*m.UserID]++
-			}
-		}
+	// One GROUP BY instead of shipping every MAC row to Go just to count —
+	// the /admin/users UI path was converted in v0.111; this API sibling
+	// still did the full-table ListMACs scan on every call.
+	macCount, _ := a.DB.CountMACsByUser(r.Context())
+	if macCount == nil {
+		macCount = map[int64]int{}
 	}
 	out := make([]apiUserSummary, 0, len(users))
 	for _, u := range users {
