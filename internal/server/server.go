@@ -312,7 +312,9 @@ func (a *App) Routes() http.Handler {
 	mux.HandleFunc("/api/admin/orders", a.requireAPITokenRead(a.handleAPIOrderList))
 	mux.HandleFunc("/api/admin/orders/get", a.requireAPITokenRead(a.handleAPIOrderGet))
 	mux.HandleFunc("/api/admin/audit", a.requireAPITokenRead(a.handleAPIAuditList))
-	mux.HandleFunc("/api/admin/sms/log", a.requireAPITokenRead(a.handleAPISMSLog))
+	// sms/log payload is scope-sensitive: message bodies can carry live
+	// temp passwords / reset codes, so read-only tokens get them redacted.
+	mux.HandleFunc("/api/admin/sms/log", a.requireAPITokenReadScoped(a.handleAPISMSLog))
 	mux.HandleFunc("/api/admin/webhook/log", a.requireAPITokenRead(a.handleAPIWebhookLog))
 	mux.HandleFunc("/api/admin/vouchers", a.requireAPITokenRead(a.handleAPIVoucherList))
 	mux.HandleFunc("/api/admin/macs/grant", a.requireAPITokenWrite(a.handleAPIMACGrant))
