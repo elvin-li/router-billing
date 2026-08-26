@@ -1,5 +1,47 @@
 # Changelog
 
+## v0.117 — 深挖轮 3：用户认领 MAC 的 TOCTOU、2FA 计数器泄漏、UTF-8 截断
+
+v0.116 之后的第三轮独立审计，聚焦此前多轮加固后仍残留的
+check-then-write 竞态与慢性资源泄漏。修复三类真实缺陷。
+
+A. (MEDIUM, 竞态/越权) `/user/macs/claim` 的认领路径是非原子的
+GetMAC 检查 → 无条件 `UpsertMAC`：检查与写入之间若发生并发变
+更，会出现两种错误结果——(1) MAC 刚被转移给另一用户时被静默
+抢回（与 v0.111 用 `ExtendMACOwned` 修掉的 user-grant 扇出同
+类，认领路径漏掉了）；(2) 更糟：`UpsertMAC` 的 UPDATE 分支无
+条件写 `status='active'`，认领与管理员 Revoke 并发时会把刚拉
+黑的行翻回 active——下一次每小时防火墙 resync 就把被封设备重
+新放行。新增 `DB.ClaimMAC`：资格条件（active、未过期、无主或
+本人）全部进 WHERE 子句，认领只转移所有权、绝不碰
+status/expiry/label；`/user/macs/label` 同样改为
+`SetMACLabelOwned`（`WHERE user_id = ?` 原子守卫），改名不再
+能落在刚转走的设备上。回归测试覆盖：认领无主、幂等重认领、拒
+绝他人设备、拒绝并保持 blocked（不复活）、拒绝已过期、非属主
+改名被拒（端到端）。
+
+B. (LOW, 慢性内存泄漏) admin/user 两个 2FA 尝试计数 map
+（`twoFAAttempts`/`userTwoFAAttempts`）只在成功或锁定时删除条
+目——被放弃的 pending 登录（关标签页、5 分钟会话自然过期）每
+次泄漏一条，路由器数月不重启会无界增长。改为共享的
+`attemptTracker`：条目带首次尝试时间，map 超过 128 条时在插入
+路径按 15 分钟 TTL 清扫（远超 5 分钟 pending TTL，活跃暴破计
+数绝不会被误清）。回归测试断言过期条目被清、存活条目计数保留。
+
+C. (LOW, 数据损坏) 全部 14 处自由文本长度上限用字节切片截断
+（`label[:60]`、`notes[:1000]`、`reason[:200]`、`msg[:500]`、
+UA `[:80]` 等）——中文输入在边界处被从多字节 rune 中间切开，
+无效 UTF-8 原样入库：html/template 与 JSON 导出渲染成 U+FFFD
+替换符，CSV 导出直接输出坏字节。新增 `truncateRunes`（字节预
+算不变、回退到 rune 边界）并全站替换。回归测试逐字节预算断言
+永不产生无效 UTF-8。
+
+其余复查确认无缺陷（不改动）：pay 轮询/finalize/refund 互斥与
+金额核验、voucher 消耗-补偿链、backup VACUUM INTO+fsync、
+Alipay RSA2 验签与金额解析、scheduler/purge/expiry-reminder
+的 panic 防护与去重、CSRF/安全头/信任代理链、admin 三层 token。
+全量 `go test ./...` 与 `go test -race`（server/db 包）绿。
+
 ## v0.116 — 深挖轮 2：管理端 CSV 导出静默截断修复 + 剩余子系统全覆盖复查
 
 v0.115 之后的第二轮独立全库审计（重点覆盖此前审计较少的面：
