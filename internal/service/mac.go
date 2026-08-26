@@ -44,6 +44,38 @@ func New(d *db.DB, fw firewall.API) *MACService {
 	return &MACService{DB: d, FW: fw}
 }
 
+// scheduleAllowsNow reports whether the row's time-of-day schedule permits
+// the MAC to be online at `now`. No schedule means "always allowed"; parse
+// errors fail open (allow) — matching EnforceSchedules and resyncLocked, so
+// a corrupt schedule_json can never lock a paying customer out.
+func scheduleAllowsNow(m *models.MAC, now time.Time) bool {
+	if m == nil || m.ScheduleJSON == "" {
+		return true
+	}
+	sched, err := models.ParseSchedule(m.ScheduleJSON)
+	if err != nil {
+		return true
+	}
+	return sched.Active(now)
+}
+
+// grantFirewallAdd is the firewall half of every grant/extend: add the MAC
+// when its schedule window is open, defensively remove it when closed.
+//
+// Pre-v0.119 every grant path called FW.Add unconditionally, so paying for /
+// extending a MAC whose time-of-day schedule window was CLOSED put the
+// device online outside its allowed hours until the next minute tick of
+// EnforceSchedules yanked it — the exact class v0.108 fixed for resync and
+// v0.110 for ApplyScheduleNow, left over in the grant paths. Caller must
+// hold s.mu.
+func (s *MACService) grantFirewallAdd(ctx context.Context, m *models.MAC) error {
+	if scheduleAllowsNow(m, time.Now()) {
+		return s.FW.Add(ctx, m.Mac)
+	}
+	log.Printf("grant %s: schedule window closed — not adding to firewall (schedule=%s)", m.Mac, m.ScheduleJSON)
+	return s.FW.Remove(ctx, m.Mac)
+}
+
 // GrantFromOrder adds days to MAC's expiry then puts it into the firewall set.
 // If the order is linked to a user, that user becomes the MAC's owner.
 //
@@ -63,7 +95,7 @@ func (s *MACService) GrantFromOrder(ctx context.Context, o *models.Order) error 
 	if err != nil {
 		return fmt.Errorf("upsert mac: %w", err)
 	}
-	if err := s.FW.Add(ctx, m.Mac); err != nil {
+	if err := s.grantFirewallAdd(ctx, m); err != nil {
 		log.Printf("warn: firewall add %s: %v — attempting resync", m.Mac, err)
 		if rerr := s.resyncLocked(ctx); rerr != nil {
 			log.Printf("ERROR: firewall resync after failed add %s: %v (paid MAC offline until next resync)", m.Mac, rerr)
@@ -93,7 +125,7 @@ func (s *MACService) GrantFromVoucher(ctx context.Context, mac, label string, da
 	if err != nil {
 		return nil, fmt.Errorf("upsert mac: %w", err)
 	}
-	if err := s.FW.Add(ctx, m.Mac); err != nil {
+	if err := s.grantFirewallAdd(ctx, m); err != nil {
 		log.Printf("warn: firewall add %s (voucher): %v — attempting resync", m.Mac, err)
 		if rerr := s.resyncLocked(ctx); rerr != nil {
 			log.Printf("ERROR: firewall resync after failed add %s: %v (granted MAC offline until next resync)", m.Mac, rerr)
@@ -103,7 +135,13 @@ func (s *MACService) GrantFromVoucher(ctx context.Context, mac, label string, da
 	return m, nil
 }
 
-// Extend is the admin-manual version of GrantFromOrder.
+// Extend is the admin-manual version of GrantFromOrder, with the same
+// error contract: an error means NOTHING durable happened. Pre-v0.126 a
+// transient FW.Add failure after the DB committed surfaced as an error —
+// but UpsertMAC accumulates days on top of the current expiry, so the
+// admin's (or API client's) natural retry granted the days TWICE. Now a
+// firewall-only failure self-heals via resync and the extend reports the
+// success it actually is.
 func (s *MACService) Extend(ctx context.Context, mac, label string, days int, userID *int64) (*models.MAC, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -111,8 +149,11 @@ func (s *MACService) Extend(ctx context.Context, mac, label string, days int, us
 	if err != nil {
 		return nil, err
 	}
-	if err := s.FW.Add(ctx, m.Mac); err != nil {
-		return nil, err
+	if err := s.grantFirewallAdd(ctx, m); err != nil {
+		log.Printf("warn: firewall add %s (extend): %v — attempting resync", m.Mac, err)
+		if rerr := s.resyncLocked(ctx); rerr != nil {
+			log.Printf("ERROR: firewall resync after failed add %s: %v (granted MAC offline until next resync)", m.Mac, rerr)
+		}
 	}
 	return m, nil
 }
@@ -129,8 +170,14 @@ func (s *MACService) ExtendOwned(ctx context.Context, mac, label string, days in
 	if err != nil || m == nil {
 		return nil, err
 	}
-	if err := s.FW.Add(ctx, m.Mac); err != nil {
-		return nil, err
+	// Same self-heal contract as Extend: the DB committed, so a transient
+	// firewall failure must not surface as "extend failed" (a retry would
+	// stack the days a second time).
+	if err := s.grantFirewallAdd(ctx, m); err != nil {
+		log.Printf("warn: firewall add %s (extend-owned): %v — attempting resync", m.Mac, err)
+		if rerr := s.resyncLocked(ctx); rerr != nil {
+			log.Printf("ERROR: firewall resync after failed add %s: %v (granted MAC offline until next resync)", m.Mac, rerr)
+		}
 	}
 	return m, nil
 }
@@ -142,7 +189,7 @@ func (s *MACService) Revoke(ctx context.Context, mac string) error {
 	if err := s.DB.SetMACStatus(ctx, mac, models.MACBlocked); err != nil {
 		return err
 	}
-	return s.FW.Remove(ctx, mac)
+	return s.removeWithResyncFallback(ctx, mac, "revoke")
 }
 
 // Delete removes from DB + firewall.
@@ -152,7 +199,30 @@ func (s *MACService) Delete(ctx context.Context, mac string) error {
 	if err := s.DB.DeleteMAC(ctx, mac); err != nil {
 		return err
 	}
-	return s.FW.Remove(ctx, mac)
+	return s.removeWithResyncFallback(ctx, mac, "delete")
+}
+
+// removeWithResyncFallback drops one MAC from the firewall set and, when
+// that fails, immediately falls back to a full resync (rebuild from DB) —
+// the same self-heal pattern grants use for a failed Add.
+//
+// Pre-v0.119 a transient FW.Remove failure (nft timeout under load, EINTR)
+// during Revoke/Delete surfaced as an error but left the kernel set
+// UNCHANGED: the DB said blocked/deleted while the device kept full
+// internet access for up to an hour until the periodic reconcile — a rule
+// leak after revoke. The DB write has already committed by the time this
+// runs, so a successful resync converges the kernel to the truth and the
+// operation reports success. Caller must hold s.mu.
+func (s *MACService) removeWithResyncFallback(ctx context.Context, mac, op string) error {
+	err := s.FW.Remove(ctx, mac)
+	if err == nil {
+		return nil
+	}
+	log.Printf("warn: firewall remove %s (%s): %v — attempting resync", mac, op, err)
+	if rerr := s.resyncLocked(ctx); rerr != nil {
+		return fmt.Errorf("firewall remove %s: %w (resync fallback also failed: %v — device may stay online until next resync)", mac, err, rerr)
+	}
+	return nil
 }
 
 // Replace transfers a user's remaining time from oldMac to newMac.
@@ -164,11 +234,22 @@ func (s *MACService) Replace(ctx context.Context, userID int64, oldMac, newMac, 
 	if err != nil {
 		return nil, err
 	}
-	if err := s.FW.Remove(ctx, oldMac); err != nil {
-		log.Printf("warn: firewall remove %s during replace: %v", oldMac, err)
+	// The old row is already gone from the DB — a failed Remove would leave
+	// the retired MAC online until the next reconcile, the same rule leak
+	// removeWithResyncFallback closes for Revoke/Delete.
+	if err := s.removeWithResyncFallback(ctx, oldMac, "replace"); err != nil {
+		log.Printf("warn: %v", err)
 	}
-	if err := s.FW.Add(ctx, newMac); err != nil {
-		return nil, fmt.Errorf("firewall add %s: %w", newMac, err)
+	// Schedule-aware add + resync self-heal, same as every grant path: the
+	// DB has already committed, so a transient FW.Add failure must not
+	// surface as "replace failed" (it didn't — the time transferred), and
+	// a MAC whose inherited schedule window is closed must not come online
+	// until the window opens.
+	if err := s.grantFirewallAdd(ctx, m); err != nil {
+		log.Printf("warn: firewall add %s (replace): %v — attempting resync", m.Mac, err)
+		if rerr := s.resyncLocked(ctx); rerr != nil {
+			log.Printf("ERROR: firewall resync after failed replace add %s: %v (device offline until next resync)", m.Mac, rerr)
+		}
 	}
 	return m, nil
 }
@@ -232,6 +313,9 @@ func (s *MACService) enforceSchedulesOnce(ctx context.Context) {
 	now := time.Now()
 	macs, err := s.DB.ListActiveMACs(ctx)
 	if err != nil {
+		// Log — a silent return here hid DB trouble from the operator while
+		// schedule enforcement quietly stopped working.
+		log.Printf("schedule: list active MACs: %v", err)
 		return
 	}
 	for _, m := range macs {
@@ -292,9 +376,19 @@ func (s *MACService) ExpireDue(ctx context.Context) (int, error) {
 	if err != nil {
 		return 0, err
 	}
+	removeFailed := false
 	for _, m := range expired {
 		if err := s.FW.Remove(ctx, m); err != nil {
 			log.Printf("warn: firewall remove %s: %v", m, err)
+			removeFailed = true
+		}
+	}
+	// Same rationale as removeWithResyncFallback: the DB rows already flipped
+	// to expired, so a failed Remove otherwise leaves those devices online
+	// until the next periodic reconcile. One resync converges everything.
+	if removeFailed {
+		if rerr := s.resyncLocked(ctx); rerr != nil {
+			log.Printf("ERROR: firewall resync after failed expiry removes: %v (expired MACs may stay online until next resync)", rerr)
 		}
 	}
 	if len(expired) > 0 {

@@ -111,7 +111,7 @@ func (w *WeChat) Precreate(ctx context.Context, outTradeNo, desc string, totalCe
 		return nil, err
 	}
 	defer resp.Body.Close()
-	respBody, _ := io.ReadAll(resp.Body)
+	respBody, _ := io.ReadAll(io.LimitReader(resp.Body, maxRespBytes))
 	if resp.StatusCode/100 != 2 {
 		return nil, fmt.Errorf("wechat precreate: http %d: %s", resp.StatusCode, string(respBody))
 	}
@@ -147,7 +147,7 @@ func (w *WeChat) Query(ctx context.Context, outTradeNo string) (*PaidNotice, boo
 		return nil, false, err
 	}
 	defer resp.Body.Close()
-	body, _ := io.ReadAll(resp.Body)
+	body, _ := io.ReadAll(io.LimitReader(resp.Body, maxRespBytes))
 	if resp.StatusCode == 404 {
 		// Order exists locally but WeChat doesn't know it yet (user hasn't scanned).
 		return nil, false, nil
@@ -315,7 +315,7 @@ func (w *WeChat) refreshPlatformCerts(ctx context.Context) error {
 		return fmt.Errorf("fetch certs: %w", err)
 	}
 	defer resp.Body.Close()
-	body, _ := io.ReadAll(resp.Body)
+	body, _ := io.ReadAll(io.LimitReader(resp.Body, maxRespBytes))
 	if resp.StatusCode/100 != 2 {
 		return fmt.Errorf("fetch certs: http %d: %s", resp.StatusCode, string(body))
 	}

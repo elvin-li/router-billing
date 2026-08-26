@@ -13,6 +13,7 @@ import (
 	"golang.org/x/crypto/bcrypt"
 	"gopkg.in/yaml.v3"
 
+	"router-billing/internal/models"
 	"router-billing/internal/totp"
 )
 
@@ -554,30 +555,90 @@ func (c *Config) validatePay() error {
 
 // validateFirewall mirrors firewall.NewBackend's accepted names so a typo
 // fails --check-config instead of log.Fatal'ing at boot.
+//
+// Table/set names are also validated: they are interpolated verbatim into
+// `nft -f` scripts and `ipset restore` payloads, so whitespace, braces or
+// newlines in a name would change the script's *structure* instead of
+// failing cleanly (defense-in-depth — the config file is root-owned, but a
+// typo'd name should fail at --check-config, not corrupt a firewall
+// transaction at 3am). The ipset backend additionally caps the set name so
+// the atomic-swap scratch set ("<name>_swp") still fits the kernel's
+// 31-char IPSET_MAXNAMELEN — a longer name made every Sync fail at runtime
+// with an opaque restore error.
 func (c *Config) validateFirewall() error {
-	switch strings.ToLower(strings.TrimSpace(c.Firewall.Backend)) {
+	backend := strings.ToLower(strings.TrimSpace(c.Firewall.Backend))
+	switch backend {
 	case "", "nft", "nftables", "ipt", "iptables", "ipset":
-		return nil
 	default:
 		return fmt.Errorf("firewall.backend %q: must be nftables or iptables", c.Firewall.Backend)
 	}
+	switch c.Firewall.Table {
+	case "ip", "ip6", "inet", "bridge", "arp", "netdev":
+	default:
+		return fmt.Errorf("firewall.table %q: must be one of ip, ip6, inet, bridge, arp, netdev", c.Firewall.Table)
+	}
+	if !validFirewallName(c.Firewall.TableName) {
+		return fmt.Errorf("firewall.table_name %q: only letters, digits, '_' and '-' are allowed", c.Firewall.TableName)
+	}
+	if !validFirewallName(c.Firewall.SetName) {
+		return fmt.Errorf("firewall.set_name %q: only letters, digits, '_' and '-' are allowed", c.Firewall.SetName)
+	}
+	switch backend {
+	case "ipt", "iptables", "ipset":
+		if len(c.Firewall.SetName) > 27 {
+			return fmt.Errorf("firewall.set_name %q: max 27 chars on the iptables/ipset backend (the \"_swp\" swap scratch set must fit ipset's 31-char name limit)", c.Firewall.SetName)
+		}
+	}
+	return nil
+}
+
+// validFirewallName allows [A-Za-z0-9_-]+ — the safe common subset for
+// nftables identifiers and ipset names.
+func validFirewallName(s string) bool {
+	if s == "" {
+		return false
+	}
+	for _, r := range s {
+		switch {
+		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9', r == '_', r == '-':
+		default:
+			return false
+		}
+	}
+	return true
 }
 
 // validateDurations rejects negative intervals. applyDefaults only fills
 // zero values, so a negative typo used to pass --check-config and then be
 // silently replaced by a hardcoded fallback deep in each goroutine.
+//
+// Sub-second typos are rejected too (e.g. `expire_check_interval: 1s`
+// meant as `1h`, or a forgotten unit yaml parses as nanoseconds): each of
+// these intervals drives a loop that hits the DB, forks nft, or
+// re-resolves DNS — at a near-zero cadence they busy-loop a
+// resource-constrained router into the ground while --check-config
+// stayed green.
 func (c *Config) validateDurations() error {
 	if c.Scheduler.ExpireCheckInterval < 0 {
 		return fmt.Errorf("scheduler.expire_check_interval must not be negative")
 	}
+	if c.Scheduler.ExpireCheckInterval != 0 && c.Scheduler.ExpireCheckInterval < 30*time.Second {
+		return fmt.Errorf("scheduler.expire_check_interval %s: must be at least 30s (each pass queries the DB and reconciles the firewall)", c.Scheduler.ExpireCheckInterval)
+	}
 	if c.Backup.Interval < 0 {
 		return fmt.Errorf("backup.interval must not be negative")
+	}
+	if c.Backup.Interval != 0 && c.Backup.Interval < 10*time.Minute {
+		return fmt.Errorf("backup.interval %s: must be at least 10m (each pass copies the whole DB via VACUUM INTO)", c.Backup.Interval)
 	}
 	if c.Backup.RetainDays < 0 {
 		return fmt.Errorf("backup.retain_days must not be negative")
 	}
 	if c.WalledGarden.RefreshInterval < 0 {
 		return fmt.Errorf("walled_garden.refresh_interval must not be negative")
+	}
+	if c.WalledGarden.RefreshInterval != 0 && c.WalledGarden.RefreshInterval < 30*time.Second {
+		return fmt.Errorf("walled_garden.refresh_interval %s: must be at least 30s (each pass re-resolves every garden domain)", c.WalledGarden.RefreshInterval)
 	}
 	return nil
 }
@@ -627,6 +688,25 @@ func (c *Config) validateSMS() error {
 	}
 	if c.SMS.AdminDigestHour < 0 || c.SMS.AdminDigestHour > 24 {
 		return fmt.Errorf("sms.admin_digest_hour %d: must be 0 (disabled) or 1..24", c.SMS.AdminDigestHour)
+	}
+	// A malformed alert phone used to pass --check-config and then
+	// silently disable BOTH the login-alert SMS and the entire daily
+	// digest loop at boot (one stderr line each) — the operator believed
+	// the 3am-login alarm was armed when it wasn't.
+	if p := strings.TrimSpace(c.SMS.AdminLoginAlertPhone); p != "" && !models.ValidPhone(p) {
+		return fmt.Errorf("sms.admin_login_alert_phone %q: not a valid mobile number", c.SMS.AdminLoginAlertPhone)
+	}
+	if c.SMS.AdminDigestHour > 0 {
+		// The digest can only ever fire with a target phone and a real
+		// provider; setting the hour without them silently disabled the
+		// loop at boot instead of failing --check-config.
+		if strings.TrimSpace(c.SMS.AdminLoginAlertPhone) == "" {
+			return fmt.Errorf("sms.admin_digest_hour is set but admin_login_alert_phone is empty — the digest has nowhere to go")
+		}
+		switch strings.ToLower(strings.TrimSpace(c.SMS.Provider)) {
+		case "", "none", "off":
+			return fmt.Errorf("sms.admin_digest_hour is set but sms.provider is disabled — the digest could never send")
+		}
 	}
 	return nil
 }

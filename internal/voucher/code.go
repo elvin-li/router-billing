@@ -17,16 +17,31 @@ import (
 const alphabet = "23456789ABCDEFGHJKMNPQRSTUVWXYZ"
 
 // New returns a fresh canonical (dashless, uppercase) 12-char code.
+//
+// Rejection sampling: len(alphabet) is 31 and 256 % 31 = 8, so a plain
+// `b % 31` skewed the first 8 symbols to 9/256 probability vs 8/256 for
+// the rest (+12.5%) — vouchers are cash-equivalent bearer tokens, so they
+// get the same uniformity discipline randomPassword got in v0.121.
 func New() (string, error) {
-	buf := make([]byte, 12)
-	idx := make([]byte, 12)
-	if _, err := rand.Read(idx); err != nil {
-		return "", err
+	const n = 12
+	limit := byte(256 - 256%len(alphabet)) // 248
+	out := make([]byte, 0, n)
+	buf := make([]byte, n)
+	for len(out) < n {
+		if _, err := rand.Read(buf); err != nil {
+			return "", err
+		}
+		for _, b := range buf {
+			if b >= limit {
+				continue
+			}
+			out = append(out, alphabet[int(b)%len(alphabet)])
+			if len(out) == n {
+				break
+			}
+		}
 	}
-	for i, b := range idx {
-		buf[i] = alphabet[int(b)%len(alphabet)]
-	}
-	return string(buf), nil
+	return string(out), nil
 }
 
 // Pretty inserts dashes every 4 chars for display.

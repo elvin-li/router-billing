@@ -137,9 +137,12 @@ func (a *App) handleUserForgotPassword(w http.ResponseWriter, r *http.Request) {
 			a.renderForgot(w, r, 1, phone, "internal")
 			return
 		}
-		body := "【router-billing】您的密码重置验证码：" + code + "，" +
-			padMins(int(pwResetCodeTTL/time.Minute)) + "内有效。若非本人操作，请忽略。"
-		if sErr := a.SendSMS(r.Context(), user.Phone, body); sErr != nil {
+		body := formatPwResetSMSBody(code)
+		// The sms_log row must NOT contain the live code: the table is
+		// readable by read-only API tokens (GET /api/admin/sms/log), and a
+		// stored code is a 10-minute account-takeover credential.
+		logged := formatPwResetSMSBody(strings.Repeat("*", pwResetCodeLen))
+		if sErr := a.SendSMSSensitive(r.Context(), user.Phone, body, logged); sErr != nil {
 			log.Printf("forgot-password sms %s: %v", phone, sErr)
 			a.renderForgot(w, r, 1, phone, "sms_failed")
 			return
@@ -274,6 +277,13 @@ func (a *App) renderForgot(w http.ResponseWriter, r *http.Request, stage int, ph
 		extra["Err"] = userErrLabel(errCode)
 	}
 	a.render(w, "user_forgot_password.html", a.userCtx(r, "forgot", extra))
+}
+
+// formatPwResetSMSBody builds the reset-code SMS. Pure function shared by
+// the real send and the redacted sms_log copy so the two can never drift.
+func formatPwResetSMSBody(code string) string {
+	return "【router-billing】您的密码重置验证码：" + code + "，" +
+		padMins(int(pwResetCodeTTL/time.Minute)) + "内有效。若非本人操作，请忽略。"
 }
 
 // padMins formats minutes for the SMS body. Single source of truth so we don't

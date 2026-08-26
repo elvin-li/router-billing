@@ -138,7 +138,10 @@ func (a *Aliyun) Send(ctx context.Context, phone, message string) error {
 		return fmt.Errorf("aliyun sms: %w", err)
 	}
 	defer resp.Body.Close()
-	body, _ := io.ReadAll(resp.Body)
+	// Bound the read: the success payload is ~100 bytes, and an unbounded
+	// ReadAll would buffer whatever a misbehaving proxy/endpoint streams
+	// back into memory on a resource-constrained router.
+	body, _ := io.ReadAll(io.LimitReader(resp.Body, 64<<10))
 	if resp.StatusCode/100 != 2 {
 		return fmt.Errorf("aliyun sms: http %d: %s", resp.StatusCode, string(body))
 	}
@@ -211,7 +214,13 @@ func defaultNonce() string {
 	return hex.EncodeToString(b)
 }
 
+// looksLikeJSON reports whether the message should be passed through as
+// raw TemplateParam. Requiring VALID JSON (not just surrounding braces)
+// matters: a plain-text message that merely happens to be brace-wrapped —
+// e.g. an admin test send of "{urgent}" — used to skip the {"code": ...}
+// wrapping and reach Aliyun as a malformed TemplateParam, so the API
+// rejected it and the message was never delivered.
 func looksLikeJSON(s string) bool {
 	t := strings.TrimSpace(s)
-	return strings.HasPrefix(t, "{") && strings.HasSuffix(t, "}")
+	return strings.HasPrefix(t, "{") && strings.HasSuffix(t, "}") && json.Valid([]byte(t))
 }

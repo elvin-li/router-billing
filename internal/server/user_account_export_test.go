@@ -77,6 +77,52 @@ func TestUserAccountExportOmitsSecrets(t *testing.T) {
 	}
 }
 
+func TestUserAccountExportOmitsAdminNotesAndSchedule(t *testing.T) {
+	app := setupTestApp(t)
+	h := app.Routes()
+
+	res, _ := do(t, h, "POST", "/user/register",
+		url.Values{"phone": {"13800146003"}, "password": {"notes-pw"}}, nil)
+	jar := cookieJar(res)
+	u, _ := app.DB.GetUserByPhone(context.Background(), "13800146003")
+	if _, err := app.DB.UpsertMAC(context.Background(), "AA:BB:CC:DD:EE:F2", "phone", 30, &u.ID); err != nil {
+		t.Fatal(err)
+	}
+	// Admin-only fields on the user's MAC: support notes (may reference
+	// fraud suspicions / other customers) and the admin-set schedule.
+	if err := app.DB.SetMACNotes(context.Background(), "AA:BB:CC:DD:EE:F2",
+		"ADMIN-INTERNAL: suspected reseller, see ticket #42"); err != nil {
+		t.Fatal(err)
+	}
+	if err := app.DB.SetMACSchedule(context.Background(), "AA:BB:CC:DD:EE:F2",
+		`{"days":[1,2],"start_hr":8,"end_hr":20}`); err != nil {
+		t.Fatal(err)
+	}
+
+	_, body := do(t, h, "GET", "/user/account/export", nil, jar)
+	for _, leak := range []string{"ADMIN-INTERNAL", "schedule_json", "start_hr"} {
+		if strings.Contains(body, leak) {
+			t.Errorf("export leaks admin-only field content %q", leak)
+		}
+	}
+	// The MAC itself must still be present with its user-visible fields.
+	var got map[string]any
+	if err := json.Unmarshal([]byte(body), &got); err != nil {
+		t.Fatal(err)
+	}
+	macs, _ := got["macs"].([]any)
+	if len(macs) != 1 {
+		t.Fatalf("export should still include the MAC; got %d", len(macs))
+	}
+	entry, _ := macs[0].(map[string]any)
+	if entry["mac"] != "AA:BB:CC:DD:EE:F2" || entry["label"] != "phone" {
+		t.Errorf("mac entry missing user-visible fields: %+v", entry)
+	}
+	if _, ok := entry["expires_at"]; !ok {
+		t.Error("mac entry should keep expires_at")
+	}
+}
+
 func TestUserAccountExportWritesAudit(t *testing.T) {
 	app := setupTestApp(t)
 	h := app.Routes()

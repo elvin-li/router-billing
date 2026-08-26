@@ -236,6 +236,19 @@ func TestLoadRejections(t *testing.T) {
 			validBase + "pay:\n  alipay:\n    enabled: true\n",
 			"pay.alipay"},
 		{"firewall backend typo", validBase + "firewall:\n  backend: nftablez\n", "firewall.backend"},
+		{"firewall family typo", validBase + "firewall:\n  table: inet6\n", "firewall.table"},
+		{"firewall table_name with space",
+			validBase + "firewall:\n  table_name: \"billing extra\"\n",
+			"firewall.table_name"},
+		{"firewall set_name with brace",
+			validBase + "firewall:\n  set_name: \"mac_paid}\"\n",
+			"firewall.set_name"},
+		{"firewall set_name with newline",
+			validBase + "firewall:\n  set_name: \"mac\\npaid\"\n",
+			"firewall.set_name"},
+		{"ipset set_name too long for swap scratch",
+			validBase + "firewall:\n  backend: ipset\n  set_name: \"a_very_long_ipset_name_28chr\"\n",
+			"max 27 chars"},
 		{"negative expire interval", validBase + "scheduler:\n  expire_check_interval: -1h\n", "expire_check_interval"},
 		{"negative backup interval", validBase + "backup:\n  interval: -24h\n", "backup.interval"},
 		{"negative backup retain", validBase + "backup:\n  retain_days: -1\n", "retain_days"},
@@ -258,6 +271,18 @@ func TestLoadRejections(t *testing.T) {
 			"all required"},
 		{"sms reminder days out of range", validBase + "sms:\n  expiry_reminder_days: 60\n", "expiry_reminder_days"},
 		{"sms digest hour out of range", validBase + "sms:\n  admin_digest_hour: 25\n", "admin_digest_hour"},
+		{"alert phone malformed",
+			validBase + "sms:\n  provider: console\n  admin_login_alert_phone: \"12345\"\n",
+			"admin_login_alert_phone"},
+		{"digest hour without phone",
+			validBase + "sms:\n  provider: console\n  admin_digest_hour: 9\n",
+			"admin_login_alert_phone is empty"},
+		{"digest hour with sms disabled",
+			validBase + "sms:\n  admin_digest_hour: 9\n  admin_login_alert_phone: \"13800138000\"\n",
+			"sms.provider is disabled"},
+		{"tiny expire interval", validBase + "scheduler:\n  expire_check_interval: 1s\n", "at least 30s"},
+		{"tiny backup interval", validBase + "backup:\n  interval: 5s\n", "at least 10m"},
+		{"tiny garden refresh", validBase + "walled_garden:\n  refresh_interval: 1s\n", "at least 30s"},
 		{"webhook bad scheme",
 			validBase + "webhook:\n  url: \"ftp://hook.example\"\n  secret: s3cretlong\n",
 			"webhook.url"},
@@ -300,6 +325,8 @@ func TestLoadAcceptsHardenedConfig(t *testing.T) {
 		"  auto_cancel_stale_order_hours: 48\n" +
 		"sms:\n" +
 		"  provider: console\n" +
+		"  admin_login_alert_phone: \"13800138000\"\n" +
+		"  admin_digest_hour: 9\n" +
 		"webhook:\n" +
 		"  url: \"https://hook.example/rb\"\n" +
 		"  secret: a-long-random-shared-secret\n"

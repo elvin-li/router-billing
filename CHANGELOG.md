@@ -1,5 +1,390 @@
 # Changelog
 
+## v0.127 — 深挖轮 9：正确性验证轮（时区 / SQL date / TOCTOU / 2FA 重放 / 输入边界）
+
+第三轮独立审计，按清单逐面验证此前多轮加固的完整性；本轮未发
+现新的真实缺陷（不为改而改），复查结论如下（均确认无缺陷、不
+改动）：
+
+- 时间/时区：`ExpireDueMACs`/`ListActiveMACs` 的
+  `CURRENT_TIMESTAMP` 字符串比较在秒粒度一致（tx_time_index
+  回归测试在位）；schedule 跨午夜窗与 ISO 周日换算正确；
+  Alipay GMT+8 时间戳（v0.106）与 audit `date()` 过滤（写入端
+  为 SQLite CURRENT_TIMESTAMP 格式，可被 date() 解析）均正确。
+- TOCTOU/竞态：全部 `UpsertMAC` 写路径已收敛到 service 层锁下；
+  用户 2FA 登录、启用确认、关闭三条路径全部走
+  `totp.MatchingStep` + 步进一次性消费（重放按错码处理）；备用
+  码为条件 UPDATE 单次使用；trusted-device 走哈希查找 + 过期
+  校验；finalize/refund 共用 `pollMu` 且 `WithoutCancel`。
+- 输入边界：admin 全部 `Atoi` 入口（days/hours/count/
+  expires_days/price/sort_order/schedule 分钟）均有上下界；
+  CSRF 双提交 cookie + 常数时间比较 + 全局 1MiB body cap
+  （restore 单独放宽）；`SendSMSSensitive` 覆盖全部凭据类短信，
+  其余 5 个发送点均为运营内容。
+- 后台任务：notify 单 worker 的 AttemptTimeout 背压、re-enqueue
+  退避、panic 恢复、nil client 防御、有界 body drain 全部在位；
+  scheduler 双 pass（expire+resync）panic 隔离；备份/恢复固定
+  路径无穿越。
+- UTF-8/截断：全站字节截断残留扫描仅剩 ASCII token/码前缀切片
+  （安全）；自由文本一律 `truncateRunes`。
+
+## v0.126 — 深挖轮 8：延期重试双倍加天、voucher batch 回显、支付网关无界读取
+
+第二轮独立审计（重点：admin UI/模板回显面、service 错误契约一
+致性、外部 HTTP 响应边界、deploy/CI/compose 复查）。修复三类真
+实缺陷。
+
+A. (MEDIUM, 误导性失败→双倍授予) `Extend`/`ExtendOwned` 在 DB
+已提交后防火墙 `FW.Add` 瞬时失败（nft 超时、EINTR）会把错误原
+样上抛——admin UI 显示「操作失败」、API 返回 5xx，但天数实际
+已经加上了。`UpsertMAC` 的语义是在现有到期时间上累加，所以管理
+员/脚本的自然重试会把天数加两次。grant（v0.106）、revoke/delete
+（v0.123）、replace（v0.125）都已改为「DB 为真值 + resync 自
+愈」，这两个入口漏掉了。修复：与 grant 同契约——失败时记日志
+并立即 resync，操作报告它实际达成的成功。回归测试断言 FW 全挂
+时 Extend/ExtendOwned 仍成功、到期时间恰好 +30 天（不叠加）、
+内核集合经 resync 收敛。
+
+B. (LOW-MEDIUM, 反射内容注入) `/admin/vouchers` 与
+`/admin/vouchers/print` 把自由文本的 `?batch=` 原样渲染进受信
+任的界面 chrome——批量作废的绿色 flash（`已批量作废 batch
+<code>…</code>`）、列表区标题（`batch = …`）与打印页表头。
+v0.122 只清洗了数字型 flash 参数，漏了这个唯一的自由文本键：构
+造链接可在管理界面里放任意钓鱼文案。修复：只回显真实存在的
+batch 名（DB 精确匹配佐证；未知值渲染为空，其列表本来就是空
+的），过滤语义不变。回归测试断言注入文本不反射、真实 batch 名
+照常显示。
+
+C. (LOW, 资源边界) `pay/wechat.go`（precreate/query/证书拉取）
+与 `pay/alipay.go`（precreate/query）对 PSP 网关响应用无界
+`io.ReadAll`——上游异常或中间代理返回超大响应可直接把路由器
+内存打爆。v0.124 已给 Aliyun SMS 客户端加了 64KB LimitReader，
+支付客户端同纪律：统一 1 MiB 上限（多证书 payload 留足余量），
+5 处全部收口。
+
+其余复查确认无缺陷（不改动）：deploy 脚本（install/uninstall/
+firewall-billing/setup-secure-ssid/uci-defaults 权限与幂等）、
+Dockerfile 非 root + compose read-only rootfs + cap_drop、CI
+最小权限与 ipk 结构校验、静态 JS（devices-stream 全插值
+escape）、pay 长轮询 waiter map 的注销配对、flash 一次性 token
+清扫、rate limiter 硬上限。
+
+## v0.125 — 深挖轮 7：用户门户反射注入、换机甩日程、充值码模偏差、活动流全表扫描
+
+合并 v0.120–v0.124 移植批次后的第一轮独立全库审计（重点：用户
+门户、service/db 复合操作、随机数卫生、热路径查询）。修复四类
+真实缺陷。
+
+A. (MEDIUM, 反射内容注入·公开页) `userErrLabel` 的 default 分
+支把未识别的 `?err=` 码原样返回——与 v0.122 修掉的 admin
+errLabel / redeem 页完全同类，但用户门户（含未登录可访问的
+/user/login、/user/register 公开页）漏掉了：构造链接
+`/user/login?err=维修中请转账13800000000` 即可在受信任的红色
+flash 框里放任意钓鱼文案。修复：补上唯一缺映射的合法码
+`backup_codes_failed`（此前原样渲染成英文码），default 一律折
+叠为「操作失败，请重试」。回归测试断言注入文本不反射、合法码
+有人话文案。
+
+B. (MEDIUM, 策略绕过/规则泄漏) 用户自助换机 `/user/macs/replace`
+的 `ReplaceMAC` 新行不带 `schedule_json` 与 `notes`——管理员给
+设备设的限时策略（宵禁）随换机静默消失，而现代手机的随机 MAC
+让「换机」零成本，等于用户可自助解除管理员限制；管理员备注同
+样丢失。服务层三处配套缺陷一起修：换机后对新 MAC 无条件
+`FW.Add`（继承的日程窗关闭时也直接放行）；旧 MAC 的 `FW.Remove`
+失败只记日志（DB 行已删，设备继续在线直到下次 reconcile，与
+v0.123 修的吊销泄漏同类）；新 MAC `FW.Add` 失败向用户报
+「replace_failed」但换机实际已生效。修复：`ReplaceMAC` 原子迁
+移 schedule/notes；服务层换用 `grantFirewallAdd`（日程感知）+
+`removeWithResyncFallback` / resync 自愈。回归测试覆盖：日程与
+备注随换机迁移、窗口关闭时新 MAC 不上防火墙、FW 全挂时换机仍
+成功且 resync 后内核集合收敛到 DB 真值。
+
+C. (LOW, 密码学卫生) `voucher.New` 用 `byte % 31` 从 31 字符表
+选字——256 % 31 = 8，前 8 个字符概率 9/256、其余 8/256
+（+12.5% 系统性偏差）。充值码是等同现金的 bearer token，与
+v0.121 修 `randomPassword` 的理由一致（虽无实际可利用性，有效
+熵仍 ~59.5 bit）。改为拒绝采样，补 24 万样本均匀性回归测试
+（±8% 容差 ≈ 7σ）。
+
+D. (LOW-MEDIUM, 热路径性能) `/user/me` 每次页面加载与
+`/user/account/export` 用 `SearchAudit{Actor: ":"+phone}` 取活
+动流——生成 `actor LIKE '%:<phone>%'`，前缀通配无法走索引，
+SQLite 只能倒序全表扫 audit_log 直到凑满 LIMIT；历史少的账户
+一次页面加载就是一次全表扫描，audit_log 越大越慢。实际 actor
+只有 `user:<phone>` / `user-attempt:<phone>` 两种形态，改为精
+确 `IN (?, ?)` 查询 + 新增 `idx_audit_actor` 索引（schema.sql
+幂等建索引，老库自动补）。管理端的子串搜索语义不变。回归测试
+断言两种 actor 形态都命中、别人的行不泄入、newest-first 与
+LIMIT 生效。
+
+其余复查确认无缺陷（不改动）：sms Sender nil 防护、totp 常数
+时间比较与步进防重放、ipset build-aside-and-swap、refund 后台
+resync goroutine 有界、backup codes 32 字符表无偏差、
+randomToken hex 无偏差、pay provider 先校验后建单。
+
+## v0.124 — 移植深挖轮（sms/notify/config）：短信日志泄漏活体凭据、Aliyun TemplateParam 误判、配置校验收尾
+
+针对 sms/notify/scheduler/config/totp/schedule 及 CI/compose 的
+专项审计。修复一个高危泄漏与若干真实缺陷。
+
+A. (HIGH, 凭据入库) `App.SendSMS` 把短信全文原样写进 `sms_log`
+表——忘记密码的 6 位重置验证码与管理员代发的临时密码（整条正文
+就是密码本身）全部明文落库。而 `GET /api/admin/sms/log` 明确
+接受**只读** API token（代码注释称该表"只是投递状态、非鉴权材
+料"）：持有只读监控 token 者可对任意手机号发起公开的
+/user/forgot-password，再从日志读出 10 分钟有效期内的活码，
+完成任意账号接管——只读层级的存在意义恰恰是杜绝这类影响。新增
+`SendSMSSensitive(ctx, phone, message, logged)`：投递正文不
+变，落库改用脱敏副本（验证码打星、临时密码只记"已发送"占位）。
+两处调用点（user_forgot、admin reset-password via_sms）全部
+切换；回归测试断言日志行不含活码/临时密码、投递通道（console
+环）保留全文、脱敏后验证码仍可完成端到端重置。
+
+B. (MEDIUM, 投递失败) Aliyun 适配器的 `looksLikeJSON` 只看首尾
+花括号：形如 `{urgent}`、`{紧急}` 的普通文本被当作现成的
+TemplateParam 原样透传，Aliyun 以格式非法拒收，短信静默丢失。
+改为必须 `json.Valid` 才透传，否则照常包成 `{"code": ...}`；
+另将响应体读取从无界 `io.ReadAll` 收敛到 64KB 上限。
+
+C. (MEDIUM, 配置校验遗留) 三处"过检即失效"的静默降级改为
+--check-config 直接报错：(1) `admin_login_alert_phone` 手误
+写错号码时，登录告警与整个每日日报循环都在启动时静默停用（各
+只有一行 stderr）；(2) `admin_digest_hour` 配了小时但没配收件
+号码或 provider 为空/none/off 时日报永远不会发；(3)
+`expire_check_interval`/`backup.interval`/
+`walled_garden.refresh_interval` 漏写单位或 `1s` 手误会让
+DB 查询、VACUUM INTO 全库拷贝、DNS 重解析进入忙循环——新增
+30s/10m/30s 下限（0 仍走默认值）。
+
+D. (LOW, 三处小缺陷) 字面量构造的 `sms.Console{}`（cap=0）每
+次 append 立即被裁剪清空，Recent() 永远为空——Send 内补默认
+值；`notify.Notifier` 绕过 New 构造（URL 有值但无队列）时每条
+事件都误报"queue full"——改为指明未初始化；
+POST /admin/sms-log/digest 手动触发缺少后台循环同款的
+ValidPhone 守卫，会对畸形号码白烧一次 provider 调用。
+
+E. (CI/compose) ci.yml 无 permissions 块，各 job 继承仓库默认
+token 权限（老仓库为 write）——补 `contents: read` 最小权限
+（release.yml 原本就有作用域）；docker-compose 开发容器加
+`read_only: true` + `/tmp` tmpfs（应用只写 state 卷）。
+
+其余复查确认无缺陷（不改动）：webhook URL 仅运营者配置文件可
+设、强制绝对 http(s) 且必须配 secret（无用户可控 SSRF 面）；
+忘记密码两阶段的防枚举统一响应（v0.106）与限流；scheduler 的
+panic 防护/初始 pass/ticker 语义；日报 nextDigestAt 的时钟跳
+变吸收；expiry-reminder 22h 去重窗与互斥；webhook_deliveries
+的逐次记录与 purgeLoop 裁剪；totp 常数时间比较与 step 记录；
+schedule 的 ISO 周日/跨午夜窗口。`go test ./...` 全绿；全部
+相关包（含 server、db）`-race` 绿；config.example.yaml 通过
+--check-config。
+
+## v0.118 — 深挖轮 4：MAC 计数全表扫描收尾
+
+## v0.123 — 移植深挖轮（firewall/portal）：授权路径日程窗残留、吊销后规则泄漏、ARP exec 边界
+
+对防火墙（nft/ipset）、walled garden、arp/sightings、门户 captive
+流程、OpenWrt 部署脚本与 scheduler 日程执行做第五轮独立审计，修
+复四类真实缺陷。
+
+A. (MEDIUM, 日程执行残留) 全部授权/续费路径无条件 `FW.Add`，
+无视 MAC 上已配置的时段日程：`GrantFromOrder`、
+`GrantFromVoucher`、`Extend`、`ExtendOwned` 在日程窗口**关闭**
+时依然把设备放进内核集合——设备在禁用时段获得最多一分钟的网络
+访问（直到下一个 EnforceSchedules 分钟 tick 移除），且每次付
+款/续费/管理员延期都会重复泄漏。这正是 v0.108 在 Resync、
+v0.110 在 ApplyScheduleNow 修掉的同类问题，授权路径是最后的残
+留。新增 `grantFirewallAdd`：窗口开放才 Add，关闭则防御性
+Remove；损坏的 schedule_json 保持 fail-open（与
+EnforceSchedules/Resync 一致，绝不锁死付费客户）。顺带：
+`enforceSchedulesOnce` 的 DB 列表错误此前被静默吞掉（日程执行
+悄悄停摆无人知晓），现在记日志。回归测试覆盖四条授权路径的关
+窗/开窗/坏 JSON 三种形态。
+
+B. (MEDIUM, 吊销后规则泄漏) `Revoke`/`Delete` 在 DB 已提交后
+`FW.Remove` 一旦瞬时失败（nft netlink 超时、EINTR）只把错误抛
+给调用方，内核集合原样不动：DB 说已拉黑/已删除，设备却继续满
+速上网，最长一小时（等下一次周期 reconcile）。`ExpireDue` 同
+理——逐条 Remove 失败仅记 warn。现在三处全部套用授权路径既有
+的自愈模式：Remove 失败立即回退整表 `resyncLocked`（DB 是唯一
+事实源，重建后被吊销设备必然被冲出集合）；resync 成功则操作如
+实报成功，双双失败才把错误带回调用方。回归测试断言 Remove 失
+败时 resync 兜底恰好一次、集合内不残留被吊销/过期 MAC。
+
+C. (LOW, exec 边界加固 + IPv6 zone 修复) `arp.Lookup` 把原始
+字符串直接放进 `ip neigh show to` 的 argv：今天唯一调用方喂的
+是 socket 派生的 RemoteAddr（不可伪造），但该导出函数是本项目
+的 exec 边界，未来任何拿查询参数调它的代码都会把选项形状/多
+token 字符串送进 ip(8)。现在先 `net.ParseIP` 校验并规范化，非
+IP 字面量在 spawn 进程之前即拒绝；顺带剥离 IPv6 zone 后缀——
+链路本地客户端的 RemoteAddr 形如 `fe80::1%br-paid`，iproute2
+不认 %zone 语法，此前这类门户请求的 MAC 探测**必然失败**并刷
+日志。`ListOnInterface` 同样校验接口名（≤15 字节、无空白/斜
+杠、不以 '-' 开头）；lladdr 输出 token 经 `net.ParseMAC` 验证
+才返回。门户侧 `detectMAC` 的回环判断从字符串前缀
+（`127.` / `::1`，漏掉 `::ffff:127.0.0.1` 与 `::`/`0.0.0.0`）
+改为解析后的 `IsLoopback/IsUnspecified`，并提取成纯函数
+`arpLookupHost` 加表驱动测试。
+
+D. (LOW, 配置校验) `firewall.table`/`table_name`/`set_name` 原
+样内插进 `nft -f` 脚本与 `ipset restore` payload，含空白/大括
+号/换行的名字会改变脚本**结构**而不是干净地报错（配置文件属
+root，属纵深防御）；且 ipset 后端的 set 名超过 27 字符时，原子
+交换的草稿集 `<name>_swp` 超出内核 31 字符上限——每次 Sync 都
+以晦涩的 restore 错误失败。现在 `--check-config` 即拒绝：family
+白名单（ip/ip6/inet/bridge/arp/netdev）、名字限
+`[A-Za-z0-9_-]+`、ipset 后端 set 名 ≤27。
+
+其余复查确认无缺陷（不改动）：nft/ipset 原子 sync 与 5s 超时、
+walled garden 公网过滤/DNS 失败缓存/字面 IP、firewall-billing.sh
+的幂等 apply 与 fwd 遗留清理、uci-defaults 的 REJECT 迁移与
+WiFi 密钥 0600 落盘、init.d/postinst/prerm（含 PKG_UPGRADE 门
+控）、uninstall.sh include 倒序删除、Dockerfile 非 root +
+cap_drop、finalize/refund 互斥、CSRF 与 SameSite、开放重定向
+既有测试面。`go test ./...` 与 `go test -race ./...` 全绿。
+
+## v0.122 — 移植深挖轮（admin UI/API）：管理端 UI/API/模板全面审计——只读 token 凭据泄露、公开端点信息泄露、flash 反射注入
+
+移植自独立审计分支（原编号 v0.119），聚焦 admin*.go / api_admin.go /
+SSE 流 / 模板的 XSS·CSRF·开放跳转·CSV 公式注入·token 分级·
+PII/凭据泄露残留。修复五类真实缺陷。
+
+A. (HIGH, 越权/凭据泄露) `/api/admin/sms/log` 向**只读** token
+返回完整短信正文。短信正文里有活凭据：
+`/admin/users/reset-password`（via_sms）把裸临时密码作为整条
+短信发出、`/user/forgot-password` 发送重置码——两者都经
+`SendSMS` 落入 sms_log。一枚泄露的监控级 token 由此升级为
+「收割任意用户临时密码/重置码」的全量 token，与 v0.114 把
+`/api/admin/backup` 锁到 privileged 的理由完全同类，却漏了这
+个 JSON 面。修复：新增 `requireAPITokenReadScoped` 中间件把
+token 的 readonly 位传进 handler；只读 token 仍可见全部行
+（监控用例只需要 sent_at/success/error_msg 判 FAIL 连击），但
+`message` 一律置空并在响应顶层加 `messages_redacted: true`；
+全量 token 行为不变。回归测试覆盖：只读拿不到临时密码正文、
+失败行元数据保留、全量 token 正文完整且无 redaction 标记。
+
+B. (MEDIUM, 信息泄露) 公开无鉴权的 `/health`（/healthz）在 DB
+故障时把驱动原始错误直接放进 503 响应体——SQLite 错误常内嵌
+DB 文件系统路径（"unable to open database file: /srv/…"）与驱
+动内部细节，等于向公网扫描者免费递侦察情报。修复：明细只进
+stderr 日志，响应体固定为 `{"status":"degraded","error":"db
+unreachable"}`。回归测试关闭 DB 后断言 503 且响应不含
+"database is closed"/"sqlite"/".db" 等内部字样。
+
+C. (MEDIUM, 反射内容注入) `errLabel` 的 default 分支把未识别
+的 `?err=` 码原样返回——该值经 `adminCtx` 注入**每个**管理页
+的红色 flash 框。html/template 会转义标签，但攻击者构造链接
+`/admin/orders?err=紧急！请致电138...解锁` 即可在受信任的管理
+界面里放任意钓鱼文案（管理登录页 v0.108 已刻意避免这一点，登
+录后的页面反而全部中招）。修复：补齐 13 个仍走 default 的合法
+码（bad_phone/sms_failed/trim_failed/optimize_failed/
+expire_failed/webhook_not_configured/cancel_stale_failed/
+missing_order/not_pending/empty_note/invalid/digest_no_phone/
+sms_disabled）的人话文案，default 一律折叠为固定的「操作失败，
+请重试」。端到端回归：带注入文本的 ?err= 不再出现在响应体。
+
+D. (MEDIUM, 反射内容注入·公开页) `/redeem` 公开页同类问题更重：
+(1) `?err=` 原文渲染，任何人可给用户发「维修中请转账」式链接；
+(2) `redeemErrLabel` 的 default 返回 `err.Error()`——DB 层意外
+错误（路径、SQL 片段）直接呈现给未登录访客；(3) 成功横幅的
+`days`/`expires_at` 未校验，可注入自由文本。修复：`?err=` 改
+白名单（只放行本服务器 redirect 实际会携带的固定文案集合，未
+知一律换成通用「充值失败，请稍后重试」）；`redeemErrLabel`
+default 换通用文案、原始错误改由 handler 记日志；`days` 过
+`digitsOnly`（≤4 位）、`expires_at` 过严格 YYYY-MM-DD 形状校
+验。回归测试覆盖注入文本不反射、合法文案/日期照常渲染。
+
+E. (LOW, 反射内容注入) 五个管理页把原始 query 参数整包塞进模板
+的 `Query0`，模板将 `reset_uid`/`count`/`added` 等当数字拼进
+绿色成功 flash（「用户 #{{reset_uid}} 的临时密码…」）——构造
+链接可在受信任横幅里插入任意文本。修复：新增
+`queryFlashParams`，对 13 个已知数字键（count/hours/sent/
+skipped/errored/reset_uid/expired/ms/added/failed/revoked/
+ok_n/fail_n）过 `digitsOnly`（≤12 位）后再入模板；users/
+orders/sms-log/maintenance/vouchers 五处统一替换。回归测试断
+言注入文本被剥离、纯数字照常显示。
+
+其余复查确认无缺陷（不改动）：全部 mutate 型 /api/admin 路由
+均挂 requireAPITokenWrite、backup 维持 privileged；SSE 两条流
+（stats/devices）每 tick 复核会话、心跳同样复核；
+/api/admin/sessions 不回传 token（哈希也不回传）、vouchers JSON
+只回 4 位前缀、users/macs/get 剥离 password_hash/totp_secret；
+CSV 导出（macs/users/orders/audit/sms-log/webhook-log/vouchers）
+的自由文本列全部过 csvCell、文件名全部为常量或 filenameSafe；
+Content-Disposition 无 CR/LF/引号注入面；metrics token 常数时
+间比较；safeNextPath 拦截 //host 与反斜杠变体；redirectBack 锁
+定 /admin/ 前缀；模板无 template.HTML/内联脚本（CSP script-src
+'self' 兼容性测试在位）。`go test ./... -race` 全绿。
+
+## v0.121 — 深挖轮 6 收尾：过期充值码仍可打印、临时密码模偏差
+
+深挖轮 6 的第二批修复，以及本轮剩余子系统的复查结论。
+
+A. (LOW, 运营正确性) `/admin/vouchers/print` 的注释承诺只打印
+「未兑换/未撤销/未过期」的充值码，但代码只过滤了前两项——已过
+期（`expires_at` 在过去）的码照常渲染成可打印卡片，客户拿到手
+在 /redeem 一定被拒。修复：打印列表跳过已过期的码。另外：打印
+页与 QR 端点把 code 原样拼进 query string；导入路径的 code 只
+做长度校验（Canon 后 ≥6 位，字符集不限），含 `&` 等字符会拆断
+URL。两处改为 `url.QueryEscape`，常规字母数字码字节不变。回归
+测试断言过期码不出现在打印页、未过期码正常出现。
+
+B. (LOW, 密码学卫生) `randomPassword`（管理员重置用户密码的临
+时密码生成器）用 `byte % 57` 从 57 字符表选字——256 % 57 ≠ 0，
+前 28 个字符的概率是 5/256、其余是 4/256（+11% 系统性偏差）。
+虽无实际可利用性（有效熵仍 ~57 bit），但与备用码路径（32 字符
+表天然无偏）的严谨度不一致。改为拒绝采样，每个字符严格均匀。
+新增均匀性回归测试（20 万样本、±8% 容差 ≈ 4.7σ，可稳定检出修
+复前的 ±11% 偏差且几乎不会误报）。
+
+其余复查确认无缺陷（不改动）：admin_backup（VACUUM INTO 快照、
+两阶段 restore + SQLite magic/schema 校验）、metrics（常数时间
+token 比较）、devices/stats SSE 流（每 tick 复验管理员会话）、
+totp_replay（步进单调防重放）、admin_api_tokens（只读视图仅前
+缀）、forgot-password（枚举防护/限速/尝试上限完整）、trusted
+devices、backup codes（32 字符表无模偏差、条件 UPDATE 单次使
+用门）、attention 缓存、csv_sanitize、admin 维护端点（
+expire-now 已用 WithoutCancel）、dnsmasq/arp 解析、cmd/main、
+web 静态 JS（所有插值经 escape()/textContent，无 innerHTML 注
+入面）、sw.js（仅缓存 /static/）、Dockerfile 与 CI（非 root、
+ipk 结构与 0600 config 校验已有）、db.go 全部 LIMIT 参数化、
+无用户输入拼接 SQL。`go test ./...` 全绿；server/db/pay/
+service/notify 包 `-race` 绿。
+
+## v0.120 — 深挖轮 6：grant/voucher 天数无上限（时间溢出可致静默吊销）+ 用户数据导出泄漏管理员备注
+
+第六轮独立审计，聚焦 admin API / admin UI 的输入边界与用户可携
+导出的字段投影。修复两类真实缺陷。
+
+A. (MEDIUM, 数据完整性/静默吊销) `days` 上限校验只存在于
+`/api/admin/macs/grant`（1..3650）与套餐保存，其余全部
+grant/voucher 入口均无上界：`/api/admin/macs/import`、
+`/api/admin/users/grant`、`/api/admin/users/grant-by-phone`、
+`/api/admin/vouchers/generate`（days 与 expires_days）、admin UI
+的单个添加 / 单个延期 / 批量延期 / textarea 导入，以及
+`/admin/vouchers/generate` 和 vouchers CSV 导入。超大值（脚本
+化客户端可传到 9e18）流入 `AddDate(0,0,days)` 后溢出
+`time.Time` 内部表示，`expires_at` 可能回卷到过去——本意是
+「延期」的操作实际变成静默吊销（下一次到期扫描即断网）；较小
+但仍荒谬的值（如 100000 天）则造成事实上的永久放行，且单条
+grant API 明确拒绝的输入可以从批量导入绕过。修复：新增共享常
+量 `maxGrantDays = 3650`（10 年，与既有 grant API 一致），在上
+述全部入口按各自的错误风格拒绝——JSON API 返回 400，UI 重定向
+`err=invalid_days`，批量导入按行计入 failed 且不阻断合法行。
+回归测试覆盖全部 9 个入口（含「超限行失败、同批合法行仍导入」
+与「被拒后原 expiry 不变」断言）。
+
+B. (LOW-MEDIUM, 信息泄漏) `/user/account/export` 直接序列化
+`models.MAC` 整个结构体，把两个管理员专用字段带进了用户可下载
+的 JSON：`notes`（v0.82 起的自由文本客服备注——可能含欺诈嫌
+疑、工单号、涉及其他客户的上下文）与 `schedule_json`（管理员
+设置的限时策略内部表示）。这两个字段在用户门户任何页面都不展
+示，属于导出路径独有的越权可见。修复：导出改为显式字段投影
+（mac/label/status/expires_at/created_at/updated_at），行为其
+余不变。回归测试在用户 MAC 上写入敏感 notes 与 schedule 后断
+言导出不含其内容、且用户可见字段仍完整。
+
+`go test ./...` 全绿。
+
 ## v0.119 — 深挖轮 5：用户订单列表 / 会话列表残留静默截断 + 导出文件名
 
 v0.116 把绝大多数查询改到统一 `clampLimit`，但漏了两处仍用「超
@@ -16,10 +401,7 @@ A. (LOW, 静默数据丢失脚枪) `ListOrdersForUser` 在 `limit > 500`
 
 B. (LOW, 防御) `/user/account/export` 的 `Content-Disposition`
 文件名现在走 `filenameSafe`（与 voucher CSV 同一套），避免未
-来放宽手机号校验时把引号写进响应头。
-
-## v0.118 — 深挖轮 4：MAC 计数全表扫描收尾
-
+来放宽手机号校验时把引号写进响应头。## v0.118 — 深挖轮 4：MAC 计数全表扫描收尾
 深挖轮 3 收尾：把 v0.111 引入的 `CountMACsByUser`（单条
 GROUP BY）推广到最后两个仍在全表 `ListMACs` 后逐行数数的调用
 点——`/api/admin/users`（每次 API 调用都拉全部 MAC 行到 Go 侧）

@@ -26,6 +26,14 @@ services:
       - ALL
     security_opt:
       - no-new-privileges:true
+    # The app only writes under /var/lib/router-billing (the named volume):
+    # DB + WAL/journal live there and templates are read from the image.
+    # Freeze everything else so a compromised process can't drop files
+    # into the container. /tmp stays writable via tmpfs for SQLite's
+    # temporary files.
+    read_only: true
+    tmpfs:
+      - /tmp
     healthcheck:
       test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:8080/healthz"]
       interval: 30s
