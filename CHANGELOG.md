@@ -1,5 +1,21 @@
 # Changelog
 
+## v0.118 — 深挖轮 4：MAC 计数全表扫描收尾
+
+深挖轮 3 收尾：把 v0.111 引入的 `CountMACsByUser`（单条
+GROUP BY）推广到最后两个仍在全表 `ListMACs` 后逐行数数的调用
+点——`/api/admin/users`（每次 API 调用都拉全部 MAC 行到 Go 侧）
+与 `/admin/export/users.csv`。行为不变（同样统计
+`user_id IS NOT NULL` 的全部 MAC，不分状态），仅省去随 MAC 表
+增长的线性内存/CPU。
+
+其余复查确认无缺陷（不改动）：nftables 原子 sync/walled-garden
+payload、WeChat 平台证书缓存与 AES-GCM 解签、Alipay 分账金额
+解析、notify 单 worker 重试管线、sightings/dnsmasq 轮询、
+deploy 脚本（v0.104/v0.110 已加固）、rateLimiter 硬上限 GC。
+`go test ./...` 全绿；server/service/notify/pay 包 `-race` 绿；
+golangci-lint 无告警。
+
 ## v0.117 — 深挖轮 3：用户认领 MAC 的 TOCTOU、2FA 计数器泄漏、UTF-8 截断
 
 v0.116 之后的第三轮独立审计，聚焦此前多轮加固后仍残留的
