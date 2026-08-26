@@ -2,8 +2,10 @@ package db
 
 import (
 	"context"
+	"crypto/sha256"
 	"database/sql"
 	_ "embed"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"os"
@@ -141,20 +143,30 @@ func (d *DB) ListExpiringMACsWithoutRecentReminder(ctx context.Context, withinDa
 	return out, rows.Err()
 }
 
+// escapeLike escapes LIKE wildcards in user-supplied search text so a
+// query for a literal "%" or "_" doesn't silently become a
+// match-everything / match-any-char pattern. Every LIKE clause built
+// from user input must pair `escapeLike` with ` ESCAPE '\'`.
+func escapeLike(s string) string {
+	s = strings.ReplaceAll(s, `\`, `\\`)
+	s = strings.ReplaceAll(s, `%`, `\%`)
+	s = strings.ReplaceAll(s, `_`, `\_`)
+	return s
+}
+
 // SearchMACs returns MACs where MAC or label contains q (case-insensitive
 // LIKE). When q is empty, behaves like ListMACs. status (if non-empty)
-// restricts to that exact status. limit defaults to 200, capped at 1000.
+// restricts to that exact status. limit defaults to 200, capped at
+// maxQueryLimit.
 func (d *DB) SearchMACs(ctx context.Context, q, status string, limit int) ([]models.MAC, error) {
-	if limit <= 0 || limit > 1000 {
-		limit = 200
-	}
+	limit = clampLimit(limit, 200)
 	var sb strings.Builder
 	sb.WriteString(`SELECT ` + macCols + ` FROM macs WHERE 1=1`)
 	args := []any{}
 	if q != "" {
 		// SQLite LIKE is case-insensitive for ASCII by default.
-		sb.WriteString(` AND (mac LIKE ? OR label LIKE ?)`)
-		pat := "%" + q + "%"
+		sb.WriteString(` AND (mac LIKE ? ESCAPE '\' OR label LIKE ? ESCAPE '\')`)
+		pat := "%" + escapeLike(q) + "%"
 		args = append(args, pat, pat)
 	}
 	if status != "" {
@@ -191,6 +203,28 @@ func (d *DB) queryMACs(ctx context.Context, q string, args ...any) ([]models.MAC
 	return out, rows.Err()
 }
 
+// CountMACsByUser returns user_id → number of MAC rows owned. One GROUP BY
+// instead of shipping every MAC row to Go just to count (the /admin/users
+// page did exactly that).
+func (d *DB) CountMACsByUser(ctx context.Context) (map[int64]int, error) {
+	rows, err := d.conn.QueryContext(ctx,
+		`SELECT user_id, COUNT(*) FROM macs WHERE user_id IS NOT NULL GROUP BY user_id`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := map[int64]int{}
+	for rows.Next() {
+		var uid int64
+		var n int
+		if err := rows.Scan(&uid, &n); err != nil {
+			return nil, err
+		}
+		out[uid] = n
+	}
+	return out, rows.Err()
+}
+
 func (d *DB) GetMAC(ctx context.Context, mac string) (*models.MAC, error) {
 	row := d.conn.QueryRowContext(ctx, `SELECT `+macCols+` FROM macs WHERE mac = ?`, mac)
 	m, err := scanMAC(row)
@@ -201,6 +235,48 @@ func (d *DB) GetMAC(ctx context.Context, mac string) (*models.MAC, error) {
 		return nil, err
 	}
 	return m, nil
+}
+
+// GetMACsIn returns the subset of `macs` that exist as billing rows, keyed
+// by MAC. One IN query (chunked to stay under SQLite's parameter limit)
+// instead of a point lookup per element — used by the admin devices page,
+// which merges ARP + sightings and previously issued one GetMAC per device.
+func (d *DB) GetMACsIn(ctx context.Context, macs []string) (map[string]*models.MAC, error) {
+	out := make(map[string]*models.MAC, len(macs))
+	const chunk = 500
+	for start := 0; start < len(macs); start += chunk {
+		end := start + chunk
+		if end > len(macs) {
+			end = len(macs)
+		}
+		part := macs[start:end]
+		args := make([]any, len(part))
+		for i, m := range part {
+			args[i] = m
+		}
+		// Only compile-time constants plus a repeated "?" placeholder are
+		// concatenated; every value binds through args.
+		q := `SELECT ` + macCols + ` FROM macs WHERE mac IN (?` + //nolint:gosec // G202: placeholders only
+			strings.Repeat(",?", len(part)-1) + `)`
+		rows, err := d.conn.QueryContext(ctx, q, args...)
+		if err != nil {
+			return nil, err
+		}
+		for rows.Next() {
+			m, err := scanMAC(rows)
+			if err != nil {
+				rows.Close()
+				return nil, err
+			}
+			out[m.Mac] = m
+		}
+		if err := rows.Err(); err != nil {
+			rows.Close()
+			return nil, err
+		}
+		rows.Close()
+	}
+	return out, nil
 }
 
 // UpsertMAC adds new MAC or extends existing one's expiry. Returns the post-state.
@@ -256,6 +332,57 @@ func (d *DB) UpsertMAC(ctx context.Context, mac, label string, days int, userID 
 	return d.GetMAC(ctx, mac)
 }
 
+// ExtendMACOwned extends an existing MAC's expiry only while it is still
+// owned by ownerID. Returns (nil, nil) — "skip, don't fail" — when the row
+// is gone or ownership has changed since the caller listed it.
+//
+// This closes the TOCTOU in the user-grant fan-outs: those handlers list a
+// user's MACs and then extend each one, and the unconditional UpsertMAC
+// they previously used would both re-extend AND reassign user_id on a MAC
+// that had been transferred to a different user in between (e.g. via the
+// user-side replace/claim flow) — silently stealing another user's device.
+// The WHERE user_id = ? guard makes the ownership check and the update one
+// atomic statement.
+func (d *DB) ExtendMACOwned(ctx context.Context, mac, label string, days int, ownerID int64) (*models.MAC, error) {
+	tx, err := d.conn.BeginTx(ctx, nil)
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback()
+
+	existing, err := getMACTx(ctx, tx, mac)
+	if err != nil {
+		return nil, err
+	}
+	if existing == nil || existing.UserID == nil || *existing.UserID != ownerID {
+		return nil, nil
+	}
+	now := time.Now().UTC()
+	var newExpiry time.Time
+	if existing.ExpiresAt.After(now) && existing.Status == models.MACActive {
+		newExpiry = existing.ExpiresAt.AddDate(0, 0, days)
+	} else {
+		newExpiry = now.AddDate(0, 0, days)
+	}
+	newLabel := existing.Label
+	if label != "" {
+		newLabel = label
+	}
+	res, err := tx.ExecContext(ctx,
+		`UPDATE macs SET label = ?, status = 'active', expires_at = ?, updated_at = ? WHERE mac = ? AND user_id = ?`,
+		newLabel, newExpiry, now, mac, ownerID)
+	if err != nil {
+		return nil, err
+	}
+	if n, err := res.RowsAffected(); err != nil || n == 0 {
+		return nil, err
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, err
+	}
+	return d.GetMAC(ctx, mac)
+}
+
 func getMACTx(ctx context.Context, tx *sql.Tx, mac string) (*models.MAC, error) {
 	row := tx.QueryRowContext(ctx, `SELECT `+macCols+` FROM macs WHERE mac = ?`, mac)
 	m, err := scanMAC(row)
@@ -285,6 +412,50 @@ func (d *DB) SetMACLabel(ctx context.Context, mac, label string) error {
 		`UPDATE macs SET label = ?, updated_at = CURRENT_TIMESTAMP WHERE mac = ?`,
 		label, mac)
 	return err
+}
+
+// SetMACLabelOwned renames a MAC only while it is still owned by ownerID.
+// Returns false when the row is gone or ownership changed since the caller
+// checked — the same atomic WHERE-guard pattern as ExtendMACOwned, so the
+// user-side label form can't rename a device that was transferred away
+// between its ownership check and the write.
+func (d *DB) SetMACLabelOwned(ctx context.Context, mac, label string, ownerID int64) (bool, error) {
+	res, err := d.conn.ExecContext(ctx,
+		`UPDATE macs SET label = ?, updated_at = CURRENT_TIMESTAMP WHERE mac = ? AND user_id = ?`,
+		label, mac, ownerID)
+	if err != nil {
+		return false, err
+	}
+	n, err := res.RowsAffected()
+	return n > 0, err
+}
+
+// ClaimMAC atomically takes ownership of a MAC for userID without touching
+// its status, expiry, or label. The eligibility conditions live in the WHERE
+// clause — the row must still be active, unexpired, and either unowned or
+// already owned by this user — so the check and the write are one statement.
+//
+// The previous claim path did GetMAC → checks → unconditional UpsertMAC,
+// which had two TOCTOU holes: a MAC transferred to another user in between
+// was silently stolen back, and (worse) UpsertMAC's UPDATE branch stamps
+// status='active', so a claim racing an admin Revoke flipped the freshly
+// blocked row back to active — the next firewall resync then put the
+// blocked device back online.
+//
+// Returns true iff the claim landed.
+func (d *DB) ClaimMAC(ctx context.Context, mac string, userID int64) (bool, error) {
+	res, err := d.conn.ExecContext(ctx, `
+		UPDATE macs SET user_id = ?, updated_at = CURRENT_TIMESTAMP
+		 WHERE mac = ?
+		   AND status = 'active'
+		   AND expires_at > CURRENT_TIMESTAMP
+		   AND (user_id IS NULL OR user_id = ?)`,
+		userID, mac, userID)
+	if err != nil {
+		return false, err
+	}
+	n, err := res.RowsAffected()
+	return n > 0, err
 }
 
 // ReplaceMAC atomically transfers a user's active MAC to a new MAC. The old MAC
@@ -333,38 +504,45 @@ func (d *DB) ReplaceMAC(ctx context.Context, userID int64, oldMac, newMac, label
 }
 
 // ExpireDueMACs marks expired MACs and returns the ones newly expired.
+//
+// Single UPDATE ... RETURNING so the flip and the report are one atomic
+// statement. The previous SELECT-then-UPDATE pair had two races:
+//   - a MAC extended between the two statements stayed active (good) but
+//     was still in the returned list, so the caller revoked firewall
+//     access for a MAC that had just been renewed;
+//   - a MAC expiring between the two statements got flipped but was NOT
+//     in the returned list, so its revoke webhook/notify never fired —
+//     and two concurrent sweeps could both report the same MAC.
 func (d *DB) ExpireDueMACs(ctx context.Context) ([]string, error) {
-	rows, err := d.conn.QueryContext(ctx, `SELECT mac FROM macs WHERE status = 'active' AND expires_at <= CURRENT_TIMESTAMP`)
+	rows, err := d.conn.QueryContext(ctx, `
+		UPDATE macs SET status = 'expired', updated_at = CURRENT_TIMESTAMP
+		 WHERE status = 'active' AND expires_at <= CURRENT_TIMESTAMP
+		 RETURNING mac`)
 	if err != nil {
 		return nil, err
 	}
+	defer rows.Close()
 	var expired []string
 	for rows.Next() {
 		var m string
 		if err := rows.Scan(&m); err != nil {
-			rows.Close()
 			return nil, err
 		}
 		expired = append(expired, m)
 	}
-	rows.Close()
-	if len(expired) == 0 {
-		return nil, nil
-	}
-	_, err = d.conn.ExecContext(ctx, `UPDATE macs SET status = 'expired', updated_at = CURRENT_TIMESTAMP WHERE status = 'active' AND expires_at <= CURRENT_TIMESTAMP`)
-	return expired, err
+	return expired, rows.Err()
 }
 
 // ---------- Orders ----------
 
-const orderCols = `id, order_no, mac, plan, days, amount_cents, status, payment_method, trade_no, user_id, last_queried_at, paid_at, created_at`
+const orderCols = `id, order_no, mac, plan, days, amount_cents, status, payment_method, trade_no, user_id, last_queried_at, paid_at, qr_payload, created_at`
 
 func scanOrder(row interface{ Scan(...any) error }) (*models.Order, error) {
 	var o models.Order
 	var userID sql.NullInt64
 	var lastQ, paidAt sql.NullTime
 	if err := row.Scan(&o.ID, &o.OrderNo, &o.Mac, &o.Plan, &o.Days, &o.AmountCents, &o.Status,
-		&o.PaymentMethod, &o.TradeNo, &userID, &lastQ, &paidAt, &o.CreatedAt); err != nil {
+		&o.PaymentMethod, &o.TradeNo, &userID, &lastQ, &paidAt, &o.QRPayload, &o.CreatedAt); err != nil {
 		return nil, err
 	}
 	if userID.Valid {
@@ -410,11 +588,51 @@ func (d *DB) GetOrder(ctx context.Context, orderNo string) (*models.Order, error
 	return o, nil
 }
 
-func (d *DB) ListOrders(ctx context.Context, limit int) ([]models.Order, error) {
-	if limit <= 0 || limit > 500 {
-		limit = 100
+// maxQueryLimit is the hard ceiling any caller-supplied row limit is
+// clamped to. It matches the audit/sms/webhook CSV exports' documented
+// 10000-row compliance-dump cap. Callers asking for more than the old
+// small caps (500/1000) used to be silently RESET to the tiny default —
+// the orders/users/MACs CSV exports passed 5000 and got 100/200 rows
+// back, quietly truncating the very files operators keep as records.
+const maxQueryLimit = 10000
+
+// clampLimit applies the shared limit policy: non-positive → def,
+// anything above maxQueryLimit → maxQueryLimit, otherwise as requested.
+func clampLimit(limit, def int) int {
+	if limit <= 0 {
+		return def
 	}
+	if limit > maxQueryLimit {
+		return maxQueryLimit
+	}
+	return limit
+}
+
+func (d *DB) ListOrders(ctx context.Context, limit int) ([]models.Order, error) {
+	limit = clampLimit(limit, 100)
 	return d.queryOrders(ctx, `SELECT `+orderCols+` FROM orders ORDER BY created_at DESC LIMIT ?`, limit)
+}
+
+// LatestPaidOrderForMAC returns the most recently paid order for a MAC
+// with paid_at after `since`, or nil when there is none. Used by the
+// /pay/success page to offer a receipt link — a targeted indexed lookup
+// instead of scanning the newest N orders in Go (which silently missed
+// the order once it aged out of the scan window). The `since` cutoff is
+// the caller's anti-oracle recency window, applied in SQL so the page
+// never even reads older orders.
+func (d *DB) LatestPaidOrderForMAC(ctx context.Context, mac string, since time.Time) (*models.Order, error) {
+	row := d.conn.QueryRowContext(ctx,
+		`SELECT `+orderCols+` FROM orders
+		 WHERE mac = ? AND status = 'paid' AND paid_at > ?
+		 ORDER BY paid_at DESC, id DESC LIMIT 1`, mac, since.UTC())
+	o, err := scanOrder(row)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	return o, nil
 }
 
 // OrderFilter is the optional filter set passed to SearchOrdersFiltered.
@@ -425,7 +643,7 @@ type OrderFilter struct {
 	Since  string // YYYY-MM-DD UTC; only orders created on/after this date
 	Until  string // YYYY-MM-DD UTC; only orders created on/before this date
 	UserID int64  // 0 = no filter; non-zero filters to exactly that user_id
-	Limit  int    // default 200, cap 1000
+	Limit  int    // default 200, cap maxQueryLimit
 }
 
 // SearchOrders is the legacy 3-arg shim — kept so existing callers don't
@@ -438,16 +656,13 @@ func (d *DB) SearchOrders(ctx context.Context, q, status string, limit int) ([]m
 // status, and a created_at date range. Date strings use YYYY-MM-DD shape
 // (matches the HTML date-input format) interpreted in UTC.
 func (d *DB) SearchOrdersFiltered(ctx context.Context, f OrderFilter) ([]models.Order, error) {
-	limit := f.Limit
-	if limit <= 0 || limit > 1000 {
-		limit = 200
-	}
+	limit := clampLimit(f.Limit, 200)
 	var sb strings.Builder
 	sb.WriteString(`SELECT ` + orderCols + ` FROM orders WHERE 1=1`)
 	args := []any{}
 	if f.Q != "" {
-		sb.WriteString(` AND (order_no LIKE ? OR mac LIKE ? OR trade_no LIKE ?)`)
-		pat := "%" + f.Q + "%"
+		sb.WriteString(` AND (order_no LIKE ? ESCAPE '\' OR mac LIKE ? ESCAPE '\' OR trade_no LIKE ? ESCAPE '\')`)
+		pat := "%" + escapeLike(f.Q) + "%"
 		args = append(args, pat, pat, pat)
 	}
 	if f.Status != "" {
@@ -473,9 +688,7 @@ func (d *DB) SearchOrdersFiltered(ctx context.Context, f OrderFilter) ([]models.
 }
 
 func (d *DB) ListOrdersForUser(ctx context.Context, userID int64, limit int) ([]models.Order, error) {
-	if limit <= 0 || limit > 500 {
-		limit = 50
-	}
+	limit = clampLimit(limit, 50)
 	return d.queryOrders(ctx, `SELECT `+orderCols+` FROM orders WHERE user_id = ? ORDER BY created_at DESC LIMIT ?`, userID, limit)
 }
 
@@ -490,11 +703,22 @@ func (d *DB) ListPendingOrdersToPoll(ctx context.Context, staleAfter time.Durati
 	        AND (last_queried_at IS NULL OR last_queried_at < ?)
 	      ORDER BY created_at DESC
 	      LIMIT ?`
-	return d.queryOrders(ctx, q, cutoffAge, cutoffStale, limit)
+	return d.queryOrders(ctx, q, cutoffAge, cutoffStale, clampLimit(limit, 50))
 }
 
 func (d *DB) MarkOrderQueried(ctx context.Context, orderNo string) error {
 	_, err := d.conn.ExecContext(ctx, `UPDATE orders SET last_queried_at = ? WHERE order_no = ?`, time.Now().UTC(), orderNo)
+	return err
+}
+
+// SetOrderQRPayload stores the upstream PSP's QR string on the order row.
+// Used immediately after Precreate so /api/pay/qr can render from the
+// authoritative server-side value instead of a URL-supplied parameter.
+// v0.103 security fix.
+func (d *DB) SetOrderQRPayload(ctx context.Context, orderNo, payload string) error {
+	_, err := d.conn.ExecContext(ctx,
+		`UPDATE orders SET qr_payload = ? WHERE order_no = ?`,
+		payload, orderNo)
 	return err
 }
 
@@ -517,6 +741,13 @@ func (d *DB) queryOrders(ctx context.Context, q string, args ...any) ([]models.O
 
 // MarkOrderPaid sets status=paid atomically; returns (transitioned, order, err).
 // Idempotent — re-calling for an already-paid order returns transitioned=false.
+//
+// `refunded` is a terminal state and is treated like already-paid: both
+// PSPs redeliver success notifications for up to ~24h, and pre-v0.106 a
+// redelivery (or a replayed capture) arriving AFTER an admin refund flipped
+// the order back to `paid` and re-granted the MAC days — the customer kept
+// the refund AND the access. Returning transitioned=false (no error) acks
+// the notification so the PSP stops retrying, without touching the order.
 func (d *DB) MarkOrderPaid(ctx context.Context, orderNo, tradeNo string) (bool, *models.Order, error) {
 	tx, err := d.conn.BeginTx(ctx, nil)
 	if err != nil {
@@ -532,12 +763,20 @@ func (d *DB) MarkOrderPaid(ctx context.Context, orderNo, tradeNo string) (bool, 
 	if err != nil {
 		return false, nil, err
 	}
-	if o.Status == models.OrderPaid {
+	if o.Status == models.OrderPaid || o.Status == models.OrderRefunded {
 		return false, o, nil
 	}
 	now := time.Now().UTC()
-	if _, err := tx.ExecContext(ctx, `UPDATE orders SET status = 'paid', trade_no = ?, paid_at = ? WHERE order_no = ?`, tradeNo, now, orderNo); err != nil {
+	// Guard the UPDATE on the status we just read so a concurrent transition
+	// (e.g. an admin refund racing this webhook) can't be overwritten.
+	res, err := tx.ExecContext(ctx,
+		`UPDATE orders SET status = 'paid', trade_no = ?, paid_at = ? WHERE order_no = ? AND status = ?`,
+		tradeNo, now, orderNo, string(o.Status))
+	if err != nil {
 		return false, nil, err
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return false, nil, fmt.Errorf("order %s changed state concurrently, not marking paid", orderNo)
 	}
 	if err := tx.Commit(); err != nil {
 		return false, nil, err
@@ -546,6 +785,25 @@ func (d *DB) MarkOrderPaid(ctx context.Context, orderNo, tradeNo string) (bool, 
 	o.TradeNo = tradeNo
 	o.PaidAt = &now
 	return true, o, nil
+}
+
+// RevertOrderToPending flips a paid order back to pending. Used ONLY by the
+// payment finalizer as compensation when the post-payment grant fails after
+// MarkOrderPaid already committed: leaving the order `paid` would consume
+// the one transitioned=true signal, so neither the PSP's retry nor our
+// poller would ever re-drive the MAC grant. Reverting lets the next
+// notify/poll retry the whole finalize. trade_no/paid_at are kept so the
+// gateway reference survives the round trip.
+func (d *DB) RevertOrderToPending(ctx context.Context, orderNo string) error {
+	res, err := d.conn.ExecContext(ctx,
+		`UPDATE orders SET status = 'pending' WHERE order_no = ? AND status = 'paid'`, orderNo)
+	if err != nil {
+		return err
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return fmt.Errorf("order %s not paid, cannot revert", orderNo)
+	}
+	return nil
 }
 
 // MarkOrderRefunded transitions a paid order to refunded and rolls back the
@@ -711,6 +969,15 @@ func (d *DB) CancelStalePendingOrders(ctx context.Context, olderThan time.Durati
 
 // ---------- Sessions ----------
 
+// HashToken maps a raw session token (the cookie value) to the value stored
+// in sessions.token. Tokens are stored as SHA-256 digests so a leaked DB
+// file or backup cannot be replayed as live cookies. The raw token only ever
+// lives in the client's cookie.
+func HashToken(raw string) string {
+	sum := sha256.Sum256([]byte(raw))
+	return hex.EncodeToString(sum[:])
+}
+
 func (d *DB) CreateSession(ctx context.Context, token, kind, subject string, userID *int64, ttl time.Duration) error {
 	var uid sql.NullInt64
 	if userID != nil {
@@ -718,7 +985,7 @@ func (d *DB) CreateSession(ctx context.Context, token, kind, subject string, use
 	}
 	_, err := d.conn.ExecContext(ctx,
 		`INSERT INTO sessions (token, kind, subject, user_id, expires_at) VALUES (?, ?, ?, ?, ?)`,
-		token, kind, subject, uid, time.Now().UTC().Add(ttl))
+		HashToken(token), kind, subject, uid, time.Now().UTC().Add(ttl))
 	return err
 }
 
@@ -728,9 +995,10 @@ type SessionRow struct {
 	UserID  *int64
 }
 
+// GetSession looks up a session by its raw token (cookie value).
 func (d *DB) GetSession(ctx context.Context, token string) (*SessionRow, error) {
 	row := d.conn.QueryRowContext(ctx,
-		`SELECT kind, subject, user_id FROM sessions WHERE token = ? AND expires_at > CURRENT_TIMESTAMP`, token)
+		`SELECT kind, subject, user_id FROM sessions WHERE token = ? AND expires_at > CURRENT_TIMESTAMP`, HashToken(token))
 	var s SessionRow
 	var uid sql.NullInt64
 	err := row.Scan(&s.Kind, &s.Subject, &uid)
@@ -747,8 +1015,19 @@ func (d *DB) GetSession(ctx context.Context, token string) (*SessionRow, error) 
 	return &s, nil
 }
 
+// DeleteSession removes a session by its raw token (cookie value). For
+// revoking a row picked from a session list (which only exposes the stored
+// hash), use DeleteSessionByHash instead.
 func (d *DB) DeleteSession(ctx context.Context, token string) error {
-	_, err := d.conn.ExecContext(ctx, `DELETE FROM sessions WHERE token = ?`, token)
+	_, err := d.conn.ExecContext(ctx, `DELETE FROM sessions WHERE token = ?`, HashToken(token))
+	return err
+}
+
+// DeleteSessionByHash removes a session by its stored token hash — the value
+// surfaced by ListActiveSessions / ListSessionsForUser. Used by the admin
+// sessions page, whose revoke form round-trips the hash, never a raw token.
+func (d *DB) DeleteSessionByHash(ctx context.Context, tokenHash string) error {
+	_, err := d.conn.ExecContext(ctx, `DELETE FROM sessions WHERE token = ?`, tokenHash)
 	return err
 }
 
@@ -767,7 +1046,7 @@ func (d *DB) DeleteSessionsByUserID(ctx context.Context, userID int64) (int64, e
 
 // SessionRecord is one row of the live-sessions list used by /admin/sessions.
 type SessionRecord struct {
-	Token     string // server-side primary key — shown truncated in UI
+	Token     string // SHA-256 hash of the cookie token — safe to show truncated in UI
 	Kind      string // "admin" | "user"
 	Subject   string // username for admin, phone for user
 	UserID    *int64 // present for kind=user
@@ -778,9 +1057,7 @@ type SessionRecord struct {
 // ListActiveSessions returns every unexpired session. Sort: most-recently-
 // expiring last (so the soon-to-die ones surface first).
 func (d *DB) ListActiveSessions(ctx context.Context, limit int) ([]SessionRecord, error) {
-	if limit <= 0 || limit > 500 {
-		limit = 200
-	}
+	limit = clampLimit(limit, 200)
 	rows, err := d.conn.QueryContext(ctx, `
 		SELECT token, kind, subject, user_id, expires_at
 		FROM sessions
@@ -836,12 +1113,12 @@ func (d *DB) ListSessionsForUser(ctx context.Context, userID int64) ([]SessionRe
 	return out, rows.Err()
 }
 
-// DeleteAllAdminSessionsExcept logs out every admin session except `keep`.
-// Useful for "I lost my laptop" — keep current cookie alive, kill the rest.
-// Returns the number of sessions deleted.
+// DeleteAllAdminSessionsExcept logs out every admin session except `keep`
+// (a raw cookie token). Useful for "I lost my laptop" — keep current cookie
+// alive, kill the rest. Returns the number of sessions deleted.
 func (d *DB) DeleteAllAdminSessionsExcept(ctx context.Context, keep string) (int64, error) {
 	res, err := d.conn.ExecContext(ctx,
-		`DELETE FROM sessions WHERE kind = 'admin' AND token != ?`, keep)
+		`DELETE FROM sessions WHERE kind = 'admin' AND token != ?`, HashToken(keep))
 	if err != nil {
 		return 0, err
 	}
@@ -863,12 +1140,12 @@ func (d *DB) DeleteAllUserSessions(ctx context.Context) (int64, error) {
 }
 
 // DeleteUserSessionsExcept is the user equivalent — logs out every session
-// belonging to userID except `keep`, used by "sign me out of all other
-// devices". Returns the number of sessions deleted.
+// belonging to userID except `keep` (a raw cookie token), used by "sign me
+// out of all other devices". Returns the number of sessions deleted.
 func (d *DB) DeleteUserSessionsExcept(ctx context.Context, userID int64, keep string) (int64, error) {
 	res, err := d.conn.ExecContext(ctx,
 		`DELETE FROM sessions WHERE kind = 'user' AND user_id = ? AND token != ?`,
-		userID, keep)
+		userID, HashToken(keep))
 	if err != nil {
 		return 0, err
 	}
@@ -999,16 +1276,30 @@ func (d *DB) ConfirmUserTOTP(ctx context.Context, userID int64) error {
 // Also clears backup codes AND trusted devices so a future enrollment
 // starts from a clean slate — and so an admin reset doesn't leave behind
 // trust-tokens that would bypass the next enrollment.
+//
+// All three writes run in one transaction: a crash or error after the
+// secret wipe but before the trusted-device wipe would otherwise leave
+// stale trust-tokens that silently bypass the NEXT enrollment's 2FA.
 func (d *DB) ClearUserTOTP(ctx context.Context, userID int64) error {
-	if _, err := d.conn.ExecContext(ctx,
+	tx, err := d.conn.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
+	if _, err := tx.ExecContext(ctx,
 		`UPDATE users SET totp_secret = '', totp_pending = '', updated_at = ? WHERE id = ?`,
 		time.Now().UTC(), userID); err != nil {
 		return err
 	}
-	if err := d.ClearBackupCodes(ctx, userID); err != nil {
+	if _, err := tx.ExecContext(ctx,
+		`DELETE FROM user_backup_codes WHERE user_id = ?`, userID); err != nil {
 		return err
 	}
-	return d.DeleteAllTrustedDevices(ctx, userID)
+	if _, err := tx.ExecContext(ctx,
+		`DELETE FROM user_trusted_devices WHERE user_id = ?`, userID); err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
 func (d *DB) ListUsers(ctx context.Context, limit int) ([]models.User, error) {
@@ -1017,9 +1308,7 @@ func (d *DB) ListUsers(ctx context.Context, limit int) ([]models.User, error) {
 
 // SearchUsers returns users whose phone CONTAINS the query string.
 func (d *DB) SearchUsers(ctx context.Context, q string, limit int) ([]models.User, error) {
-	if limit <= 0 || limit > 500 {
-		limit = 100
-	}
+	limit = clampLimit(limit, 100)
 	var rows *sql.Rows
 	var err error
 	if q == "" {
@@ -1027,8 +1316,8 @@ func (d *DB) SearchUsers(ctx context.Context, q string, limit int) ([]models.Use
 			`SELECT `+userColumns+` FROM users ORDER BY created_at DESC LIMIT ?`, limit)
 	} else {
 		rows, err = d.conn.QueryContext(ctx,
-			`SELECT `+userColumns+` FROM users WHERE phone LIKE ? ORDER BY created_at DESC LIMIT ?`,
-			"%"+q+"%", limit)
+			`SELECT `+userColumns+` FROM users WHERE phone LIKE ? ESCAPE '\' ORDER BY created_at DESC LIMIT ?`,
+			"%"+escapeLike(q)+"%", limit)
 	}
 	if err != nil {
 		return nil, err
@@ -1045,25 +1334,51 @@ func (d *DB) SearchUsers(ctx context.Context, q string, limit int) ([]models.Use
 	return out, rows.Err()
 }
 
+// SuspendUser flips the suspended flag. Suspending also drops the user's
+// active sessions IN THE SAME transaction — previously the session delete
+// was a separate best-effort statement whose error was swallowed, so a
+// failed delete left a suspended user with a live session until it expired.
 func (d *DB) SuspendUser(ctx context.Context, id int64, suspended bool) error {
 	v := 0
 	if suspended {
 		v = 1
 	}
-	_, err := d.conn.ExecContext(ctx,
-		`UPDATE users SET suspended = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`, v, id)
-	if err == nil && suspended {
-		// also drop the user's active sessions so a suspended user can't keep using the app
-		_, _ = d.conn.ExecContext(ctx, `DELETE FROM sessions WHERE kind='user' AND user_id = ?`, id)
+	tx, err := d.conn.BeginTx(ctx, nil)
+	if err != nil {
+		return err
 	}
-	return err
+	defer func() { _ = tx.Rollback() }()
+	if _, err := tx.ExecContext(ctx,
+		`UPDATE users SET suspended = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`, v, id); err != nil {
+		return err
+	}
+	if suspended {
+		if _, err := tx.ExecContext(ctx,
+			`DELETE FROM sessions WHERE kind='user' AND user_id = ?`, id); err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
 }
 
-// DeleteUser removes a user. macs.user_id / orders.user_id are SET NULL by FK.
+// DeleteUser removes a user. macs.user_id / orders.user_id are SET NULL by
+// FK; trusted devices / backup codes / password resets CASCADE. Sessions
+// have no FK (token-keyed, kind-discriminated) so they're deleted in the
+// same transaction — atomic, and errors are no longer swallowed.
 func (d *DB) DeleteUser(ctx context.Context, id int64) error {
-	_, _ = d.conn.ExecContext(ctx, `DELETE FROM sessions WHERE kind='user' AND user_id = ?`, id)
-	_, err := d.conn.ExecContext(ctx, `DELETE FROM users WHERE id = ?`, id)
-	return err
+	tx, err := d.conn.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
+	if _, err := tx.ExecContext(ctx,
+		`DELETE FROM sessions WHERE kind='user' AND user_id = ?`, id); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM users WHERE id = ?`, id); err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
 // ---------- TOTP Trusted devices ----------
@@ -1074,22 +1389,26 @@ func (d *DB) DeleteUser(ctx context.Context, id int64) error {
 func (d *DB) CreateTrustedDevice(ctx context.Context, userID int64, token, label string, ttl time.Duration) (*models.TrustedDevice, error) {
 	now := time.Now().UTC()
 	exp := now.Add(ttl)
+	// Stored hashed, same rationale as sessions: a leaked DB dump must not
+	// yield working "skip 2FA" cookies.
+	hashed := HashToken(token)
 	res, err := d.conn.ExecContext(ctx,
 		`INSERT INTO user_trusted_devices (user_id, token, label, expires_at, last_seen, created_at)
 		 VALUES (?, ?, ?, ?, ?, ?)`,
-		userID, token, label, exp, now, now)
+		userID, hashed, label, exp, now, now)
 	if err != nil {
 		return nil, err
 	}
 	id, _ := res.LastInsertId()
 	return &models.TrustedDevice{
-		ID: id, UserID: userID, Token: token, Label: label,
+		ID: id, UserID: userID, Token: hashed, Label: label,
 		ExpiresAt: exp, LastSeen: now, CreatedAt: now,
 	}, nil
 }
 
-// GetTrustedDevice looks up by raw token, returning nil if missing/expired.
-// On hit it also bumps last_seen so the /user/2fa page shows fresh data.
+// GetTrustedDevice looks up by raw token (cookie value), returning nil if
+// missing/expired. On hit it also bumps last_seen so the /user/2fa page
+// shows fresh data.
 func (d *DB) GetTrustedDevice(ctx context.Context, token string) (*models.TrustedDevice, error) {
 	if token == "" {
 		return nil, nil
@@ -1097,7 +1416,7 @@ func (d *DB) GetTrustedDevice(ctx context.Context, token string) (*models.Truste
 	row := d.conn.QueryRowContext(ctx,
 		`SELECT id, user_id, token, label, expires_at, last_seen, created_at
 		 FROM user_trusted_devices WHERE token = ? AND expires_at > ?`,
-		token, time.Now().UTC())
+		HashToken(token), time.Now().UTC())
 	var t models.TrustedDevice
 	err := row.Scan(&t.ID, &t.UserID, &t.Token, &t.Label, &t.ExpiresAt, &t.LastSeen, &t.CreatedAt)
 	if errors.Is(err, sql.ErrNoRows) {
@@ -1230,12 +1549,19 @@ func (d *DB) UnusedBackupCodes(ctx context.Context, userID int64) ([]models.Back
 	return out, rows.Err()
 }
 
-// MarkBackupCodeUsed flips used_at on a specific row. Idempotent.
-func (d *DB) MarkBackupCodeUsed(ctx context.Context, id int64) error {
-	_, err := d.conn.ExecContext(ctx,
+// MarkBackupCodeUsed flips used_at on a specific row. Returns whether THIS
+// call consumed the code — false means someone else already used it (e.g.
+// two concurrent logins racing on the same code). Callers enforcing
+// single-use must require consumed=true, not just err==nil.
+func (d *DB) MarkBackupCodeUsed(ctx context.Context, id int64) (bool, error) {
+	res, err := d.conn.ExecContext(ctx,
 		`UPDATE user_backup_codes SET used_at = ? WHERE id = ? AND used_at IS NULL`,
 		time.Now().UTC(), id)
-	return err
+	if err != nil {
+		return false, err
+	}
+	n, err := res.RowsAffected()
+	return n > 0, err
 }
 
 // ClearBackupCodes wipes every row for userID. Called from ClearUserTOTP so
@@ -1296,13 +1622,15 @@ func (d *DB) GetActivePasswordReset(ctx context.Context, userID int64) (*models.
 // BumpPasswordResetAttempts atomically increments attempts. Returns the new
 // count so the caller can decide to expire the code (>= maxAttempts) and
 // audit-log the failure.
+//
+// Single UPDATE ... RETURNING — the previous UPDATE-then-SELECT pair let
+// two concurrent failed verifies both read the same post-increment value,
+// under-counting attempts and stretching the brute-force budget.
 func (d *DB) BumpPasswordResetAttempts(ctx context.Context, id int64) (int, error) {
-	if _, err := d.conn.ExecContext(ctx,
-		`UPDATE password_resets SET attempts = attempts + 1 WHERE id = ?`, id); err != nil {
-		return 0, err
-	}
 	var n int
-	if err := d.conn.QueryRowContext(ctx, `SELECT attempts FROM password_resets WHERE id = ?`, id).Scan(&n); err != nil {
+	err := d.conn.QueryRowContext(ctx,
+		`UPDATE password_resets SET attempts = attempts + 1 WHERE id = ? RETURNING attempts`, id).Scan(&n)
+	if err != nil {
 		return 0, err
 	}
 	return n, nil
@@ -1530,7 +1858,11 @@ func (d *DB) Attention(ctx context.Context) (AttentionCounts, error) {
 		{`SELECT COUNT(*) FROM macs WHERE status='active' AND expires_at > CURRENT_TIMESTAMP AND expires_at < datetime('now','+7 days')`, &a.ExpiringSoon},
 		{`SELECT COUNT(*) FROM orders WHERE status='pending' AND created_at < datetime('now','-10 minutes')`, &a.StalePending},
 		{`SELECT COUNT(*) FROM users WHERE suspended = 1`, &a.SuspendedUsers},
-		{`SELECT COUNT(*) FROM orders WHERE status='failed' AND date(created_at) = date('now')`, &a.FailedToday},
+		// created_at is Go-written text that SQLite's date() can't parse
+		// (returns NULL), so `date(created_at) = date('now')` matched
+		// nothing and FailedToday was permanently 0. Compare against
+		// start-of-day like DashboardSnapshot does.
+		{`SELECT COUNT(*) FROM orders WHERE status='failed' AND created_at >= datetime('now','start of day')`, &a.FailedToday},
 		// v0.59: 24h failure windows on the observability tables. Use
 		// sent_at since CURRENT_TIMESTAMP is what the DEFAULT computes —
 		// matches what the rows actually carry.
@@ -1636,6 +1968,66 @@ func (d *DB) CreateVoucher(ctx context.Context, code string, days int, label, ba
 	return &models.Voucher{ID: id, Code: code, Days: days, Label: label, Batch: batch, ExpiresAt: expiresAt}, nil
 }
 
+// VoucherSpec is one row destined for CreateVouchersBulk.
+type VoucherSpec struct {
+	Code      string
+	Days      int
+	Label     string
+	Batch     string
+	ExpiresAt *time.Time
+}
+
+// CreateVouchersBulk inserts every spec in a single SQLite transaction —
+// one fsync at COMMIT instead of one-per-row. A 1000-row import goes from
+// "noticeably slow" to "instant". Per-row UNIQUE collisions don't abort
+// the transaction (SQLite default: stmt-level error, tx survives), so a
+// duplicate paste in the middle of an import doesn't lose the rest.
+//
+// Returns a parallel []bool — true at index i means specs[i] was inserted
+// successfully, false means it failed (almost always UNIQUE collision).
+// The caller surfaces per-row outcomes to the operator (added=N failed=M).
+//
+// Used by both the admin voucher import (CSV paste) and bulk generate
+// flows. v0.103.
+func (d *DB) CreateVouchersBulk(ctx context.Context, specs []VoucherSpec) ([]bool, error) {
+	out := make([]bool, len(specs))
+	if len(specs) == 0 {
+		return out, nil
+	}
+	tx, err := d.conn.BeginTx(ctx, nil)
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback()
+
+	stmt, err := tx.PrepareContext(ctx,
+		`INSERT INTO vouchers (code, days, label, batch, expires_at) VALUES (?, ?, ?, ?, ?)`)
+	if err != nil {
+		return nil, err
+	}
+	defer stmt.Close()
+
+	for i, s := range specs {
+		var expr any
+		if s.ExpiresAt != nil {
+			expr = *s.ExpiresAt
+		}
+		if _, err := stmt.ExecContext(ctx, s.Code, s.Days, s.Label, s.Batch, expr); err != nil {
+			// SQLite reports UNIQUE/CHECK violations as stmt errors that
+			// don't abort the surrounding tx, so we record the failure
+			// and continue. Anything else (driver disconnect, full disk)
+			// will resurface at Commit and we'll bail.
+			out[i] = false
+			continue
+		}
+		out[i] = true
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 func (d *DB) GetVoucher(ctx context.Context, code string) (*models.Voucher, error) {
 	row := d.conn.QueryRowContext(ctx, `SELECT `+voucherCols+` FROM vouchers WHERE code = ?`, code)
 	v, err := scanVoucher(row)
@@ -1649,9 +2041,7 @@ func (d *DB) GetVoucher(ctx context.Context, code string) (*models.Voucher, erro
 }
 
 func (d *DB) ListVouchers(ctx context.Context, batch string, limit int) ([]models.Voucher, error) {
-	if limit <= 0 || limit > 1000 {
-		limit = 500
-	}
+	limit = clampLimit(limit, 500)
 	q := `SELECT ` + voucherCols + ` FROM vouchers`
 	args := []any{}
 	if batch != "" {
@@ -1799,10 +2189,20 @@ func (d *DB) RedeemVoucher(ctx context.Context, code, mac string, userID *int64)
 	if userID != nil {
 		uid = *userID
 	}
-	if _, err := tx.ExecContext(ctx,
-		`UPDATE vouchers SET redeemed_at = ?, redeemed_by_mac = ?, redeemed_user_id = ? WHERE code = ?`,
-		now, mac, uid, code); err != nil {
+	// Compare-and-set: the WHERE clause re-asserts the still-usable
+	// conditions checked above so the mark-redeemed write can never win
+	// against a concurrent redeem/revoke of the same code, regardless of
+	// connection-pool or journal-mode settings. Belt-and-braces on top of
+	// the SetMaxOpenConns(1) serialization.
+	res, err := tx.ExecContext(ctx,
+		`UPDATE vouchers SET redeemed_at = ?, redeemed_by_mac = ?, redeemed_user_id = ?
+		 WHERE code = ? AND redeemed_at IS NULL AND revoked = 0`,
+		now, mac, uid, code)
+	if err != nil {
 		return nil, err
+	}
+	if n, err := res.RowsAffected(); err == nil && n == 0 {
+		return nil, ErrVoucherUsed
 	}
 	if err := tx.Commit(); err != nil {
 		return nil, err
@@ -1811,6 +2211,26 @@ func (d *DB) RedeemVoucher(ctx context.Context, code, mac string, userID *int64)
 	v.RedeemedByMac = mac
 	v.RedeemedUserID = userID
 	return v, nil
+}
+
+// UnredeemVoucher is the compensation for a redemption whose follow-up MAC
+// grant never became durable: it puts the voucher back to unused so the
+// customer can retry instead of losing the code. Guarded by code + the MAC
+// the caller just redeemed it for, so it can only undo that specific
+// redemption — it can never clear an older, legitimate redemption by a
+// different device. Mirrors RevertOrderToPending on the pay path.
+func (d *DB) UnredeemVoucher(ctx context.Context, code, mac string) error {
+	res, err := d.conn.ExecContext(ctx,
+		`UPDATE vouchers SET redeemed_at = NULL, redeemed_by_mac = NULL, redeemed_user_id = NULL
+		 WHERE code = ? AND redeemed_by_mac = ? AND redeemed_at IS NOT NULL`,
+		code, mac)
+	if err != nil {
+		return err
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return fmt.Errorf("voucher %s has no redemption by %s to undo", code, mac)
+	}
+	return nil
 }
 
 // Voucher errors.
@@ -1845,10 +2265,18 @@ func (d *DB) SnapshotToday(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	// paid_orders for today
+	// paid_orders for today. NOTE: paid_at is written by Go (MarkOrderPaid)
+	// and modernc.org/sqlite stores time.Time as "2006-01-02 15:04:05.999
+	// +0000 UTC" — a format SQLite's date() can NOT parse (returns NULL),
+	// so the old `date(paid_at) = date('now')` predicate matched nothing
+	// and every snapshot recorded paid_orders = 0. Lexicographic >= against
+	// datetime('now','start of day') works because the "YYYY-MM-DD
+	// HH:MM:SS" prefix is shared between the two formats.
 	var paidToday int
-	_ = d.conn.QueryRowContext(ctx,
-		`SELECT COUNT(*) FROM orders WHERE status='paid' AND date(paid_at) = date('now')`).Scan(&paidToday)
+	if err := d.conn.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM orders WHERE status='paid' AND paid_at >= datetime('now','start of day')`).Scan(&paidToday); err != nil {
+		return err
+	}
 	day := time.Now().UTC().Format("2006-01-02")
 	now := time.Now().UTC()
 	_, err = d.conn.ExecContext(ctx,
@@ -1978,27 +2406,25 @@ type AuditFilter struct {
 }
 
 func (d *DB) SearchAudit(ctx context.Context, f AuditFilter) ([]AuditEntry, error) {
-	if f.Limit <= 0 || f.Limit > 1000 {
-		f.Limit = 200
-	}
+	f.Limit = clampLimit(f.Limit, 200)
 	var sb strings.Builder
 	sb.WriteString(`SELECT id, at, actor, action, target, detail FROM audit_log WHERE 1=1`)
 	args := []any{}
 	if f.Actor != "" {
-		sb.WriteString(` AND actor LIKE ?`)
-		args = append(args, "%"+f.Actor+"%")
+		sb.WriteString(` AND actor LIKE ? ESCAPE '\'`)
+		args = append(args, "%"+escapeLike(f.Actor)+"%")
 	}
 	if f.Action != "" {
 		sb.WriteString(` AND action = ?`)
 		args = append(args, f.Action)
 	}
 	if f.Target != "" {
-		sb.WriteString(` AND target LIKE ?`)
-		args = append(args, "%"+f.Target+"%")
+		sb.WriteString(` AND target LIKE ? ESCAPE '\'`)
+		args = append(args, "%"+escapeLike(f.Target)+"%")
 	}
 	if f.Q != "" {
-		sb.WriteString(` AND detail LIKE ?`)
-		args = append(args, "%"+f.Q+"%")
+		sb.WriteString(` AND detail LIKE ? ESCAPE '\'`)
+		args = append(args, "%"+escapeLike(f.Q)+"%")
 	}
 	if f.Since != "" {
 		sb.WriteString(` AND date(at) >= date(?)`)
@@ -2166,10 +2592,7 @@ func (d *DB) RecentSMSLogs(ctx context.Context, limit int) ([]SMSLogEntry, error
 
 // SearchSMSLogs returns rows newest-first matching the optional filter.
 func (d *DB) SearchSMSLogs(ctx context.Context, f SMSLogFilter) ([]SMSLogEntry, error) {
-	limit := f.Limit
-	if limit <= 0 || limit > 1000 {
-		limit = 100
-	}
+	limit := clampLimit(f.Limit, 100)
 	var sb strings.Builder
 	sb.WriteString(`SELECT id, sent_at, provider, phone, message, success, error_msg FROM sms_log WHERE 1=1`)
 	args := []any{}
@@ -2287,10 +2710,7 @@ func (d *DB) RecentWebhookDeliveries(ctx context.Context, limit int, onlyFailed 
 
 // SearchWebhookDeliveries returns rows newest-first matching the filter.
 func (d *DB) SearchWebhookDeliveries(ctx context.Context, f WebhookDeliveryFilter) ([]WebhookDeliveryEntry, error) {
-	limit := f.Limit
-	if limit <= 0 || limit > 1000 {
-		limit = 100
-	}
+	limit := clampLimit(f.Limit, 100)
 	var sb strings.Builder
 	sb.WriteString(`SELECT id, sent_at, event_type, mac, attempt, status_code, success, duration_ms, error_msg FROM webhook_deliveries WHERE 1=1`)
 	args := []any{}

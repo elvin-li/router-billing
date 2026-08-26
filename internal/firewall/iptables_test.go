@@ -4,6 +4,7 @@ import (
 	"context"
 	"reflect"
 	"sort"
+	"strings"
 	"testing"
 )
 
@@ -102,6 +103,43 @@ func TestIPSetManagerDryRunSync(t *testing.T) {
 	}
 	if err := m.Sync(ctx, []string{"AA:BB:CC:DD:EE:FF", "11:22:33:44:55:66", "bad"}); err != nil {
 		t.Errorf("Sync: %v", err)
+	}
+}
+
+// Sync must stage into a scratch set and swap: `ipset restore` replays
+// lines as individual kernel ops, so the old flush-then-add payload left a
+// window (and, on mid-restore failure, a permanent state) where the live
+// set was empty and every paying MAC was locked out.
+func TestIpsetSwapRestorePayload(t *testing.T) {
+	script := ipsetSwapRestore("mac_paid", []string{"AA:BB:CC:DD:EE:FF", "nope", "11:22:33:44:55:66"})
+	lines := strings.Split(strings.TrimSpace(script), "\n")
+	want := []string{
+		"create mac_paid hash:mac counters -exist",
+		"create mac_paid_swp hash:mac counters -exist",
+		"flush mac_paid_swp",
+		"add mac_paid_swp AA:BB:CC:DD:EE:FF",
+		"add mac_paid_swp 11:22:33:44:55:66",
+		"swap mac_paid_swp mac_paid",
+		"destroy mac_paid_swp",
+	}
+	if !reflect.DeepEqual(lines, want) {
+		t.Errorf("restore script:\n%s\nwant:\n%s", script, strings.Join(want, "\n"))
+	}
+	// The live set must never be flushed or written directly.
+	for _, l := range lines {
+		if l == "flush mac_paid" || strings.HasPrefix(l, "add mac_paid ") {
+			t.Errorf("live set mutated outside swap: %q", l)
+		}
+	}
+}
+
+func TestIpsetSwapRestoreEmpty(t *testing.T) {
+	script := ipsetSwapRestore("mac_paid", nil)
+	if strings.Contains(script, "add ") {
+		t.Errorf("empty sync should add nothing: %s", script)
+	}
+	if !strings.Contains(script, "swap mac_paid_swp mac_paid") {
+		t.Errorf("empty sync must still swap in the empty set: %s", script)
 	}
 }
 

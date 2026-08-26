@@ -21,7 +21,7 @@ import (
 // /api/admin/health can alert without computing it themselves.
 func (a *App) handleAdminHealth(w http.ResponseWriter, r *http.Request) {
 	stats, _ := a.DB.Stats(r.Context())
-	att, _ := a.DB.Attention(r.Context())
+	att := a.attention(r.Context())
 	fwMACs, fwErr := a.MACSvc.FW.List(r.Context())
 	fwStatus := "ok"
 	if fwErr != nil {
@@ -81,9 +81,7 @@ func (a *App) handleAdminAuditNote(w http.ResponseWriter, r *http.Request) {
 		http.Redirect(w, r, "/admin/audit?err=empty_note", http.StatusSeeOther)
 		return
 	}
-	if len(note) > 1000 {
-		note = note[:1000]
-	}
+	note = truncateRunes(note, 1000)
 	// Try to attribute to the actual admin username — read it from the
 	// session subject.
 	actor := "admin"
@@ -187,9 +185,7 @@ func (a *App) handleAdminMACImport(w http.ResponseWriter, r *http.Request) {
 		if len(parts) > 3 {
 			if v := strings.TrimSpace(parts[3]); v != "" {
 				notes = v
-				if len(notes) > 1000 {
-					notes = notes[:1000]
-				}
+				notes = truncateRunes(notes, 1000)
 			}
 		}
 		if _, err := a.MACSvc.Extend(r.Context(), mac, label, days, nil); err != nil {
@@ -238,13 +234,19 @@ func (a *App) handleAdminExportMACs(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		// Post-filter q + status in memory (bounded by user's MAC count).
+		// Case-insensitive to match the SQL LIKE path used when no
+		// user_id is set — pre-v0.108 a lowercase "aa:bb" query matched
+		// there but not here (MACs are stored uppercase).
 		if qSearch != "" || statusFilter != "" {
+			qLower := strings.ToLower(qSearch)
 			filtered := macs[:0]
 			for _, m := range macs {
 				if statusFilter != "" && string(m.Status) != statusFilter {
 					continue
 				}
-				if qSearch != "" && !strings.Contains(m.Mac, qSearch) && !strings.Contains(m.Label, qSearch) {
+				if qSearch != "" &&
+					!strings.Contains(strings.ToLower(m.Mac), qLower) &&
+					!strings.Contains(strings.ToLower(m.Label), qLower) {
 					continue
 				}
 				filtered = append(filtered, m)
@@ -281,7 +283,7 @@ func (a *App) handleAdminExportMACs(w http.ResponseWriter, r *http.Request) {
 		}
 		_ = cw.Write([]string{
 			m.Mac,
-			m.Label,
+			csvCell(m.Label), // user-settable via /user/macs/label — formula-injection risk
 			string(m.Status),
 			m.ExpiresAt.UTC().Format(time.RFC3339),
 			uid,
@@ -328,14 +330,12 @@ func (a *App) handleAdminExportUsers(w http.ResponseWriter, r *http.Request) {
 		}
 		users = filtered
 	}
-	// Pre-aggregate mac counts so we don't N+1.
-	macCount := map[int64]int{}
-	if macs, _ := a.DB.ListMACs(r.Context()); macs != nil {
-		for _, m := range macs {
-			if m.UserID != nil {
-				macCount[*m.UserID]++
-			}
-		}
+	// Pre-aggregate mac counts with one GROUP BY instead of shipping every
+	// MAC row to Go just to count (same conversion as /admin/users in v0.111
+	// and /api/admin/users).
+	macCount, _ := a.DB.CountMACsByUser(r.Context())
+	if macCount == nil {
+		macCount = map[int64]int{}
 	}
 	w.Header().Set("Content-Type", "text/csv; charset=utf-8")
 	// Filename includes the filters when set so the download is self-
@@ -409,11 +409,11 @@ func (a *App) handleAdminExportSMSLog(w http.ResponseWriter, r *http.Request) {
 		_ = cw.Write([]string{
 			strconv.FormatInt(l.ID, 10),
 			l.SentAt.UTC().Format(time.RFC3339),
-			l.Provider,
-			l.Phone,
-			l.Message,
+			csvCell(l.Provider),
+			csvCell(l.Phone),
+			csvCell(l.Message), // free text — formula-injection risk
 			successStr,
-			l.ErrorMsg,
+			csvCell(l.ErrorMsg), // provider-supplied — formula-injection risk
 		})
 	}
 }
@@ -460,13 +460,13 @@ func (a *App) handleAdminExportWebhookLog(w http.ResponseWriter, r *http.Request
 		_ = cw.Write([]string{
 			strconv.FormatInt(l.ID, 10),
 			l.SentAt.UTC().Format(time.RFC3339),
-			l.EventType,
-			l.MAC,
+			csvCell(l.EventType),
+			csvCell(l.MAC),
 			strconv.Itoa(l.Attempt),
 			strconv.Itoa(l.StatusCode),
 			successStr,
 			strconv.FormatInt(l.DurationMs, 10),
-			l.ErrorMsg,
+			csvCell(l.ErrorMsg), // downstream-supplied — formula-injection risk
 		})
 	}
 }
@@ -498,15 +498,22 @@ func (a *App) handleAdminExportAudit(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.Header().Set("Content-Type", "text/csv; charset=utf-8")
-	w.Header().Set("Content-Disposition", `attachment; filename="audit.csv"`)
+	filename := "audit.csv"
+	if q.Get("actor") != "" || q.Get("action") != "" || q.Get("target") != "" ||
+		q.Get("q") != "" || q.Get("since") != "" || q.Get("until") != "" {
+		filename = "audit-filtered.csv"
+	}
+	w.Header().Set("Content-Disposition", `attachment; filename="`+filename+`"`)
 	cw := csv.NewWriter(w)
 	defer cw.Flush()
 	_ = cw.Write([]string{"id", "at", "actor", "action", "target", "detail"})
 	for _, e := range entries {
+		// Audit detail embeds user-controlled text (labels, notes, SMS
+		// error strings) — every text column is neutralized.
 		_ = cw.Write([]string{
 			strconv.FormatInt(e.ID, 10),
 			e.At.UTC().Format(time.RFC3339),
-			e.Actor, e.Action, e.Target, e.Detail,
+			csvCell(e.Actor), csvCell(e.Action), csvCell(e.Target), csvCell(e.Detail),
 		})
 	}
 }
@@ -534,7 +541,7 @@ func (a *App) handleAdminExportOrders(w http.ResponseWriter, r *http.Request) {
 		orders, err = a.DB.ListOrders(r.Context(), 5000)
 	} else {
 		orders, err = a.DB.SearchOrdersFiltered(r.Context(), db.OrderFilter{
-			Q: q, Status: status, Since: since, Until: until, UserID: userID, Limit: 1000,
+			Q: q, Status: status, Since: since, Until: until, UserID: userID, Limit: 5000,
 		})
 	}
 	if err != nil {
@@ -542,7 +549,13 @@ func (a *App) handleAdminExportOrders(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.Header().Set("Content-Type", "text/csv; charset=utf-8")
-	w.Header().Set("Content-Disposition", `attachment; filename="orders.csv"`)
+	// Filename flags active filters — matches the macs/users/sms/webhook
+	// export pattern so the download is self-describing.
+	filename := "orders.csv"
+	if q != "" || status != "" || since != "" || until != "" || userID > 0 {
+		filename = "orders-filtered.csv"
+	}
+	w.Header().Set("Content-Disposition", `attachment; filename="`+filename+`"`)
 	cw := csv.NewWriter(w)
 	defer cw.Flush()
 	_ = cw.Write([]string{"order_no", "mac", "plan", "days", "amount_cents", "status", "method", "trade_no", "user_id", "paid_at", "created_at"})
@@ -556,8 +569,9 @@ func (a *App) handleAdminExportOrders(w http.ResponseWriter, r *http.Request) {
 			paid = o.PaidAt.UTC().Format(time.RFC3339)
 		}
 		_ = cw.Write([]string{
-			o.OrderNo, o.Mac, o.Plan, strconv.Itoa(o.Days),
-			strconv.Itoa(o.AmountCents), string(o.Status), o.PaymentMethod, o.TradeNo,
+			csvCell(o.OrderNo), csvCell(o.Mac), csvCell(o.Plan), strconv.Itoa(o.Days),
+			strconv.Itoa(o.AmountCents), string(o.Status), csvCell(o.PaymentMethod),
+			csvCell(o.TradeNo), // gateway-supplied — formula-injection risk
 			uid, paid, o.CreatedAt.UTC().Format(time.RFC3339),
 		})
 	}

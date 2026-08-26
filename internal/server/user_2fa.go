@@ -5,13 +5,14 @@ import (
 	"image/png"
 	"log"
 	"net/http"
+	"strconv"
 	"strings"
-	"sync"
 	"time"
 
 	"golang.org/x/crypto/bcrypt"
 	"rsc.io/qr"
 
+	"router-billing/internal/db"
 	"router-billing/internal/totp"
 )
 
@@ -37,24 +38,13 @@ import (
 const userPendingSessionKind = "user_pending_2fa"
 
 // userTwoFAAttempts mirrors twoFAAttempts in admin_2fa.go but separately
-// keyed so user attempts don't share a counter with admin attempts.
-var userTwoFAAttempts = struct {
-	sync.Mutex
-	m map[string]int
-}{m: map[string]int{}}
+// keyed so user attempts don't share a counter with admin attempts. Same
+// bounded attemptTracker: abandoned pending logins no longer leak entries.
+var userTwoFAAttempts = newAttemptTracker(twoFAAttemptTTL)
 
-func userTwoFANextAttempt(token string) int {
-	userTwoFAAttempts.Lock()
-	defer userTwoFAAttempts.Unlock()
-	userTwoFAAttempts.m[token]++
-	return userTwoFAAttempts.m[token]
-}
+func userTwoFANextAttempt(token string) int { return userTwoFAAttempts.next(token) }
 
-func userTwoFAReset(token string) {
-	userTwoFAAttempts.Lock()
-	defer userTwoFAAttempts.Unlock()
-	delete(userTwoFAAttempts.m, token)
-}
+func userTwoFAReset(token string) { userTwoFAAttempts.reset(token) }
 
 // GET / POST /user/login/2fa
 func (a *App) handleUserLogin2FA(w http.ResponseWriter, r *http.Request) {
@@ -73,10 +63,10 @@ func (a *App) handleUserLogin2FA(w http.ResponseWriter, r *http.Request) {
 		http.Redirect(w, r, "/user/login?err=2fa_expired", http.StatusSeeOther)
 		return
 	}
-	next := r.URL.Query().Get("next")
-	if next == "" {
-		next = "/user/me"
-	}
+	// v0.99: the raw query value was previously trusted as-is — a crafted
+	// login link could bounce a just-authenticated user to an external
+	// phishing domain. Same-site relative paths only.
+	next := safeNextPath(r.URL.Query().Get("next"), "/user/me")
 
 	if r.Method == http.MethodGet {
 		a.render(w, "user_2fa_login.html", a.userCtx(r, "2fa", map[string]any{
@@ -111,7 +101,12 @@ func (a *App) handleUserLogin2FA(w http.ResponseWriter, r *http.Request) {
 	raw := r.PostForm.Get("code")
 	totpCode := extractDigits(raw)
 	via := "totp"
-	ok := totp.Verify(user.TOTPSecret, totpCode, time.Now())
+	step, ok := totp.MatchingStep(user.TOTPSecret, totpCode, time.Now())
+	if ok && !totpConsumeStep(user.TOTPSecret, step) {
+		// Correct code but already accepted once — treat a replay exactly
+		// like a wrong code (RFC 6238 §5.2).
+		ok = false
+	}
 	if !ok && looksLikeBackupCode(raw) {
 		// Fallback path: the user lost their authenticator but kept the
 		// backup codes printout. Each code is single-use.
@@ -182,9 +177,10 @@ func (a *App) handleUser2FA(w http.ResponseWriter, r *http.Request) {
 		ExpiresInD int
 	}
 	var devices []deviceView
+	// Device rows store token hashes; hash the cookie value to match.
 	currentToken := ""
-	if c, err := r.Cookie(userTrustedCookie); err == nil {
-		currentToken = c.Value
+	if c, err := r.Cookie(userTrustedCookie); err == nil && c.Value != "" {
+		currentToken = db.HashToken(c.Value)
 	}
 	if user.TOTPSecret != "" {
 		codes, _ := a.DB.ListBackupCodes(r.Context(), uid)
@@ -277,7 +273,15 @@ func (a *App) handleUser2FAConfirm(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	code := extractDigits(r.PostForm.Get("code"))
-	if !totp.Verify(user.TOTPPending, code, time.Now()) {
+	step, codeOK := totp.MatchingStep(user.TOTPPending, code, time.Now())
+	// Record the confirm code in the replay high-water mark too: the
+	// pending secret is promoted to the live secret verbatim, so without
+	// this the code that just confirmed enrollment would still pass the
+	// login-2FA / disable checks for the rest of its ±1-step window.
+	if codeOK && !totpConsumeStep(user.TOTPPending, step) {
+		codeOK = false
+	}
+	if !codeOK {
 		a.DB.Audit(r.Context(), "user:"+user.Phone, "2fa_enroll_failed", "", "ip="+clientIP(r))
 		http.Redirect(w, r, "/user/2fa?err=2fa_failed", http.StatusSeeOther)
 		return
@@ -329,6 +333,17 @@ func (a *App) handleUser2FADisable(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "form", http.StatusBadRequest)
 		return
 	}
+	// Cap attempts per user: the login-2FA path caps at 5 wrong codes per
+	// pending token, but this endpoint had no cap at all — an attacker
+	// holding a stolen session cookie AND the password could brute-force
+	// the 6-digit space (~10^6, hours at LAN latency) to turn 2FA off,
+	// which is exactly the takeover 2FA exists to stop. 5 attempts / 15
+	// minutes is far more than any honest disable needs.
+	if !a.twoFADisableLimit.allow(strconv.FormatInt(uid, 10)) {
+		a.DB.Audit(r.Context(), "user:"+user.Phone, "2fa_disable_failed", "", "reason=rate_limited ip="+clientIP(r))
+		http.Redirect(w, r, "/user/2fa?err=rate_limited", http.StatusSeeOther)
+		return
+	}
 	pwd := r.PostForm.Get("password")
 	code := extractDigits(r.PostForm.Get("code"))
 	if bcrypt.CompareHashAndPassword([]byte(user.PasswordHash), []byte(pwd)) != nil {
@@ -336,7 +351,13 @@ func (a *App) handleUser2FADisable(w http.ResponseWriter, r *http.Request) {
 		http.Redirect(w, r, "/user/2fa?err=bad_credentials", http.StatusSeeOther)
 		return
 	}
-	if !totp.Verify(user.TOTPSecret, code, time.Now()) {
+	step, codeOK := totp.MatchingStep(user.TOTPSecret, code, time.Now())
+	// One-time use: a code that already unlocked a login (or a previous
+	// disable attempt) can't be replayed here.
+	if codeOK && !totpConsumeStep(user.TOTPSecret, step) {
+		codeOK = false
+	}
+	if !codeOK {
 		a.DB.Audit(r.Context(), "user:"+user.Phone, "2fa_disable_failed", "", "reason=bad_code ip="+clientIP(r))
 		http.Redirect(w, r, "/user/2fa?err=2fa_failed", http.StatusSeeOther)
 		return

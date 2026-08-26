@@ -70,7 +70,7 @@
                   <button class="btn primary tiny" type="submit">{{if .Active}}续期{{else}}授权{{end}}</button>
                 </form>
                 {{if .Known}}
-                <form method="post" action="/admin/macs/delete" onsubmit="return confirm('收回 {{.MAC}} 的授权?')">
+                <form method="post" action="/admin/macs/delete" data-confirm="收回 {{.MAC}} 的授权?">
                   {{template "csrf" $}}
                   <input type="hidden" name="mac" value="{{.MAC}}">
                   <button class="btn danger tiny" type="submit">收回</button>
@@ -119,5 +119,8 @@
   </main>
 </div>
 <script src="/static/devices-stream.js" defer></script>
+  {{/* Confirm/print handlers run via ui.js data-* attributes — the CSP
+       (script-src 'self') blocks inline on*= attributes. */}}
+  <script src="/static/ui.js" defer></script>
 </body>
 </html>

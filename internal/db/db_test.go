@@ -254,7 +254,7 @@ func TestPurgeExpiredTrustedDevicesKeepsActiveDropsStale(t *testing.T) {
 	if len(devs) != 1 {
 		t.Fatalf("expected 1 device after purge; got %d", len(devs))
 	}
-	if devs[0].Token != "tok-active" {
+	if devs[0].Token != HashToken("tok-active") {
 		t.Errorf("wrong device survived; got %q", devs[0].Token)
 	}
 }

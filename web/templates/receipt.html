@@ -55,7 +55,7 @@
 </head>
 <body class="admin">
   <div class="r-toolbar">
-    <button onclick="window.print()" class="btn primary small" style="width:auto;">打印 / 保存为 PDF</button>
+    <button data-print class="btn primary small" style="width:auto;">打印 / 保存为 PDF</button>
     <a href="javascript:history.back()" class="btn ghost small" style="width:auto;">返回</a>
   </div>
 
@@ -87,5 +87,8 @@
       如需正式发票请联系商家
     </div>
   </div>
+  {{/* Confirm/print handlers run via ui.js data-* attributes — the CSP
+       (script-src 'self') blocks inline on*= attributes. */}}
+  <script src="/static/ui.js" defer></script>
 </body>
 </html>

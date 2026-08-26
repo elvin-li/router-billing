@@ -6,12 +6,38 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"sort"
 	"time"
 
 	"router-billing/internal/arp"
 	"router-billing/internal/dnsmasq"
 	"router-billing/internal/models"
 )
+
+// adminSessionAlive re-checks that the request still carries a live admin
+// session. requireAdmin only runs once — at connection time — so a
+// long-lived SSE stream would otherwise keep pushing live device data
+// (MACs, IPs, hostnames, revenue) forever after the admin session was
+// revoked ("panic button", revoke-all, logout elsewhere) or expired.
+// Called on every tick; the sessions lookup is a single indexed SQLite
+// read, negligible at the 5s stream cadence.
+func (a *App) adminSessionAlive(r *http.Request) bool {
+	c, err := r.Cookie(adminCookieName)
+	if err != nil || c.Value == "" {
+		return false
+	}
+	sess, err := a.DB.GetSession(r.Context(), c.Value)
+	return err == nil && sess != nil && sess.Kind == "admin"
+}
+
+// sseTickInterval is the stats/devices stream push cadence. Overridable
+// so tests don't need to wait 5 real seconds per frame.
+func (a *App) sseTickInterval() time.Duration {
+	if a.sseTick > 0 {
+		return a.sseTick
+	}
+	return 5 * time.Second
+}
 
 // GET /admin/devices/stream — Server-Sent Events.
 // Pushes the device list every 5 seconds while the client is connected.
@@ -37,7 +63,7 @@ func (a *App) handleAdminDevicesStream(w http.ResponseWriter, r *http.Request) {
 
 	send() // initial frame, no wait
 
-	t := time.NewTicker(5 * time.Second)
+	t := time.NewTicker(a.sseTickInterval())
 	defer t.Stop()
 	// Heartbeat comment line every 25s keeps the connection alive through
 	// any proxies that might idle-time it out.
@@ -49,8 +75,14 @@ func (a *App) handleAdminDevicesStream(w http.ResponseWriter, r *http.Request) {
 		case <-r.Context().Done():
 			return
 		case <-t.C:
+			if !a.adminSessionAlive(r) {
+				return
+			}
 			send()
 		case <-hb.C:
+			if !a.adminSessionAlive(r) {
+				return
+			}
 			fmt.Fprintf(w, ": heartbeat\n\n")
 			flusher.Flush()
 		}
@@ -129,5 +161,22 @@ func (a *App) buildDeviceList(ctx context.Context) []deviceJSON {
 	for _, e := range entries {
 		add(e.MAC, e.IP, hostnames[e.MAC], now)
 	}
+	// Same ranking the initial HTML render uses (sortDevices): unauthorized
+	// online first, then unauthorized offline, then authorized. Pre-v0.108
+	// SSE frames were emitted in raw sighting order, so five seconds after
+	// page load the sorted table silently reshuffled.
+	rank := func(d deviceJSON) int {
+		switch {
+		case !d.Active && d.Online:
+			return 0
+		case !d.Active && !d.Online:
+			return 1
+		case d.Active && d.Online:
+			return 2
+		default:
+			return 3
+		}
+	}
+	sort.SliceStable(out, func(i, j int) bool { return rank(out[i]) < rank(out[j]) })
 	return out
 }

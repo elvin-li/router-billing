@@ -63,7 +63,12 @@ func (a *App) handleAdminVouchersPrintQR(w http.ResponseWriter, r *http.Request)
 		return
 	}
 	w.Header().Set("Content-Type", "image/png")
-	w.Header().Set("Cache-Control", "public, max-age=3600")
+	// no-store, NOT "public": the PNG encodes a full unredeemed voucher
+	// code (bearer value — anyone holding it gets the paid days). "public"
+	// explicitly invited shared proxy caches to store an authenticated
+	// admin response, and left the codes sitting in browser disk cache
+	// after the admin walks away from a shared machine.
+	w.Header().Set("Cache-Control", "no-store")
 	_, _ = w.Write(buf.Bytes())
 }
 

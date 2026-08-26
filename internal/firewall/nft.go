@@ -6,7 +6,9 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"net"
 	"os/exec"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -14,17 +16,21 @@ import (
 
 // Manager keeps the nftables `mac_paid` set in sync with the DB.
 //
-// Layout managed externally by /etc/firewall.user.billing:
+// Layout managed externally by firewall-billing.sh (chain names are the
+// script's concern — this package only touches the set):
 //
 //	table inet billing {
 //	    set mac_paid { type ether_addr; }
-//	    chain pre  { type nat    hook prerouting priority -1;
-//	                 iifname "br-paid" ether saddr @mac_paid return
-//	                 iifname "br-paid" tcp dport 80 redirect to :8080
-//	                 iifname "br-paid" tcp dport 443 reject }
-//	    chain fwd  { type filter hook forward    priority -1;
-//	                 iifname "br-paid" ether saddr @mac_paid return
-//	                 iifname "br-paid" drop }
+//	    set wg_paid  { type ipv4_addr; flags timeout; }
+//	    chain pre      { type nat    hook prerouting priority -1;
+//	                     iifname "br-paid" ether saddr @mac_paid return
+//	                     iifname "br-paid" ip daddr @wg_paid return
+//	                     iifname "br-paid" tcp dport 80 redirect to :8080 }
+//	    chain forward  { type filter hook forward    priority -1;
+//	                     iifname "br-paid" ether saddr @mac_paid return
+//	                     iifname "br-paid" ip daddr @wg_paid return
+//	                     iifname "br-paid" tcp dport 443 reject with tcp reset
+//	                     iifname "br-paid" drop }
 //	}
 type Manager struct {
 	Family string // inet
@@ -121,7 +127,7 @@ func (m *Manager) remove(ctx context.Context, mac string) error {
 }
 
 // EnsureWalledGardenSet creates a per-IP allowlist set. Idempotent.
-// Elements are added with a 25h timeout so a stopped resolver gradually drains
+// Elements carry a 25h timeout so a stopped resolver gradually drains
 // the set instead of trapping a stale IP forever.
 func (m *Manager) EnsureWalledGardenSet(ctx context.Context, setName string) error {
 	m.mu.Lock()
@@ -136,55 +142,78 @@ func (m *Manager) EnsureWalledGardenSet(ctx context.Context, setName string) err
 	return nil
 }
 
-// AddWalledGardenIPs inserts IPs with a 25h timeout. Idempotent.
-func (m *Manager) AddWalledGardenIPs(ctx context.Context, setName string, ips []string) error {
-	if len(ips) == 0 {
-		return nil
-	}
+// SyncWalledGardenIPs atomically replaces the walled-garden set with the
+// given IPs, each with a fresh 25h timeout, in ONE nft transaction
+// (flush + add via `nft -f -`). Callers pass the FULL resolved list every
+// refresh cycle.
+//
+// This must be a full rebuild, not an add-only diff: the kernel does NOT
+// refresh an element's timeout on re-add (verified on nft 1.0.9 / kernel
+// 6.12 — `add element` of an existing timed element exits 0 and leaves the
+// old expiry ticking). A diff-based "only add new IPs" strategy therefore
+// let every stable payment-server IP silently expire after 25h of daemon
+// uptime, permanently cutting unpaid clients off from the payment flow.
+func (m *Manager) SyncWalledGardenIPs(ctx context.Context, setName string, ips []string) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	payload, kept := nftWGSyncPayload(m.Family, m.Table, setName, ips)
+	if err := m.runStdin(ctx, payload); err != nil {
+		return fmt.Errorf("sync walled garden: %w", err)
+	}
+	log.Printf("firewall: walled garden %s/%s/%s ← %d IPs (timeouts refreshed)",
+		m.Family, m.Table, setName, kept)
+	return nil
+}
+
+// nftWGSyncPayload builds the atomic flush+add transaction for the walled
+// garden set. IPs that don't parse as plain IPv4 are dropped — the input
+// ultimately comes from DNS answers, which an upstream resolver controls,
+// and must never reach the nft script unvalidated. Returns the payload and
+// the number of elements kept.
+func nftWGSyncPayload(family, table, setName string, ips []string) (string, int) {
+	var b strings.Builder
+	fmt.Fprintf(&b, "flush set %s %s %s\n", family, table, setName)
 	parts := make([]string, 0, len(ips))
 	for _, ip := range ips {
-		parts = append(parts, ip+" timeout 25h")
-	}
-	arg := "{ " + strings.Join(parts, ", ") + " }"
-	if err := m.run(ctx, "add", "element", m.Family, m.Table, setName, arg); err != nil {
-		if isExistsError(err) {
-			return nil
+		p := net.ParseIP(strings.TrimSpace(ip))
+		if p == nil || p.To4() == nil {
+			log.Printf("firewall: skip non-IPv4 walled-garden entry %q", ip)
+			continue
 		}
-		return err
+		parts = append(parts, p.To4().String()+" timeout 25h")
 	}
-	return nil
+	if len(parts) > 0 {
+		fmt.Fprintf(&b, "add element %s %s %s { %s }\n",
+			family, table, setName, strings.Join(parts, ", "))
+	}
+	return b.String(), len(parts)
 }
 
-// RemoveWalledGardenIPs deletes IPs. Idempotent on missing entries.
-func (m *Manager) RemoveWalledGardenIPs(ctx context.Context, setName string, ips []string) error {
-	if len(ips) == 0 {
-		return nil
-	}
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	arg := "{ " + strings.Join(ips, ", ") + " }"
-	if err := m.run(ctx, "delete", "element", m.Family, m.Table, setName, arg); err != nil {
-		if isNotFoundError(err) || isExistsError(err) {
-			return nil
-		}
-		return err
-	}
-	return nil
-}
-
-// Sync rebuilds the set atomically from the given list of MACs.
+// Sync rebuilds the set from the given list of MACs in ONE nft transaction.
+//
+// Pre-v0.107 this was two separate nft invocations (flush, then add): a
+// crash or error between them left the set EMPTY — every paying customer
+// portal-redirected/dropped until the next resync — and concurrent readers
+// saw the flushed window. `nft -f` submits both operations in a single
+// netlink batch, so the swap is atomic: readers observe either the old or
+// the new membership, never the gap, and a failed transaction leaves the
+// old membership intact.
 func (m *Manager) Sync(ctx context.Context, macs []string) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	if err := m.run(ctx, "flush", "set", m.Family, m.Table, m.Set); err != nil {
-		return fmt.Errorf("flush set: %w", err)
+	payload, kept := nftSyncPayload(m.Family, m.Table, m.Set, macs)
+	if err := m.runStdin(ctx, payload); err != nil {
+		return fmt.Errorf("sync set: %w", err)
 	}
-	if len(macs) == 0 {
-		return nil
-	}
-	// nft accepts comma-separated elements in one shot.
+	log.Printf("firewall: synced %d MACs into %s/%s/%s", kept, m.Family, m.Table, m.Set)
+	return nil
+}
+
+// nftSyncPayload builds the atomic flush+add transaction for the MAC set.
+// Invalid MACs are dropped (logged), never emitted into the nft script.
+func nftSyncPayload(family, table, set string, macs []string) (string, int) {
+	var b strings.Builder
+	fmt.Fprintf(&b, "flush set %s %s %s\n", family, table, set)
 	parts := make([]string, 0, len(macs))
 	for _, mac := range macs {
 		if !validMAC(mac) {
@@ -193,15 +222,11 @@ func (m *Manager) Sync(ctx context.Context, macs []string) error {
 		}
 		parts = append(parts, mac)
 	}
-	if len(parts) == 0 {
-		return nil
+	if len(parts) > 0 {
+		fmt.Fprintf(&b, "add element %s %s %s { %s }\n",
+			family, table, set, strings.Join(parts, ", "))
 	}
-	arg := "{ " + strings.Join(parts, ", ") + " }"
-	if err := m.run(ctx, "add", "element", m.Family, m.Table, m.Set, arg); err != nil {
-		return fmt.Errorf("populate set: %w", err)
-	}
-	log.Printf("firewall: synced %d MACs into %s/%s/%s", len(parts), m.Family, m.Table, m.Set)
-	return nil
+	return b.String(), len(parts)
 }
 
 // MACCounter is the per-MAC byte/packet counter from nftables.
@@ -282,35 +307,33 @@ func parseCounters(j string) (map[string]MACCounter, error) {
 	return out, nil
 }
 
-// List returns currently-present elements in the set (for debugging).
+// List returns currently-present elements in the set, uppercase and sorted.
+//
+// Uses the JSON output (`nft -j list set`) and the same parser as Counters.
+// The previous text-based parser grabbed everything between the FIRST "{"
+// (the table's opening brace, not the elements') and the last "}", split on
+// commas, and truncated each token at its first space: the first MAC always
+// landed in the same comma-token as "set mac_paid { ... elements = {" and
+// was silently dropped from every listing.
 func (m *Manager) List(ctx context.Context) ([]string, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	out, err := m.runOut(ctx, "-a", "list", "set", m.Family, m.Table, m.Set)
+	if m.dryRun {
+		return nil, nil
+	}
+	out, err := m.runOut(ctx, "-j", "list", "set", m.Family, m.Table, m.Set)
 	if err != nil {
 		return nil, err
 	}
-	// Parse "elements = { AA:BB:..., CC:... }"
-	open := strings.Index(out, "{")
-	close := strings.LastIndex(out, "}")
-	if open < 0 || close < 0 || close <= open {
-		return nil, nil
+	counters, err := parseCounters(out)
+	if err != nil {
+		return nil, err
 	}
-	body := out[open+1 : close]
-	var macs []string
-	for _, tok := range strings.Split(body, ",") {
-		tok = strings.TrimSpace(tok)
-		if tok == "" {
-			continue
-		}
-		// strip "# handle N" comments
-		if idx := strings.Index(tok, " "); idx > 0 {
-			tok = tok[:idx]
-		}
-		if validMAC(tok) {
-			macs = append(macs, strings.ToUpper(tok))
-		}
+	macs := make([]string, 0, len(counters))
+	for mac := range counters {
+		macs = append(macs, mac)
 	}
+	sort.Strings(macs)
 	return macs, nil
 }
 
@@ -330,6 +353,25 @@ func (m *Manager) run(ctx context.Context, args ...string) error {
 	cmd.Stderr = &stderr
 	if err := cmd.Run(); err != nil {
 		return fmt.Errorf("nft %s: %w (%s)", strings.Join(args, " "), err, strings.TrimSpace(stderr.String()))
+	}
+	return nil
+}
+
+// runStdin feeds a script to `nft -f -` so all contained operations commit
+// as a single atomic netlink batch.
+func (m *Manager) runStdin(ctx context.Context, script string) error {
+	if m.dryRun {
+		log.Printf("firewall(dry-run): nft -f - <<EOF\n%sEOF", script)
+		return nil
+	}
+	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, m.NftBin, "-f", "-") //nolint:gosec // see run()
+	cmd.Stdin = strings.NewReader(script)
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+	if err := cmd.Run(); err != nil {
+		return fmt.Errorf("nft -f -: %w (%s)", err, strings.TrimSpace(stderr.String()))
 	}
 	return nil
 }

@@ -3,7 +3,6 @@ package server
 import (
 	"encoding/json"
 	"log"
-	"net"
 	"net/http"
 	"net/url"
 	"strconv"
@@ -25,6 +24,19 @@ const userTrustedTTL = 30 * 24 * time.Hour // 30-day trust window
 
 // User session lifetime is config.Security.UserSessionTTL() — defaults to
 // 30d, range 1..365. See internal/config/config.go.
+
+// bcryptTimingDummy is a hash of a random throwaway value, compared against
+// when a login names an unregistered phone — so the "no such user" path
+// costs the same bcrypt work as a real password check and timing doesn't
+// enumerate accounts. Hashed once at startup; the plaintext is discarded.
+var bcryptTimingDummy = func() []byte {
+	h, err := bcrypt.GenerateFromPassword([]byte(randomToken(16)), bcrypt.DefaultCost)
+	if err != nil {
+		// bcrypt only errors on cost/length misuse — ours are constants.
+		panic("bcrypt timing dummy: " + err.Error())
+	}
+	return h
+}()
 
 // userCtx assembles the common data passed to every user-facing template.
 func (a *App) userCtx(r *http.Request, page string, extra map[string]any) map[string]any {
@@ -100,7 +112,7 @@ func (a *App) requireUser(h http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		uid := a.currentUserID(r)
 		if uid == 0 {
-			http.Redirect(w, r, "/user/login?next="+r.URL.RequestURI(), http.StatusSeeOther)
+			http.Redirect(w, r, "/user/login?next="+url.QueryEscape(r.URL.RequestURI()), http.StatusSeeOther)
 			return
 		}
 		if !verifyCSRF(r) {
@@ -130,10 +142,31 @@ func (a *App) currentUserID(r *http.Request) int64 {
 	return *sess.UserID
 }
 
+// safeNextPath validates a post-login redirect target. Only same-site
+// relative paths pass: must start with exactly one "/" (so "//evil.com"
+// and "/\evil.com" — which browsers treat as protocol-relative external
+// URLs — are rejected) and contain no backslashes anywhere (some browsers
+// normalize "\" to "/" before resolving). Anything else → fallback.
+//
+// Pre-v0.99 the login path only checked strings.HasPrefix(next, "/") and
+// the 2FA login path did no validation at all — both were open redirects.
+func safeNextPath(next, fallback string) string {
+	if next == "" || next[0] != '/' {
+		return fallback
+	}
+	if len(next) > 1 && next[1] == '/' {
+		return fallback
+	}
+	if strings.ContainsAny(next, "\\\r\n") {
+		return fallback
+	}
+	return next
+}
+
 func (a *App) handleUserLogin(w http.ResponseWriter, r *http.Request) {
 	if r.Method == http.MethodGet {
 		a.render(w, "user_login.html", a.userCtx(r, "login", map[string]any{
-			"Next":         r.URL.Query().Get("next"),
+			"Next":         safeNextPath(r.URL.Query().Get("next"), ""),
 			"SMSAvailable": a.SMS.Available(),
 		}))
 		return
@@ -167,7 +200,15 @@ func (a *App) handleUserLogin(w http.ResponseWriter, r *http.Request) {
 		http.Redirect(w, r, "/user/login?err=internal", http.StatusSeeOther)
 		return
 	}
-	if user == nil || bcrypt.CompareHashAndPassword([]byte(user.PasswordHash), []byte(password)) != nil {
+	passOK := false
+	if user != nil {
+		passOK = bcrypt.CompareHashAndPassword([]byte(user.PasswordHash), []byte(password)) == nil
+	} else {
+		// Burn the same bcrypt cost on unknown phones so response timing
+		// doesn't reveal which numbers are registered.
+		_ = bcrypt.CompareHashAndPassword(bcryptTimingDummy, []byte(password))
+	}
+	if !passOK {
 		a.DB.Audit(r.Context(), "user:"+phone, "login_failed", "", clientIP(r))
 		http.Redirect(w, r, "/user/login?err=bad_credentials", http.StatusSeeOther)
 		return
@@ -178,10 +219,7 @@ func (a *App) handleUserLogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	next := r.PostForm.Get("next")
-	if !strings.HasPrefix(next, "/") {
-		next = "/user/me"
-	}
+	next := safeNextPath(r.PostForm.Get("next"), "/user/me")
 
 	// If 2FA is enrolled, hold the session in pending state until the user
 	// submits a valid TOTP code. Same shape as the admin 2FA flow (see
@@ -299,6 +337,22 @@ func (a *App) startUserSession(w http.ResponseWriter, r *http.Request, u *models
 }
 
 func (a *App) handleUserLogout(w http.ResponseWriter, r *http.Request) {
+	// POST-only: SameSite=Lax cookies DO ride along on top-level cross-site
+	// GET navigations (and on speculative link prefetches some browsers
+	// issue), so a hostile <a href=".../user/logout"> — or an eager
+	// prefetcher — could sign the user out. GET now bounces back to the
+	// account page with the session intact. Mirrors the /admin/logout
+	// hardening; the user side was left as a plain GET link.
+	if r.Method != http.MethodPost {
+		http.Redirect(w, r, "/user/me", http.StatusSeeOther)
+		return
+	}
+	// This route sits outside requireUser (logging out with an expired
+	// session must still clear the cookie), so check CSRF here directly.
+	if !verifyCSRF(r) {
+		http.Error(w, "CSRF token invalid — please refresh the page and retry", http.StatusForbidden)
+		return
+	}
 	if c, _ := r.Cookie(userCookieName); c != nil {
 		_ = a.DB.DeleteSession(r.Context(), c.Value)
 	}
@@ -515,19 +569,28 @@ func (a *App) handleUserClaimMAC(w http.ResponseWriter, r *http.Request) {
 		http.Redirect(w, r, "/user/me?err=no_mac", http.StatusSeeOther)
 		return
 	}
+	// Pre-checks for friendly routing only — the authoritative eligibility
+	// test is inside ClaimMAC's WHERE clause, so nothing that changes
+	// between here and the UPDATE can be exploited.
 	existing, _ := a.DB.GetMAC(r.Context(), mac)
 	if existing == nil || existing.Status != models.MACActive || existing.ExpiresAt.Before(time.Now()) {
 		// Nothing to claim — direct users to buy time instead.
 		http.Redirect(w, r, "/portal?mac="+mac, http.StatusSeeOther)
 		return
 	}
-	if existing.UserID != nil && *existing.UserID != uid {
-		http.Redirect(w, r, "/user/me?err=replace_failed", http.StatusSeeOther)
+	// Take ownership atomically, without touching status/expiry/label. The
+	// old GetMAC-check → UpsertMAC sequence was a TOCTOU: a concurrent
+	// transfer to another user was clobbered back, and a concurrent admin
+	// Revoke was flipped back to status='active' (UpsertMAC stamps it),
+	// putting the blocked device back online at the next firewall resync.
+	claimed, err := a.DB.ClaimMAC(r.Context(), mac, uid)
+	if err != nil {
+		http.Redirect(w, r, "/user/me?err=internal", http.StatusSeeOther)
 		return
 	}
-	// Take ownership without changing expiry/days (days=0 + active+future-expiry → no-op).
-	if _, err := a.DB.UpsertMAC(r.Context(), mac, "", 0, &uid); err != nil {
-		http.Redirect(w, r, "/user/me?err=internal", http.StatusSeeOther)
+	if !claimed {
+		// Owned by someone else, or no longer active/unexpired.
+		http.Redirect(w, r, "/user/me?err=replace_failed", http.StatusSeeOther)
 		return
 	}
 	a.DB.Audit(r.Context(), "user:"+user.Phone, "claim", mac, "")
@@ -556,18 +619,18 @@ func (a *App) handleUserLabelMAC(w http.ResponseWriter, r *http.Request) {
 		http.Redirect(w, r, "/user/me?err=replace_failed", http.StatusSeeOther)
 		return
 	}
-	label := strings.TrimSpace(r.PostForm.Get("label"))
-	if len(label) > 60 {
-		label = label[:60]
-	}
-	existing, _ := a.DB.GetMAC(r.Context(), mac)
-	if existing == nil || existing.UserID == nil || *existing.UserID != uid {
-		http.Redirect(w, r, "/user/me?err=replace_failed", http.StatusSeeOther)
-		return
-	}
-	if err := a.DB.SetMACLabel(r.Context(), mac, label); err != nil {
+	label := truncateRunes(strings.TrimSpace(r.PostForm.Get("label")), 60)
+	// Ownership check and write are one atomic UPDATE ... WHERE user_id = ?
+	// — the previous GetMAC-check → SetMACLabel pair let a rename land on a
+	// MAC that had just been transferred to another user.
+	ok, err = a.DB.SetMACLabelOwned(r.Context(), mac, label, uid)
+	if err != nil {
 		log.Printf("user label %s: %v", mac, err)
 		http.Redirect(w, r, "/user/me?err=internal", http.StatusSeeOther)
+		return
+	}
+	if !ok {
+		http.Redirect(w, r, "/user/me?err=replace_failed", http.StatusSeeOther)
 		return
 	}
 	a.DB.Audit(r.Context(), "user:"+user.Phone, "label", mac, label)
@@ -661,7 +724,7 @@ func (a *App) handleUserAccountExport(w http.ResponseWriter, r *http.Request) {
 	}
 
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
-	w.Header().Set("Content-Disposition", `attachment; filename="router-billing-data-`+user.Phone+`.json"`)
+	w.Header().Set("Content-Disposition", `attachment; filename="router-billing-data-`+filenameSafe(user.Phone)+`.json"`)
 	enc := json.NewEncoder(w)
 	enc.SetIndent("", "  ")
 	if err := enc.Encode(export); err != nil {
@@ -781,24 +844,41 @@ func (a *App) handleUserPassword(w http.ResponseWriter, r *http.Request) {
 		http.Redirect(w, r, "/user/me?err=internal", http.StatusSeeOther)
 		return
 	}
+	// A password change means every other login is untrusted: stolen
+	// rb_user cookies must die. Keep the browser that just proved the
+	// old password so the user is not bounced to /user/login.
+	keep := ""
+	if c, err := r.Cookie(userCookieName); err == nil {
+		keep = c.Value
+	}
+	if keep != "" {
+		if _, err := a.DB.DeleteUserSessionsExcept(r.Context(), uid, keep); err != nil {
+			log.Printf("password-change drop other sessions %d: %v", uid, err)
+		}
+	} else if _, err := a.DB.DeleteSessionsByUserID(r.Context(), uid); err != nil {
+		log.Printf("password-change drop sessions %d: %v", uid, err)
+	}
+	if err := a.DB.DeleteAllTrustedDevices(r.Context(), uid); err != nil {
+		log.Printf("password-change drop trusted devices %d: %v", uid, err)
+	}
 	a.DB.Audit(r.Context(), "user:"+user.Phone, "password_change", "", "")
 	http.Redirect(w, r, "/user/me?ok=password", http.StatusSeeOther)
 }
 
 // --- small bits ---
 
+// clientIP returns the address realIPMiddleware resolved for this request.
+// X-Forwarded-For handling (only from security.trusted_proxies) lives in
+// that middleware — previously the header's FIRST entry was trusted from
+// anyone, which let a direct client pick a fresh fake IP per request and
+// walk straight through every per-IP rate limit (voucher brute force,
+// login floods, payment intent floods, forgot-password SMS pumping) and
+// stamp forged IPs into the audit log.
 func clientIP(r *http.Request) string {
-	if h := r.Header.Get("X-Forwarded-For"); h != "" {
-		if i := strings.Index(h, ","); i >= 0 {
-			return strings.TrimSpace(h[:i])
-		}
-		return strings.TrimSpace(h)
+	if v, ok := r.Context().Value(realIPCtxKey).(string); ok && v != "" {
+		return v
 	}
-	host, _, err := net.SplitHostPort(r.RemoteAddr)
-	if err != nil {
-		return r.RemoteAddr
-	}
-	return host
+	return remoteHost(r)
 }
 
 // --- rate limiter ---
@@ -808,6 +888,7 @@ type rateLimiter struct {
 	hits   map[string][]time.Time
 	max    int
 	window time.Duration
+	gcAt   int // map size that triggers the next GC sweep (amortized O(1))
 }
 
 func newRateLimiter(max int, window time.Duration) *rateLimiter {
@@ -835,13 +916,28 @@ func (rl *rateLimiter) allow(key string) bool {
 	}
 	out = append(out, now)
 	rl.hits[key] = out
-	// Cheap gc: if the map gets large, drop oldest.
-	if len(rl.hits) > 4096 {
+	// GC sweep, amortized: sweeping on EVERY insert once large would be an
+	// O(n)-per-request full-map scan — a CPU burn under the same key flood
+	// the sweep defends against. Trigger by size threshold instead.
+	if len(rl.hits) > 4096 && len(rl.hits) >= rl.gcAt {
 		for k, v := range rl.hits {
 			if len(v) == 0 || v[len(v)-1].Before(cutoff) {
 				delete(rl.hits, k)
 			}
 		}
+		// Hard cap: expired-entry GC alone is unbounded when an attacker
+		// rotates source IPs (one IPv6 /64 = 2^64 fresh keys) faster than
+		// the window drains. Evicting live entries weakens rate limiting a
+		// little under such a flood, but OOMing the router is worse.
+		for k := range rl.hits {
+			if len(rl.hits) <= 4096 {
+				break
+			}
+			if k != key {
+				delete(rl.hits, k)
+			}
+		}
+		rl.gcAt = 2 * len(rl.hits)
 	}
 	return true
 }

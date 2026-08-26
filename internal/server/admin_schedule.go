@@ -52,8 +52,14 @@ func (a *App) handleAdminMACScheduleSave(w http.ResponseWriter, r *http.Request)
 		if err := a.DB.SetMACSchedule(r.Context(), mac, ""); err != nil {
 			log.Printf("clear schedule %s: %v", mac, err)
 		}
-		// Re-add to firewall (no restriction → should be in)
-		_ = a.MACSvc.FW.Add(r.Context(), mac)
+		// Re-add to firewall (no restriction → should be in) — but ONLY
+		// when the row is actually entitled to be online. Pre-v0.108 this
+		// Add was unconditional, so clearing a schedule on a blocked or
+		// expired MAC silently put it back into the paid set until the
+		// next resync. Since v0.110 the eligibility check + firewall write
+		// run under the service lock so a concurrent revoke/expiry can't
+		// interleave between them.
+		_ = a.MACSvc.ApplyScheduleNow(r.Context(), mac, models.MacSchedule{})
 		a.DB.Audit(r.Context(), "admin", "schedule_clear", mac, "")
 		http.Redirect(w, r, "/admin/macs?ok=1", http.StatusSeeOther)
 		return
@@ -88,11 +94,10 @@ func (a *App) handleAdminMACScheduleSave(w http.ResponseWriter, r *http.Request)
 	http.Redirect(w, r, "/admin/macs?ok=1", http.StatusSeeOther)
 }
 
+// applyOneSchedule delegates to the service so the eligibility check and
+// the firewall write share the same lock as revoke/expiry/resync. The
+// pre-v0.110 in-handler version read the row and then touched the firewall
+// unlocked — a Revoke landing in between was silently overwritten.
 func (a *App) applyOneSchedule(mac string, sched models.MacSchedule) {
-	ctx := backgroundCtx()
-	if sched.Active(timeNow()) {
-		_ = a.MACSvc.FW.Add(ctx, mac)
-	} else {
-		_ = a.MACSvc.FW.Remove(ctx, mac)
-	}
+	_ = a.MACSvc.ApplyScheduleNow(backgroundCtx(), mac, sched)
 }

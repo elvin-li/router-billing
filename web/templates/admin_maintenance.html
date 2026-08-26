@@ -48,7 +48,7 @@
           <input type="file" name="backup" accept=".db,application/x-sqlite3" required>
         </div>
         <div class="field-actions">
-          <button class="btn primary" type="submit" onclick="return confirm('确定要用上传的文件替换当前 DB？\n旧 DB 会备份保留。')">上传 + 暂存</button>
+          <button class="btn primary" type="submit" data-confirm="确定要用上传的文件替换当前 DB？\n旧 DB 会备份保留。">上传 + 暂存</button>
         </div>
       </form>
     </section>
@@ -97,7 +97,7 @@
         <div class="flash err">到期扫描失败，详见服务器日志</div>
       {{end}}
       <form method="post" action="/admin/maintenance/expire-now" style="margin-top:10px;"
-            onsubmit="return confirm('立即扫描并将所有到期 MAC 标记为 expired，然后重新同步防火墙？');">
+            data-confirm="立即扫描并将所有到期 MAC 标记为 expired，然后重新同步防火墙？">
         {{template "csrf" .}}
         <button class="btn outline" type="submit" style="width:auto;">立即执行到期扫描</button>
       </form>
@@ -108,7 +108,7 @@
       <hr style="margin:18px 0; border:none; border-top:1px solid var(--border);">
 
       <form method="post" action="/admin/maintenance/audit-trim"
-            onsubmit="return confirm('立即裁剪审计日志，保留最新 {{.AuditKeep}} 条？');">
+            data-confirm="立即裁剪审计日志，保留最新 {{.AuditKeep}} 条？">
         {{template "csrf" .}}
         <button class="btn outline" type="submit" style="width:auto;">立即裁剪审计日志</button>
       </form>
@@ -138,5 +138,8 @@
     </section>
   </main>
 </div>
+  {{/* Confirm/print handlers run via ui.js data-* attributes — the CSP
+       (script-src 'self') blocks inline on*= attributes. */}}
+  <script src="/static/ui.js" defer></script>
 </body>
 </html>
