@@ -106,12 +106,12 @@ func TestServerRelayAllCiphers(t *testing.T) {
 			if got := string(buf); got != strings.ToUpper(msg) {
 				t.Fatalf("echo = %q, want %q", got, strings.ToUpper(msg))
 			}
-			// Give the metrics goroutine a beat to record the connection.
-			waitFor(t, func() bool { return m.Snapshot().ConnectionsTotal == 1 })
-			snap := m.Snapshot()
-			if snap.BytesIn == 0 || snap.BytesOut == 0 {
-				t.Errorf("byte counters not updated: %+v", snap)
-			}
+			// Byte counters are updated by the relay goroutines slightly
+			// after the client observes the echoed data, so poll for them.
+			waitFor(t, func() bool {
+				s := m.Snapshot()
+				return s.ConnectionsTotal == 1 && s.BytesIn > 0 && s.BytesOut > 0
+			})
 		})
 	}
 }
