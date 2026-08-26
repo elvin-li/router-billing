@@ -48,7 +48,8 @@
           <tr><th style="text-align:left;">更新时间</th><td>{{formatTime .MAC.UpdatedAt}}</td></tr>
           {{if .Sighting}}
           <tr><th style="text-align:left;">最近在线</th><td>
-            <span class="pill active" title="ARP / dnsmasq lease 探测时间">在线</span>
+            {{if .SightingOnline}}<span class="pill active" title="10 分钟内出现在 ARP / dnsmasq">在线</span>
+            {{else}}<span class="pill expired" title="超过 10 分钟未在 ARP / dnsmasq 出现">离线</span>{{end}}
             <span style="color:var(--text-soft); margin-left:8px;">
               {{formatTime .Sighting.LastSeen}}
               {{if .Sighting.LastIP}}· <code>{{.Sighting.LastIP}}</code>{{end}}

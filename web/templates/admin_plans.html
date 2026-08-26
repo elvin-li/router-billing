@@ -81,7 +81,7 @@
                   {{if .Enabled}}<input type="hidden" name="enabled" value="off">{{else}}<input type="hidden" name="enabled" value="on">{{end}}
                   <button class="btn outline tiny" type="submit">{{if .Enabled}}停用{{else}}启用{{end}}</button>
                 </form>
-                <form method="post" action="/admin/plans/delete" onsubmit="return confirm('删除套餐 {{.Key}}？config 中存在的会恢复默认值。')">
+                <form method="post" action="/admin/plans/delete" data-confirm="删除套餐 {{.Key}}？config 中存在的会恢复默认值。">
                   {{template "csrf" $}}
                   <input type="hidden" name="key" value="{{.Key}}">
                   <button class="btn danger tiny" type="submit">删除</button>
@@ -97,5 +97,8 @@
     </section>
   </main>
 </div>
+  {{/* Confirm/print handlers run via ui.js data-* attributes — the CSP
+       (script-src 'self') blocks inline on*= attributes. */}}
+  <script src="/static/ui.js" defer></script>
 </body>
 </html>

@@ -2,6 +2,20 @@
 # opkg post-install hook — runs after files are placed.
 set -e
 
+# Image builds (opkg install into a rootfs with IPKG_INSTROOT set) run this
+# on the BUILD HOST: /etc/init.d/router-billing doesn't exist there, so with
+# set -e the whole install used to fail — and had the paths resolved, we'd
+# have edited the host's uci config instead of the image's. Enable the
+# service by creating the rc.d symlinks inside the target root (what
+# `/etc/init.d/router-billing enable` would do; START=95 / STOP=10) and stop:
+# uci-defaults handles SSID + firewall at the image's first boot.
+if [ -n "${IPKG_INSTROOT}" ]; then
+    mkdir -p "${IPKG_INSTROOT}/etc/rc.d"
+    ln -sf ../init.d/router-billing "${IPKG_INSTROOT}/etc/rc.d/S95router-billing"
+    ln -sf ../init.d/router-billing "${IPKG_INSTROOT}/etc/rc.d/K10router-billing"
+    exit 0
+fi
+
 # uci-defaults runs at next boot, but we trigger it now too so the SSID is
 # created immediately on a manual `opkg install`.
 if [ -x /etc/uci-defaults/99-router-billing-ssid ]; then
@@ -9,9 +23,11 @@ if [ -x /etc/uci-defaults/99-router-billing-ssid ]; then
         rm -f /etc/uci-defaults/99-router-billing-ssid || true
 fi
 
-# Apply nftables rules
+# Apply nftables rules. Non-fatal but loud — a swallowed failure here
+# means no portal redirect and free internet for every Paid_WiFi device.
 if [ -x /usr/share/router-billing/firewall-billing.sh ]; then
-    /usr/share/router-billing/firewall-billing.sh apply || true
+    /usr/share/router-billing/firewall-billing.sh apply || \
+        echo "router-billing: WARNING firewall apply failed — billing rules missing" >&2
 fi
 
 # Enable + start the service

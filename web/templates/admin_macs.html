@@ -26,10 +26,10 @@
         <span>需要关注 <strong>{{.Attention.Total}}</strong> 项</span>
       </div>
       <div class="attention-grid">
-        {{if .Attention.ExpiringSoon}}<a class="attention-item" href="/admin/macs"><strong>{{.Attention.ExpiringSoon}}</strong> 个 MAC 7 天内到期</a>{{end}}
-        {{if .Attention.StalePending}}<a class="attention-item" href="/admin/orders"><strong>{{.Attention.StalePending}}</strong> 个订单超 10 分钟未支付</a>{{end}}
+        {{if .Attention.ExpiringSoon}}<a class="attention-item" href="/admin/macs?status=active"><strong>{{.Attention.ExpiringSoon}}</strong> 个 MAC 7 天内到期</a>{{end}}
+        {{if .Attention.StalePending}}<a class="attention-item" href="/admin/orders?status=pending"><strong>{{.Attention.StalePending}}</strong> 个订单超 10 分钟未支付</a>{{end}}
         {{if .Attention.SuspendedUsers}}<a class="attention-item" href="/admin/users"><strong>{{.Attention.SuspendedUsers}}</strong> 个用户已停用</a>{{end}}
-        {{if .Attention.FailedToday}}<a class="attention-item" href="/admin/orders"><strong>{{.Attention.FailedToday}}</strong> 笔订单今日失败</a>{{end}}
+        {{if .Attention.FailedToday}}<a class="attention-item" href="/admin/orders?status=failed"><strong>{{.Attention.FailedToday}}</strong> 笔订单今日失败</a>{{end}}
       </div>
     </div>
     {{end}}
@@ -148,13 +148,13 @@
         <div class="table-wrap">
         <table class="data">
           <thead><tr>
-            <th style="width:32px;"><input type="checkbox" id="bulk-all" onclick="document.querySelectorAll('.bulk-pick').forEach(c=>c.checked=this.checked); refreshBulk();"></th>
+            <th style="width:32px;"><input type="checkbox" id="bulk-all"></th>
             <th>MAC</th><th>备注</th><th>状态</th><th>到期时间</th><th>剩余</th><th>操作</th>
           </tr></thead>
           <tbody>
             {{range .MACs}}
             <tr>
-              <td><input type="checkbox" value="{{.Mac}}" class="bulk-pick" onchange="refreshBulk()"></td>
+              <td><input type="checkbox" value="{{.Mac}}" class="bulk-pick"></td>
               <td class="mono"><a href="/admin/macs/detail?mac={{.Mac}}" style="color:inherit; text-decoration:none;" title="查看完整时间线">{{.Mac}}</a></td>
               <td>
                 {{if .Label}}{{.Label}}{{else}}<span style="color:#9ca3af;">—</span>{{end}}
@@ -173,13 +173,13 @@
                 <a href="/admin/macs/schedule?mac={{.Mac}}" class="btn ghost tiny" style="width:auto;" title="设置时段限制">时段</a>
                 {{if ne (printf "%s" .Status) "blocked"}}
                 <form method="post" action="/admin/macs/revoke"
-                      onsubmit="return confirm('封禁 {{.Mac}}？\n下线该 MAC（防火墙立即移除）但保留 DB 记录，下次付费可恢复。')">
+                      data-confirm="封禁 {{.Mac}}？\n下线该 MAC（防火墙立即移除）但保留 DB 记录，下次付费可恢复。">
                   {{template "csrf" $}}
                   <input type="hidden" name="mac" value="{{.Mac}}">
                   <button class="btn outline tiny" type="submit" title="封禁但保留记录">封禁</button>
                 </form>
                 {{end}}
-                <form method="post" action="/admin/macs/delete" onsubmit="return confirm('删除 {{.Mac}}?')">
+                <form method="post" action="/admin/macs/delete" data-confirm="删除 {{.Mac}}?">
                   {{template "csrf" $}}
                   <input type="hidden" name="mac" value="{{.Mac}}">
                   <button class="btn danger tiny" type="submit">删除</button>
@@ -199,44 +199,14 @@
         <div class="bulk-bar" style="display:none;" id="bulk-bar">
           <span id="bulk-count">0</span> 个 MAC 选中
           <input type="number" id="bulk-days" min="1" placeholder="续费天数" style="width:100px; padding:6px 8px; border:1px solid var(--border); border-radius:6px;">
-          <button class="btn primary tiny" type="button" onclick="submitBulk('extend')" style="width:auto;">批量续费</button>
-          <button class="btn danger tiny" type="button" onclick="submitBulk('delete')" style="width:auto;">批量删除</button>
+          <button class="btn primary tiny" type="button" id="bulk-extend" style="width:auto;">批量续费</button>
+          <button class="btn danger tiny" type="button" id="bulk-delete" style="width:auto;">批量删除</button>
         </div>
-      <script>
-        function refreshBulk() {
-          const bar = document.getElementById('bulk-bar');
-          const cnt = document.getElementById('bulk-count');
-          const n = document.querySelectorAll('.bulk-pick:checked').length;
-          cnt.textContent = n;
-          bar.style.display = n > 0 ? 'flex' : 'none';
-        }
-        function submitBulk(action) {
-          const picked = Array.from(document.querySelectorAll('.bulk-pick:checked'));
-          if (picked.length === 0) { alert('请先勾选 MAC'); return; }
-          if (action === 'extend') {
-            const d = parseInt(document.getElementById('bulk-days').value, 10);
-            if (!d || d < 1) { alert('请填入续费天数'); return; }
-          }
-          if (!confirm(`对 ${picked.length} 个 MAC 执行「${action === 'delete' ? '删除' : '续费'}」？`)) return;
-          // Build + submit a transient form (no HTML5 nesting issues).
-          const csrf = document.cookie.match(/(?:^|; )rb_csrf=([^;]+)/);
-          const form = document.createElement('form');
-          form.method = 'POST';
-          form.action = '/admin/macs/bulk';
-          form.style.display = 'none';
-          const add = (n, v) => {
-            const i = document.createElement('input');
-            i.name = n; i.value = v;
-            form.appendChild(i);
-          };
-          add('_csrf', csrf ? decodeURIComponent(csrf[1]) : '');
-          add('action', action);
-          if (action === 'extend') add('days', document.getElementById('bulk-days').value);
-          for (const p of picked) add('mac', p.value);
-          document.body.appendChild(form);
-          form.submit();
-        }
-      </script>
+      {{/* Bulk-select logic lives in admin-macs.js; confirm prompts run via
+           ui.js data-confirm — the CSP (script-src 'self') blocks inline
+           <script> blocks and on*= attributes. */}}
+      <script src="/static/ui.js" defer></script>
+      <script src="/static/admin-macs.js" defer></script>
     </section>
   </main>
 </div>

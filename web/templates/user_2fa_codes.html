@@ -49,8 +49,8 @@
         {{range .Codes}}<code>{{.}}</code>{{end}}
       </div>
       <div class="no-print" style="display:flex; gap:10px; margin-top:14px;">
-        <button class="btn outline small" type="button" onclick="copyCodes()" style="width:auto;">复制所有</button>
-        <button class="btn outline small" type="button" onclick="window.print()" style="width:auto;">打印</button>
+        <button class="btn outline small" type="button" id="copy-codes" style="width:auto;">复制所有</button>
+        <button class="btn outline small" type="button" data-print style="width:auto;">打印</button>
         <a class="btn primary" href="/user/2fa" style="width:auto;">我已保存好</a>
       </div>
     </section>
@@ -58,19 +58,9 @@
     <p class="portal-footer no-print">router-billing v{{.Version}}</p>
   </main>
 
-  <script>
-    function copyCodes() {
-      const codes = Array.from(document.querySelectorAll('.codes-grid code')).map(el => el.textContent).join('\n');
-      navigator.clipboard.writeText(codes).then(() => {
-        alert('已复制到剪贴板');
-      }).catch(() => {
-        // Fallback for non-https / unsupported browsers
-        const ta = document.createElement('textarea');
-        ta.value = codes; document.body.appendChild(ta);
-        ta.select(); document.execCommand('copy'); ta.remove();
-        alert('已复制到剪贴板');
-      });
-    }
-  </script>
+  {{/* copy/print handlers live in static JS — the CSP (script-src 'self')
+       blocks inline <script> blocks and on*= attributes. */}}
+  <script src="/static/ui.js" defer></script>
+  <script src="/static/user-2fa-codes.js" defer></script>
 </body>
 </html>

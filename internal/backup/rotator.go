@@ -59,16 +59,67 @@ func (r *Rotator) Run(ctx context.Context) {
 }
 
 func (r *Rotator) once(ctx context.Context) {
+	dst := filepath.Join(r.Dir, fmt.Sprintf("billing-%s.db", time.Now().Format("20060102-150405")))
+	if err := r.snapshot(ctx, dst); err != nil {
+		log.Printf("backup: snapshot: %v", err)
+	} else {
+		log.Printf("backup: wrote %s", dst)
+	}
+	// Prune even when the snapshot failed. The common failure mode is a
+	// full flash partition — and skipping prune on failure (pre-v0.108
+	// behavior) meant a full disk could never be freed by the rotator, so
+	// every subsequent backup failed too: wedged until manual cleanup.
+	r.prune()
+}
+
+// snapshot writes one consistent copy of the DB to dst.
+//
+// Preferred path is `VACUUM INTO`, which produces a transactionally
+// consistent snapshot even while other goroutines write. The previous
+// checkpoint-then-io.Copy approach copied the live DB file byte-by-byte:
+// any write landing mid-copy (order paid, session created, audit row)
+// could tear pages and silently corrupt the backup — the one file ops
+// would reach for after losing the primary.
+//
+// Falls back to checkpoint+copy only if VACUUM INTO itself errors (e.g.
+// an old SQLite build), so backups keep flowing either way.
+func (r *Rotator) snapshot(ctx context.Context, dst string) error {
+	tmp := dst + ".tmp"
+	_ = os.Remove(tmp) // VACUUM INTO refuses to overwrite an existing file
+	_, verr := r.DB.Exec(ctx, "VACUUM INTO ?", tmp)
+	if verr == nil {
+		// Backups carry password hashes + payment data: clamp to 0600
+		// like the primary DB (VACUUM INTO creates with the umask).
+		_ = os.Chmod(tmp, 0o600)
+		// fsync before the rename publishes the file under its final
+		// name. VACUUM INTO writes the target with synchronous=OFF (it
+		// relies on the caller to make the result durable), so on the
+		// delayed-allocation filesystems routers use (ext4, f2fs) a
+		// power cut after the rename could leave a zero-length or
+		// partial "backup" wearing a valid snapshot name — the copyFile
+		// fallback below has fsynced for exactly this reason since
+		// v0.108.
+		if err := syncFile(tmp); err != nil {
+			_ = os.Remove(tmp)
+			return fmt.Errorf("fsync snapshot: %w", err)
+		}
+		return os.Rename(tmp, dst)
+	}
+	// A canceled context (shutdown mid-snapshot) is not a reason to fall
+	// back: the checkpoint below would also fail on the dead ctx, and
+	// copyFile would then duplicate the raw DB file WITHOUT a WAL
+	// checkpoint — exactly the torn/stale copy VACUUM INTO exists to
+	// prevent. Abort; the next scheduled pass will produce a real one.
+	if ctx.Err() != nil {
+		_ = os.Remove(tmp)
+		return verr
+	}
+	log.Printf("backup: vacuum into failed (%v); falling back to checkpoint+copy", verr)
+	_ = os.Remove(tmp)
 	if _, err := r.DB.Exec(ctx, "PRAGMA wal_checkpoint(TRUNCATE)"); err != nil {
 		log.Printf("backup: checkpoint failed: %v", err)
 	}
-	dst := filepath.Join(r.Dir, fmt.Sprintf("billing-%s.db", time.Now().Format("20060102-150405")))
-	if err := copyFile(r.DBPath, dst); err != nil {
-		log.Printf("backup: copy: %v", err)
-		return
-	}
-	log.Printf("backup: wrote %s", dst)
-	r.prune()
+	return copyFile(r.DBPath, dst)
 }
 
 func (r *Rotator) prune() {
@@ -84,6 +135,20 @@ func (r *Rotator) prune() {
 	var items []item
 	for _, e := range entries {
 		if e.IsDir() {
+			continue
+		}
+		// Orphaned .tmp from an interrupted snapshot (crash / power cut /
+		// disk full mid-write). The .db filter below skips them, so they
+		// used to accumulate forever and eat flash. A healthy snapshot
+		// holds its .tmp for well under a minute — anything older than an
+		// hour is garbage.
+		if strings.HasPrefix(e.Name(), "billing-") && strings.HasSuffix(e.Name(), ".db.tmp") {
+			if info, err := e.Info(); err == nil && time.Since(info.ModTime()) > time.Hour {
+				p := filepath.Join(r.Dir, e.Name())
+				if err := os.Remove(p); err == nil {
+					log.Printf("backup: removed stale temp file %s", p)
+				}
+			}
 			continue
 		}
 		if !strings.HasPrefix(e.Name(), "billing-") || !strings.HasSuffix(e.Name(), ".db") {
@@ -113,6 +178,20 @@ func (r *Rotator) prune() {
 	}
 }
 
+// syncFile fsyncs an already-written file by path (used for the VACUUM
+// INTO output, which SQLite hands us without any durability guarantee).
+func syncFile(path string) error {
+	f, err := os.OpenFile(path, os.O_RDWR, 0)
+	if err != nil {
+		return err
+	}
+	if err := f.Sync(); err != nil {
+		f.Close()
+		return err
+	}
+	return f.Close()
+}
+
 func copyFile(src, dst string) error {
 	in, err := os.Open(src)
 	if err != nil {
@@ -129,7 +208,18 @@ func copyFile(src, dst string) error {
 		os.Remove(tmp)
 		return err
 	}
+	// Flush to stable storage BEFORE the rename makes the file visible
+	// under the final name. Without the fsync, a power cut shortly after
+	// the rename could leave a zero-length or partially-written "backup"
+	// on filesystems with delayed allocation (ext4, f2fs — i.e. routers):
+	// the name says snapshot, the content says garbage.
+	if err := out.Sync(); err != nil {
+		out.Close()
+		os.Remove(tmp)
+		return err
+	}
 	if err := out.Close(); err != nil {
+		os.Remove(tmp) // don't leak the partial file on a failed flush
 		return err
 	}
 	return os.Rename(tmp, dst)

@@ -92,9 +92,7 @@ func (a *App) handleAdminSMSTest(w http.ResponseWriter, r *http.Request) {
 	if msg == "" {
 		msg = "router-billing test message from " + clientIP(r)
 	}
-	if len(msg) > 500 {
-		msg = msg[:500]
-	}
+	msg = truncateRunes(msg, 500)
 	if err := a.SendSMS(r.Context(), phone, msg); err != nil {
 		log.Printf("admin sms test %s: %v", phone, err)
 		a.DB.Audit(r.Context(), "admin", "sms_test_failed", phone,

@@ -3,12 +3,17 @@ package config
 import (
 	"crypto/subtle"
 	"fmt"
+	"net"
+	"net/url"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 
 	"golang.org/x/crypto/bcrypt"
 	"gopkg.in/yaml.v3"
+
+	"router-billing/internal/totp"
 )
 
 type Config struct {
@@ -80,6 +85,16 @@ type Security struct {
 	// /api/admin/orders/cancel-stale; this saves operators having to
 	// wire up cron. 0 (default) = disabled. Clamped to [1, 720] (1h .. 30d).
 	AutoCancelStaleOrderHours int `yaml:"auto_cancel_stale_order_hours,omitempty"`
+
+	// TrustedProxies lists reverse-proxy addresses (single IPs or CIDRs,
+	// e.g. "127.0.0.1" / "10.0.0.0/8") whose X-Forwarded-For header may be
+	// believed for the client IP. Requests arriving from anywhere else
+	// have the header ignored — otherwise any direct client could rotate
+	// a fake X-Forwarded-For to sidestep every per-IP rate limit and to
+	// forge the IPs recorded in the audit log. Empty (default) = never
+	// trust the header; deployments behind nginx/Caddy should list the
+	// proxy here to keep per-client rate-limit keying.
+	TrustedProxies []string `yaml:"trusted_proxies,omitempty"`
 }
 
 // AutoCancelStaleOrders returns the clamped hours window or 0 (disabled).
@@ -389,27 +404,140 @@ func (c *Config) applyDefaults() {
 }
 
 func (c *Config) validate() error {
-	if len(c.AdminList()) == 0 {
+	checks := []func() error{
+		c.validateAdmins,
+		c.validateTokens,
+		c.validateNetwork,
+		c.validatePlans,
+		c.validatePay,
+		c.validateFirewall,
+		c.validateDurations,
+		c.validateSecurity,
+		c.validateSMS,
+		c.validateWebhook,
+		c.validateWalledGarden,
+	}
+	for _, f := range checks {
+		if err := f(); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (c *Config) validateAdmins() error {
+	admins := c.AdminList()
+	if len(admins) == 0 {
 		return fmt.Errorf("at least one admin is required (set admin.* or admins[])")
 	}
-	for _, a := range c.AdminList() {
+	seen := map[string]bool{}
+	for _, a := range admins {
 		if a.Username == "" {
 			return fmt.Errorf("admin entry missing username")
 		}
+		if seen[a.Username] {
+			return fmt.Errorf("duplicate admin username %q (check admin: vs admins[])", a.Username)
+		}
+		seen[a.Username] = true
 		if a.Password == "" && a.PasswordHash == "" {
 			return fmt.Errorf("admin %q has no password or password_hash", a.Username)
 		}
+		if a.Password != "" && a.PasswordHash != "" {
+			return fmt.Errorf("admin %q sets both password and password_hash — keep only password_hash", a.Username)
+		}
+		if a.PasswordHash != "" {
+			// Catch "pasted the plaintext / a sha256 hex into password_hash"
+			// at load time instead of silently locking the admin out at login
+			// (bcrypt.CompareHashAndPassword never matches a non-bcrypt hash).
+			if _, err := bcrypt.Cost([]byte(a.PasswordHash)); err != nil {
+				return fmt.Errorf("admin %q: password_hash is not a bcrypt hash (%v); generate one with --gen-password-hash", a.Username, err)
+			}
+		} else if len(a.Password) < 8 {
+			return fmt.Errorf("admin %q: plaintext password must be at least 8 characters (prefer password_hash; see --gen-password-hash)", a.Username)
+		}
+		if a.TOTPSecret != "" {
+			// A non-base32 secret means Verify() always returns false —
+			// i.e. permanent 2FA lockout discovered only at the login prompt.
+			if _, err := totp.Code(a.TOTPSecret, 0); err != nil {
+				return fmt.Errorf("admin %q: totp_secret is not valid base32 (%v); generate one with --gen-totp-secret", a.Username, err)
+			}
+		}
 	}
+	return nil
+}
+
+func (c *Config) validateTokens() error {
+	seen := map[string]int{}
+	for i, t := range c.APITokens {
+		name := t.Label
+		if name == "" {
+			name = fmt.Sprintf("entry #%d", i+1)
+		}
+		if strings.TrimSpace(t.Token) == "" {
+			// MatchAPITokenFull skips empty tokens, so the operator would
+			// believe a token is configured while every request 401s.
+			return fmt.Errorf("api_tokens %s: token is empty (the entry would be silently ignored)", name)
+		}
+		if len(t.Token) < 16 {
+			return fmt.Errorf("api_tokens %s: token must be at least 16 characters — use a long random string", name)
+		}
+		if j, dup := seen[t.Token]; dup {
+			return fmt.Errorf("api_tokens %s: duplicate token value (same as entry #%d)", name, j+1)
+		}
+		seen[t.Token] = i
+		if t.RateLimitPerMin < 0 {
+			return fmt.Errorf("api_tokens %s: rate_limit_per_min must be >= 0", name)
+		}
+	}
+	if c.MetricsToken != "" && len(c.MetricsToken) < 8 {
+		return fmt.Errorf("metrics_token must be at least 8 characters when set (leave empty for a public /metrics)")
+	}
+	return nil
+}
+
+func (c *Config) validateNetwork() error {
+	_, port, err := net.SplitHostPort(c.Listen)
+	if err != nil {
+		return fmt.Errorf("listen %q: %v (want \"host:port\" or \":port\")", c.Listen, err)
+	}
+	if p, err := strconv.Atoi(port); err != nil || p < 1 || p > 65535 {
+		return fmt.Errorf("listen %q: port must be a number in 1..65535", c.Listen)
+	}
+	if c.PortalPort < 1 || c.PortalPort > 65535 {
+		return fmt.Errorf("portal_port %d: must be in 1..65535", c.PortalPort)
+	}
+	if h := strings.TrimSpace(c.PortalHost); strings.Contains(h, "://") || strings.ContainsAny(h, "/ \t") {
+		return fmt.Errorf("portal_host %q: must be a bare hostname or IP (no scheme, path or spaces)", c.PortalHost)
+	}
+	return nil
+}
+
+func (c *Config) validatePlans() error {
 	for k, p := range c.Plans {
+		if strings.TrimSpace(k) == "" {
+			return fmt.Errorf("plans: plan key must not be empty")
+		}
 		if p.Days <= 0 || p.PriceCents <= 0 {
 			return fmt.Errorf("plan %q: days and price_cents must be positive", k)
 		}
+		if strings.TrimSpace(p.Label) == "" {
+			return fmt.Errorf("plan %q: label must not be empty", k)
+		}
 	}
+	return nil
+}
+
+func (c *Config) validatePay() error {
 	if c.Pay.WeChat.Enabled {
 		if c.Pay.WeChat.MchID == "" || c.Pay.WeChat.AppID == "" ||
 			c.Pay.WeChat.APIv3Key == "" || c.Pay.WeChat.SerialNo == "" ||
 			c.Pay.WeChat.PrivateKeyPath == "" || c.Pay.WeChat.NotifyURL == "" {
 			return fmt.Errorf("pay.wechat enabled but credentials incomplete")
+		}
+		// AES-256-GCM requires exactly 32 bytes; otherwise every callback
+		// fails at aes.NewCipher instead of at --check-config/startup.
+		if len(c.Pay.WeChat.APIv3Key) != 32 {
+			return fmt.Errorf("pay.wechat api_v3_key must be exactly 32 bytes (got %d)", len(c.Pay.WeChat.APIv3Key))
 		}
 	}
 	if c.Pay.Alipay.Enabled {
@@ -419,6 +547,160 @@ func (c *Config) validate() error {
 		}
 		if c.Pay.Alipay.Gateway == "" {
 			c.Pay.Alipay.Gateway = "https://openapi.alipay.com/gateway.do"
+		}
+	}
+	return nil
+}
+
+// validateFirewall mirrors firewall.NewBackend's accepted names so a typo
+// fails --check-config instead of log.Fatal'ing at boot.
+//
+// Table/set names are also validated: they are interpolated verbatim into
+// `nft -f` scripts and `ipset restore` payloads, so whitespace, braces or
+// newlines in a name would change the script's *structure* instead of
+// failing cleanly (defense-in-depth — the config file is root-owned, but a
+// typo'd name should fail at --check-config, not corrupt a firewall
+// transaction at 3am). The ipset backend additionally caps the set name so
+// the atomic-swap scratch set ("<name>_swp") still fits the kernel's
+// 31-char IPSET_MAXNAMELEN — a longer name made every Sync fail at runtime
+// with an opaque restore error.
+func (c *Config) validateFirewall() error {
+	backend := strings.ToLower(strings.TrimSpace(c.Firewall.Backend))
+	switch backend {
+	case "", "nft", "nftables", "ipt", "iptables", "ipset":
+	default:
+		return fmt.Errorf("firewall.backend %q: must be nftables or iptables", c.Firewall.Backend)
+	}
+	switch c.Firewall.Table {
+	case "ip", "ip6", "inet", "bridge", "arp", "netdev":
+	default:
+		return fmt.Errorf("firewall.table %q: must be one of ip, ip6, inet, bridge, arp, netdev", c.Firewall.Table)
+	}
+	if !validFirewallName(c.Firewall.TableName) {
+		return fmt.Errorf("firewall.table_name %q: only letters, digits, '_' and '-' are allowed", c.Firewall.TableName)
+	}
+	if !validFirewallName(c.Firewall.SetName) {
+		return fmt.Errorf("firewall.set_name %q: only letters, digits, '_' and '-' are allowed", c.Firewall.SetName)
+	}
+	switch backend {
+	case "ipt", "iptables", "ipset":
+		if len(c.Firewall.SetName) > 27 {
+			return fmt.Errorf("firewall.set_name %q: max 27 chars on the iptables/ipset backend (the \"_swp\" swap scratch set must fit ipset's 31-char name limit)", c.Firewall.SetName)
+		}
+	}
+	return nil
+}
+
+// validFirewallName allows [A-Za-z0-9_-]+ — the safe common subset for
+// nftables identifiers and ipset names.
+func validFirewallName(s string) bool {
+	if s == "" {
+		return false
+	}
+	for _, r := range s {
+		switch {
+		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9', r == '_', r == '-':
+		default:
+			return false
+		}
+	}
+	return true
+}
+
+// validateDurations rejects negative intervals. applyDefaults only fills
+// zero values, so a negative typo used to pass --check-config and then be
+// silently replaced by a hardcoded fallback deep in each goroutine.
+func (c *Config) validateDurations() error {
+	if c.Scheduler.ExpireCheckInterval < 0 {
+		return fmt.Errorf("scheduler.expire_check_interval must not be negative")
+	}
+	if c.Backup.Interval < 0 {
+		return fmt.Errorf("backup.interval must not be negative")
+	}
+	if c.Backup.RetainDays < 0 {
+		return fmt.Errorf("backup.retain_days must not be negative")
+	}
+	if c.WalledGarden.RefreshInterval < 0 {
+		return fmt.Errorf("walled_garden.refresh_interval must not be negative")
+	}
+	return nil
+}
+
+func (c *Config) validateSecurity() error {
+	s := c.Security
+	switch strings.ToLower(strings.TrimSpace(s.PasswordStrength)) {
+	case "", "lax", "strict":
+	default:
+		// Anything else used to silently mean "lax" — a security downgrade
+		// hidden behind a typo like "strong" or "stricter".
+		return fmt.Errorf("security.password_strength %q: must be \"\", \"lax\" or \"strict\"", s.PasswordStrength)
+	}
+	if s.HSTSMaxAgeSeconds < 0 {
+		return fmt.Errorf("security.hsts_max_age_seconds must not be negative")
+	}
+	if s.AdminSessionHours < 0 || s.AdminSessionHours > 168 {
+		return fmt.Errorf("security.admin_session_hours %d: must be 0 (default) or 1..168", s.AdminSessionHours)
+	}
+	if s.UserSessionDays < 0 || s.UserSessionDays > 365 {
+		return fmt.Errorf("security.user_session_days %d: must be 0 (default) or 1..365", s.UserSessionDays)
+	}
+	if s.AuditLogKeep != 0 && (s.AuditLogKeep < 1000 || s.AuditLogKeep > 1000000) {
+		return fmt.Errorf("security.audit_log_keep %d: must be 0 (default) or 1000..1000000", s.AuditLogKeep)
+	}
+	if s.AutoCancelStaleOrderHours < 0 || s.AutoCancelStaleOrderHours > 720 {
+		return fmt.Errorf("security.auto_cancel_stale_order_hours %d: must be 0 (disabled) or 1..720", s.AutoCancelStaleOrderHours)
+	}
+	return nil
+}
+
+func (c *Config) validateSMS() error {
+	switch strings.ToLower(strings.TrimSpace(c.SMS.Provider)) {
+	case "", "none", "off", "console":
+	case "aliyun":
+		a := c.SMS.Aliyun
+		if a.AccessKeyID == "" || a.AccessKeySecret == "" || a.SignName == "" || a.TemplateCode == "" {
+			// buildSMSSender degrades this to "disabled" with only a log
+			// line — password-reset SMS would just be missing in prod.
+			return fmt.Errorf("sms.provider aliyun: access_key_id, access_key_secret, sign_name and template_code are all required")
+		}
+	default:
+		return fmt.Errorf("sms.provider %q: must be \"\", \"none\", \"off\", \"console\" or \"aliyun\"", c.SMS.Provider)
+	}
+	if c.SMS.ExpiryReminderDays < 0 || c.SMS.ExpiryReminderDays > 30 {
+		return fmt.Errorf("sms.expiry_reminder_days %d: must be 0 (default) or 1..30", c.SMS.ExpiryReminderDays)
+	}
+	if c.SMS.AdminDigestHour < 0 || c.SMS.AdminDigestHour > 24 {
+		return fmt.Errorf("sms.admin_digest_hour %d: must be 0 (disabled) or 1..24", c.SMS.AdminDigestHour)
+	}
+	return nil
+}
+
+func (c *Config) validateWebhook() error {
+	if c.Webhook.URL == "" {
+		return nil
+	}
+	u, err := url.Parse(c.Webhook.URL)
+	if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
+		return fmt.Errorf("webhook.url %q: must be an absolute http(s) URL", c.Webhook.URL)
+	}
+	if c.Webhook.Secret == "" {
+		// Unsigned webhooks can't be verified by the receiver — anyone who
+		// finds the endpoint can forge payment/grant events.
+		return fmt.Errorf("webhook.url is set but webhook.secret is empty; set a long random secret so receivers can verify X-Router-Billing-Signature")
+	}
+	return nil
+}
+
+func (c *Config) validateWalledGarden() error {
+	for _, d := range c.WalledGarden.Domains {
+		h := strings.TrimSpace(d)
+		if h == "" {
+			return fmt.Errorf("walled_garden.domains: empty entry")
+		}
+		if strings.Contains(h, "://") || strings.ContainsAny(h, "/ \t") {
+			// A pasted URL never resolves — the resolver would retry the
+			// bogus lookup forever while payments stay unreachable.
+			return fmt.Errorf("walled_garden.domains %q: must be a bare domain (no scheme or path)", d)
 		}
 	}
 	return nil

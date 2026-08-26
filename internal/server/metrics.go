@@ -1,6 +1,7 @@
 package server
 
 import (
+	"crypto/subtle"
 	"fmt"
 	"net/http"
 	"os"
@@ -11,8 +12,10 @@ import (
 // `metrics_token` in config; if unset, the endpoint is open.
 func (a *App) handleMetrics(w http.ResponseWriter, r *http.Request) {
 	if tok := a.Cfg.MetricsToken; tok != "" {
+		// Constant-time compare, same as the API-token path — a plain
+		// string == lets a remote caller confirm the token byte-by-byte.
 		got := r.Header.Get("Authorization")
-		if got != "Bearer "+tok {
+		if subtle.ConstantTimeCompare([]byte(got), []byte("Bearer "+tok)) != 1 {
 			http.Error(w, "unauthorized", http.StatusUnauthorized)
 			return
 		}

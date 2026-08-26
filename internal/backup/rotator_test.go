@@ -2,10 +2,14 @@ package backup
 
 import (
 	"context"
+	"database/sql"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
+
+	"router-billing/internal/db"
 )
 
 func TestCopyFileAtomic(t *testing.T) {
@@ -118,6 +122,165 @@ func TestPruneAlwaysKeepsLatestEvenIfOld(t *testing.T) {
 
 	if _, err := os.Stat(p); os.IsNotExist(err) {
 		t.Error("the only file should be kept (RetainDays >=1)")
+	}
+}
+
+func TestSnapshotProducesConsistentBackup(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "billing.db")
+	dbx, err := db.Open(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { dbx.Close() })
+	ctx := context.Background()
+	for i := 0; i < 5; i++ {
+		if _, err := dbx.Exec(ctx,
+			`INSERT INTO audit_log (actor, action, target, detail) VALUES ('t','snap','x','row')`); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	r := &Rotator{DB: dbx, DBPath: dbPath, Dir: filepath.Join(dir, "backups"), RetainDays: 7}
+	if err := os.MkdirAll(r.Dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	dst := filepath.Join(r.Dir, "billing-test.db")
+	if err := r.snapshot(ctx, dst); err != nil {
+		t.Fatalf("snapshot: %v", err)
+	}
+	// No .tmp left behind.
+	if _, err := os.Stat(dst + ".tmp"); !os.IsNotExist(err) {
+		t.Error(".tmp left behind after successful snapshot")
+	}
+	// Backups hold password hashes — must be private.
+	if info, err := os.Stat(dst); err != nil || info.Mode().Perm() != 0o600 {
+		t.Errorf("backup mode = %v (err=%v); want 0600", info.Mode().Perm(), err)
+	}
+
+	// The snapshot must be a valid, complete database on its own —
+	// openable, integrity-clean, and carrying the rows.
+	bk, err := sql.Open("sqlite", dst)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { bk.Close() })
+	var integrity string
+	if err := bk.QueryRow(`PRAGMA integrity_check`).Scan(&integrity); err != nil {
+		t.Fatalf("integrity_check: %v", err)
+	}
+	if !strings.EqualFold(integrity, "ok") {
+		t.Errorf("integrity_check = %q; want ok", integrity)
+	}
+	var n int
+	if err := bk.QueryRow(`SELECT COUNT(*) FROM audit_log WHERE action='snap'`).Scan(&n); err != nil {
+		t.Fatal(err)
+	}
+	if n != 5 {
+		t.Errorf("backup has %d seeded rows; want 5", n)
+	}
+}
+
+func TestSnapshotAbortsOnCanceledContext(t *testing.T) {
+	// When the snapshot's ctx is already dead (shutdown), VACUUM INTO
+	// fails — and the fallback must NOT kick in: a raw copy without a WAL
+	// checkpoint is exactly the torn/stale backup the VACUUM path exists
+	// to prevent. Expect an error and no backup file.
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "billing.db")
+	dbx, err := db.Open(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { dbx.Close() })
+	backups := filepath.Join(dir, "backups")
+	if err := os.MkdirAll(backups, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	r := &Rotator{DB: dbx, DBPath: dbPath, Dir: backups, RetainDays: 7}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel() // dead before the snapshot starts
+
+	dst := filepath.Join(backups, "billing-canceled.db")
+	if err := r.snapshot(ctx, dst); err == nil {
+		t.Fatal("snapshot with canceled ctx should error, not fall back to raw copy")
+	}
+	if _, err := os.Stat(dst); !os.IsNotExist(err) {
+		t.Error("no backup file should exist after a canceled snapshot")
+	}
+	if _, err := os.Stat(dst + ".tmp"); !os.IsNotExist(err) {
+		t.Error("canceled snapshot should clean up its .tmp")
+	}
+}
+
+func TestOncePrunesEvenWhenSnapshotFails(t *testing.T) {
+	// A full flash partition fails the snapshot — but prune must still run
+	// so old backups are freed and the NEXT attempt can succeed. Simulate
+	// total snapshot failure with a closed DB handle + missing source file.
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "billing.db")
+	dbx, err := db.Open(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	dbx.Close()       // VACUUM INTO + checkpoint both error
+	os.Remove(dbPath) // fallback copy errors too
+	backups := filepath.Join(dir, "backups")
+	if err := os.MkdirAll(backups, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	old := time.Now().AddDate(0, 0, -10)
+	for _, name := range []string{"billing-a.db", "billing-b.db", "billing-c.db"} {
+		p := filepath.Join(backups, name)
+		if err := os.WriteFile(p, []byte("x"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Chtimes(p, old, old); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	r := &Rotator{DB: dbx, DBPath: dbPath, Dir: backups, RetainDays: 1}
+	r.once(context.Background())
+
+	entries, _ := os.ReadDir(backups)
+	var remaining []string
+	for _, e := range entries {
+		remaining = append(remaining, e.Name())
+	}
+	// RetainDays=1 → keep the single newest, prune the two older ones —
+	// even though the snapshot itself failed.
+	if len(remaining) != 1 {
+		t.Errorf("expected prune to run despite snapshot failure; %d files remain: %v",
+			len(remaining), remaining)
+	}
+}
+
+func TestPruneRemovesStaleTmpFiles(t *testing.T) {
+	dir := t.TempDir()
+	r := &Rotator{Dir: dir, RetainDays: 7}
+
+	stale := filepath.Join(dir, "billing-20260101-000000.db.tmp")
+	fresh := filepath.Join(dir, "billing-20260825-060000.db.tmp")
+	for _, p := range []string{stale, fresh} {
+		if err := os.WriteFile(p, []byte("partial"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	twoHoursAgo := time.Now().Add(-2 * time.Hour)
+	if err := os.Chtimes(stale, twoHoursAgo, twoHoursAgo); err != nil {
+		t.Fatal(err)
+	}
+
+	r.prune()
+
+	if _, err := os.Stat(stale); !os.IsNotExist(err) {
+		t.Error("stale .tmp from an interrupted snapshot should be removed")
+	}
+	if _, err := os.Stat(fresh); err != nil {
+		t.Error("fresh .tmp (snapshot possibly in progress) must be kept")
 	}
 }
 
