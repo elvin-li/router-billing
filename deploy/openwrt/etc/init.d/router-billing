@@ -14,8 +14,14 @@ start_service() {
     [ -f "$CONF" ] || { echo "missing $CONF" >&2; exit 1; }
 
     # Ensure firewall rules are in place before the daemon starts.
-    [ -x /usr/share/router-billing/firewall-billing.sh ] && \
-        /usr/share/router-billing/firewall-billing.sh apply || true
+    # Non-fatal (the admin UI is still useful without them) but LOUD —
+    # pre-v0.104 the bare `|| true` swallowed a hard nft parse error and
+    # every Paid_WiFi device was silently online for free.
+    if [ -x /usr/share/router-billing/firewall-billing.sh ]; then
+        /usr/share/router-billing/firewall-billing.sh apply || \
+            logger -t router-billing -p daemon.err \
+                "firewall apply FAILED — portal redirect / billing rules are missing"
+    fi
 
     procd_open_instance
     procd_set_param command "$PROG" --config "$CONF"

@@ -33,16 +33,22 @@ func (a *App) handleAdminBackup(w http.ResponseWriter, r *http.Request) {
 	a.streamBackup(w, r, "admin", clientIP(r))
 }
 
-// GET /api/admin/backup  Bearer <any-token>
+// GET /api/admin/backup  Bearer <write-token>
 //
 // Programmatic equivalent of /admin/backup. Streams the SQLite file
 // after a WAL checkpoint. Useful for off-router backup automation:
 // nightly `curl -O -H "Authorization: Bearer $RB_TOKEN" .../api/admin/backup`.
 //
-// Read-only token IS acceptable here — the DB file contains the operator's
-// own data plus user records. Anyone with a read token can already exfil
-// user lists via /api/admin/users, so the backup endpoint isn't a wider
-// surface. Write-only restore still goes through /admin/backup/restore.
+// Read-only tokens are REJECTED (403) even though the method is GET.
+// The raw DB file contains password hashes, TOTP secrets, full unredeemed
+// voucher codes, and SMS message bodies (session and trusted-device
+// tokens are stored hashed since v0.113, but the rest stands) — the
+// material every
+// JSON read endpoint strips (apiUserSummary, apiVoucher code prefix,
+// apiSession without token). A read-only token that can download the
+// backup would be a full-scope token in disguise, so the route is gated
+// by requireAPITokenPrivileged. Restore still goes through
+// /admin/backup/restore (cookie + CSRF).
 //
 // Audit row: `backup` with size + via=api.
 func (a *App) handleAPIBackup(w http.ResponseWriter, r *http.Request, actor string) {
@@ -53,13 +59,31 @@ func (a *App) handleAPIBackup(w http.ResponseWriter, r *http.Request, actor stri
 	a.streamBackup(w, r, actor, clientIP(r))
 }
 
-// streamBackup is the shared body — checkpoint + stream + audit row.
+// streamBackup is the shared body — consistent snapshot + stream + audit row.
 // `actor` distinguishes UI ("admin") from API (Bearer label) in audit.
+//
+// The snapshot goes through `VACUUM INTO` for the same reason the nightly
+// rotator does (v0.109): checkpoint-then-copy reads the LIVE database file
+// byte-by-byte, so any write landing mid-download (order paid, session
+// created, audit row) can tear pages and silently corrupt the very file an
+// operator will reach for after losing the primary. Only if VACUUM INTO
+// itself errors (ancient SQLite) do we fall back to checkpoint+copy.
 func (a *App) streamBackup(w http.ResponseWriter, r *http.Request, actor, ip string) {
-	if _, err := a.DB.Exec(r.Context(), "PRAGMA wal_checkpoint(TRUNCATE)"); err != nil {
-		log.Printf("backup: checkpoint failed: %v", err)
+	snap := filepath.Join(filepath.Dir(a.Cfg.DBPath),
+		fmt.Sprintf(".download-%s.db.tmp", time.Now().Format("20060102-150405.000000000")))
+	_ = os.Remove(snap) // VACUUM INTO refuses to overwrite
+	path := snap
+	if _, verr := a.DB.Exec(r.Context(), "VACUUM INTO ?", snap); verr != nil {
+		log.Printf("backup: vacuum into failed (%v); falling back to checkpoint+copy", verr)
+		_ = os.Remove(snap)
+		path = a.Cfg.DBPath
+		if _, err := a.DB.Exec(r.Context(), "PRAGMA wal_checkpoint(TRUNCATE)"); err != nil {
+			log.Printf("backup: checkpoint failed: %v", err)
+		}
+	} else {
+		defer os.Remove(snap)
 	}
-	f, err := os.Open(a.Cfg.DBPath)
+	f, err := os.Open(path)
 	if err != nil {
 		http.Error(w, "open db: "+err.Error(), http.StatusInternalServerError)
 		return

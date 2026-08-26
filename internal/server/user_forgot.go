@@ -203,8 +203,13 @@ func (a *App) handleUserForgotPasswordVerify(w http.ResponseWriter, r *http.Requ
 		return
 	}
 	if user == nil || user.Suspended {
-		// Uniform response — also matches the silent-success branch above.
-		a.renderForgot(w, r, 2, phone, "bad_code")
+		// Uniform response with the row==nil branch below. Answering
+		// "bad_code" here (as pre-v0.106) while a real-but-idle account got
+		// "expired" let anyone probe /verify with a made-up code and learn
+		// whether a phone is registered — no SMS ever sent. Both no-account
+		// and no-active-reset now say "expired", and neither path runs
+		// bcrypt, so the timing is uniform too.
+		a.renderForgot(w, r, 2, phone, "expired")
 		return
 	}
 	row, err := a.DB.GetActivePasswordReset(r.Context(), user.ID)
@@ -244,6 +249,9 @@ func (a *App) handleUserForgotPasswordVerify(w http.ResponseWriter, r *http.Requ
 	_ = a.DB.DeletePasswordReset(r.Context(), row.ID)
 	if _, err := a.DB.DeleteSessionsByUserID(r.Context(), user.ID); err != nil {
 		log.Printf("forgot-verify drop sessions %d: %v", user.ID, err)
+	}
+	if err := a.DB.DeleteAllTrustedDevices(r.Context(), user.ID); err != nil {
+		log.Printf("forgot-verify drop trusted devices %d: %v", user.ID, err)
 	}
 	a.DB.Audit(r.Context(), "user:"+user.Phone, "password_reset", "", "via=sms ip="+clientIP(r))
 	http.Redirect(w, r, "/user/login?ok=password_reset", http.StatusSeeOther)

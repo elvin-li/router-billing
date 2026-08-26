@@ -161,6 +161,9 @@ func (w *WeChat) Query(ctx context.Context, outTradeNo string) (*PaidNotice, boo
 		OutTradeNo    string `json:"out_trade_no"`
 		TransactionID string `json:"transaction_id"`
 		TradeState    string `json:"trade_state"`
+		Amount        struct {
+			Total int `json:"total"`
+		} `json:"amount"`
 	}
 	if err := json.Unmarshal(body, &q); err != nil {
 		return nil, false, fmt.Errorf("wechat query: parse: %w", err)
@@ -169,9 +172,10 @@ func (w *WeChat) Query(ctx context.Context, outTradeNo string) (*PaidNotice, boo
 		return nil, false, nil
 	}
 	return &PaidNotice{
-		OrderNo:  q.OutTradeNo,
-		TradeNo:  q.TransactionID,
-		Provider: "wechat",
+		OrderNo:     q.OutTradeNo,
+		TradeNo:     q.TransactionID,
+		Provider:    "wechat",
+		AmountCents: q.Amount.Total,
 	}, true, nil
 }
 
@@ -348,6 +352,9 @@ func (w *WeChat) refreshPlatformCerts(ctx context.Context) error {
 		if err != nil {
 			continue
 		}
+		if len(d.EncryptCertificate.Nonce) != aead.NonceSize() {
+			continue // wrong-size nonce would panic aead.Open
+		}
 		plain, err := aead.Open(nil, []byte(d.EncryptCertificate.Nonce), ct,
 			[]byte(d.EncryptCertificate.AssociatedData))
 		if err != nil {
@@ -381,6 +388,12 @@ func (w *WeChat) DecodeNotify(body []byte) (*PaidNotice, error) {
 	if err := json.Unmarshal(body, &env); err != nil {
 		return nil, fmt.Errorf("%w: %v", ErrInvalidPayload, err)
 	}
+	// Only payment-success events may finalize an order. Other event types
+	// (e.g. REFUND.SUCCESS) carry differently-shaped resources; don't even
+	// try to interpret them as a payment.
+	if env.EventType != "TRANSACTION.SUCCESS" {
+		return nil, fmt.Errorf("%w: unexpected event_type %q", ErrInvalidPayload, env.EventType)
+	}
 	if env.Resource.Algorithm != "AEAD_AES_256_GCM" {
 		return nil, fmt.Errorf("%w: unsupported algo %q", ErrInvalidPayload, env.Resource.Algorithm)
 	}
@@ -395,6 +408,11 @@ func (w *WeChat) DecodeNotify(body []byte) (*PaidNotice, error) {
 	aead, err := cipher.NewGCM(block)
 	if err != nil {
 		return nil, err
+	}
+	// GCM Open panics (not errors) on a wrong-size nonce, and the nonce here is
+	// attacker-controlled input from the notification body. Reject early.
+	if len(env.Resource.Nonce) != aead.NonceSize() {
+		return nil, fmt.Errorf("%w: bad nonce length %d", ErrInvalidPayload, len(env.Resource.Nonce))
 	}
 	plain, err := aead.Open(nil, []byte(env.Resource.Nonce), ct, []byte(env.Resource.AssociatedData))
 	if err != nil {
@@ -411,9 +429,10 @@ func (w *WeChat) DecodeNotify(body []byte) (*PaidNotice, error) {
 		return nil, fmt.Errorf("trade_state=%s", res.TradeState)
 	}
 	return &PaidNotice{
-		OrderNo:  res.OutTradeNo,
-		TradeNo:  res.TransactionID,
-		Provider: "wechat",
+		OrderNo:     res.OutTradeNo,
+		TradeNo:     res.TransactionID,
+		Provider:    "wechat",
+		AmountCents: res.Amount.Total,
 	}, nil
 }
 

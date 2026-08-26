@@ -11,10 +11,14 @@ import (
 type fakeExpirer struct {
 	calls atomic.Int32
 	err   error
+	panic bool
 }
 
 func (f *fakeExpirer) ExpireDue(_ context.Context) (int, error) {
 	f.calls.Add(1)
+	if f.panic {
+		panic("expirer exploded")
+	}
 	return 0, f.err
 }
 
@@ -68,6 +72,60 @@ func TestRunSurvivesExpirerError(t *testing.T) {
 	// Errors must NOT stop the cron.
 	if got := e.calls.Load(); got < 3 {
 		t.Errorf("expected ≥3 calls even with errors; got %d", got)
+	}
+}
+
+func TestRunSurvivesExpirerPanic(t *testing.T) {
+	// A panic in one expiry pass must not kill the cron (an unrecovered
+	// panic here would take the whole process — and the paying users'
+	// connectivity enforcement — down with it).
+	e := &fakeExpirer{panic: true}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() { Run(ctx, e, 20*time.Millisecond); close(done) }()
+	time.Sleep(90 * time.Millisecond)
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("Run did not exit after ctx cancel")
+	}
+	if got := e.calls.Load(); got < 3 {
+		t.Errorf("expected ≥3 calls even when every pass panics; got %d", got)
+	}
+}
+
+type fakeExpirerResyncer struct {
+	fakeExpirer
+	resyncCalls atomic.Int32
+	resyncErr   error
+}
+
+func (f *fakeExpirerResyncer) Resync(_ context.Context) error {
+	f.resyncCalls.Add(1)
+	return f.resyncErr
+}
+
+// When the Expirer also implements Resyncer, every tick reconciles the
+// firewall set (initial call is expire-only — main.go already resyncs at
+// boot). A resync error must not stop the loop either.
+func TestRunResyncsWhenSupported(t *testing.T) {
+	e := &fakeExpirerResyncer{resyncErr: errors.New("nft flake")}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() { Run(ctx, e, 20*time.Millisecond); close(done) }()
+	time.Sleep(90 * time.Millisecond)
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("Run did not exit after ctx cancel")
+	}
+	if got := e.resyncCalls.Load(); got < 2 {
+		t.Errorf("expected ≥2 Resync calls; got %d", got)
+	}
+	if got := e.calls.Load(); got < 3 {
+		t.Errorf("ExpireDue should keep running despite resync errors; got %d", got)
 	}
 }
 

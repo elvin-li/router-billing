@@ -94,6 +94,45 @@ func TestUserMeShowsSignOutOthersButtonWhenMultipleSessions(t *testing.T) {
 	}
 }
 
+func TestPasswordChangeKillsOtherSessions(t *testing.T) {
+	app := setupTestApp(t)
+	h := app.Routes()
+
+	res, _ := do(t, h, "POST", "/user/register",
+		url.Values{"phone": {"13800139053"}, "password": {"old-pw-1"}}, nil)
+	first := cookieJar(res)
+	res2, _ := do(t, h, "GET", "/user/me", nil, first)
+	for k, v := range cookieJar(res2) {
+		first[k] = v
+	}
+
+	res3, _ := do(t, h, "POST", "/user/login",
+		url.Values{"phone": {"13800139053"}, "password": {"old-pw-1"}}, nil)
+	second := cookieJar(res3)
+	if second[userCookieName] == "" || second[userCookieName] == first[userCookieName] {
+		t.Fatal("need two distinct sessions")
+	}
+
+	res4, _ := do(t, h, "POST", "/user/password",
+		url.Values{
+			"_csrf":        {first[csrfCookieName]},
+			"old_password": {"old-pw-1"},
+			"new_password": {"new-pw-1"},
+		}, first)
+	if !strings.Contains(res4.Header.Get("Location"), "ok=password") {
+		t.Fatalf("password change redirect: %s", res4.Header.Get("Location"))
+	}
+
+	res5, _ := do(t, h, "GET", "/user/me", nil, first)
+	if res5.StatusCode != 200 {
+		t.Errorf("changing browser should stay logged in; got %d", res5.StatusCode)
+	}
+	res6, _ := do(t, h, "GET", "/user/me", nil, second)
+	if res6.StatusCode != 303 {
+		t.Errorf("other session must die after password change; got %d", res6.StatusCode)
+	}
+}
+
 func TestCountUserSessionsReflectsExpiry(t *testing.T) {
 	app := setupTestApp(t)
 	ctx := context.Background()

@@ -77,35 +77,56 @@ func (m *IPSetManager) Remove(ctx context.Context, mac string) error {
 	return m.run(ctx, "del", m.Set, mac, "-exist")
 }
 
-// Sync replaces all elements atomically using `ipset restore` (single
-// kernel transaction; reads stay valid throughout).
+// Sync replaces all elements via the build-aside-and-swap pattern.
+//
+// `ipset restore` is NOT one kernel transaction — it replays each line as a
+// separate netlink op. The old flush-then-add payload therefore exposed an
+// empty/partial set to iptables lookups mid-restore, and a failure after
+// the flush left every paying MAC locked out until the next resync. Now the
+// new membership is staged in a scratch set and `swap` (which IS atomic)
+// exchanges the contents; readers see either the old or the new set, never
+// the gap, and a failed restore leaves the live set untouched.
 func (m *IPSetManager) Sync(ctx context.Context, macs []string) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	// Build a restore script that flushes + adds in one shot.
-	var b strings.Builder
-	fmt.Fprintf(&b, "flush %s\n", m.Set)
-	for _, mac := range macs {
-		if !validMAC(mac) {
-			log.Printf("firewall(ipset): skip invalid mac %q during sync", mac)
-			continue
-		}
-		fmt.Fprintf(&b, "add %s %s\n", m.Set, mac)
-	}
+	script := ipsetSwapRestore(m.Set, macs)
 	if m.dryRun {
-		log.Printf("firewall(ipset dry-run): restore <<EOF\n%sEOF", b.String())
+		log.Printf("firewall(ipset dry-run): restore <<EOF\n%sEOF", script)
 		return nil
 	}
 	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, m.IPSetBin, "restore", "-exist") //nolint:gosec // IPSetBin from LookPath; payload is internally built
-	cmd.Stdin = strings.NewReader(b.String())
+	cmd.Stdin = strings.NewReader(script)
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
 	if err := cmd.Run(); err != nil {
 		return fmt.Errorf("ipset restore: %w (%s)", err, strings.TrimSpace(stderr.String()))
 	}
 	return nil
+}
+
+// ipsetSwapRestore builds the `ipset restore` payload implementing an
+// atomic membership replacement: create+flush a scratch set with the SAME
+// type/options as EnsureSet (swap requires identical types), add the new
+// members, swap, destroy the scratch. Invalid MACs are dropped, never
+// emitted into the payload.
+func ipsetSwapRestore(set string, macs []string) string {
+	tmp := set + "_swp" // ipset names are capped at 31 chars; "mac_paid_swp" is fine
+	var b strings.Builder
+	fmt.Fprintf(&b, "create %s hash:mac counters -exist\n", set) // in case Sync runs before EnsureSet
+	fmt.Fprintf(&b, "create %s hash:mac counters -exist\n", tmp)
+	fmt.Fprintf(&b, "flush %s\n", tmp) // scratch may survive a previous crash
+	for _, mac := range macs {
+		if !validMAC(mac) {
+			log.Printf("firewall(ipset): skip invalid mac %q during sync", mac)
+			continue
+		}
+		fmt.Fprintf(&b, "add %s %s\n", tmp, mac)
+	}
+	fmt.Fprintf(&b, "swap %s %s\n", tmp, set)
+	fmt.Fprintf(&b, "destroy %s\n", tmp)
+	return b.String()
 }
 
 // List returns currently-present MACs (uppercase).

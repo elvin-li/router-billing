@@ -2,6 +2,7 @@ package server
 
 import (
 	"context"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -22,12 +23,14 @@ func TestAdminTestWebhookEnqueuesEvent(t *testing.T) {
 	var bodyMu sync.Mutex
 	var lastBody string
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		atomic.AddInt32(&hits, 1)
-		b := make([]byte, 1024)
-		n, _ := r.Body.Read(b)
+		// Read the FULL body (a single Read may return a partial chunk) and
+		// store it BEFORE bumping hits — the waiter below treats hits≥1 as
+		// "lastBody is ready", so the old order was a checked-then-empty race.
+		b, _ := io.ReadAll(r.Body)
 		bodyMu.Lock()
-		lastBody = string(b[:n])
+		lastBody = string(b)
 		bodyMu.Unlock()
+		atomic.AddInt32(&hits, 1)
 		w.WriteHeader(200)
 	}))
 	defer srv.Close()

@@ -23,6 +23,10 @@ func enrollUser2FA(t *testing.T, h http.Handler, app *App, phone, password strin
 	_, body := do(t, h, "POST", "/user/2fa/confirm",
 		url.Values{"_csrf": {csrf}, "code": {code}}, jar)
 	codes = scrapeBackupCodes(t, body)
+	// Confirm consumed this timestep (one-time use); callers legitimately
+	// reuse codes from the same 30s step, which a real authenticator would
+	// have rolled past by then.
+	resetTOTPReplay()
 	return
 }
 
@@ -264,6 +268,61 @@ func TestRegenerateCodesInvalidatesOldOnes(t *testing.T) {
 		url.Values{"code": {newCodes[0]}, "_csrf": {csrf2}}, pending)
 	if res4.StatusCode != 303 {
 		t.Errorf("new code: %d", res4.StatusCode)
+	}
+}
+
+func TestMarkBackupCodeUsedReportsConsumption(t *testing.T) {
+	app := setupTestApp(t)
+	h := app.Routes()
+	_, _ = enrollUser2FA(t, h, app, "13800139028", "consume-pw")
+	u, _ := app.DB.GetUserByPhone(context.Background(), "13800139028")
+	rows, _ := app.DB.UnusedBackupCodes(context.Background(), u.ID)
+	if len(rows) == 0 {
+		t.Fatal("setup: no backup codes")
+	}
+	id := rows[0].ID
+
+	consumed, err := app.DB.MarkBackupCodeUsed(context.Background(), id)
+	if err != nil || !consumed {
+		t.Fatalf("first mark: consumed=%v err=%v", consumed, err)
+	}
+	// Second mark of the same row must report NOT consumed — this is what
+	// stops two concurrent logins from both spending one code.
+	consumed, err = app.DB.MarkBackupCodeUsed(context.Background(), id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if consumed {
+		t.Error("already-used code reported consumed again")
+	}
+}
+
+func TestBackupCodeConcurrentUseSpendsExactlyOnce(t *testing.T) {
+	// Two logins racing on the same backup code: both may read the row as
+	// unused, but only the one whose conditional UPDATE lands may pass.
+	app := setupTestApp(t)
+	h := app.Routes()
+	_, plain := enrollUser2FA(t, h, app, "13800139029", "race-pw")
+	u, _ := app.DB.GetUserByPhone(context.Background(), "13800139029")
+
+	results := make(chan bool, 2)
+	for i := 0; i < 2; i++ {
+		go func() {
+			ok, err := app.verifyAndConsumeBackupCode(context.Background(), u.ID, plain[0])
+			if err != nil {
+				t.Errorf("verify: %v", err)
+			}
+			results <- ok
+		}()
+	}
+	successes := 0
+	for i := 0; i < 2; i++ {
+		if <-results {
+			successes++
+		}
+	}
+	if successes != 1 {
+		t.Errorf("backup code spent %d times; want exactly 1", successes)
 	}
 }
 

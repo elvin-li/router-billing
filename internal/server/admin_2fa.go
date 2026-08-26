@@ -10,25 +10,76 @@ import (
 	"router-billing/internal/totp"
 )
 
-// per-pending-token counter so a brute force on the 6-digit space can't burn
-// down the 5-minute pending session. After 5 wrong codes we invalidate.
-var twoFAAttempts = struct {
-	sync.Mutex
-	m map[string]int
-}{m: map[string]int{}}
-
-func twoFANextAttempt(token string) int {
-	twoFAAttempts.Lock()
-	defer twoFAAttempts.Unlock()
-	twoFAAttempts.m[token]++
-	return twoFAAttempts.m[token]
+// attemptTracker counts wrong-code attempts per pending-2FA token so a
+// brute force on the 6-digit space can't burn down the 5-minute pending
+// session. After 5 wrong codes the caller invalidates the token.
+//
+// Entries used to be deleted only on success or lockout — a pending login
+// that was simply abandoned (tab closed, session TTL expired) leaked its
+// entry forever, so the map grew without bound over a router's months of
+// uptime. Entries now carry their first-attempt time and anything older
+// than the tracker TTL is swept once the map is non-trivially sized.
+type attemptTracker struct {
+	mu  sync.Mutex
+	m   map[string]attemptEntry
+	ttl time.Duration
 }
 
-func twoFAReset(token string) {
-	twoFAAttempts.Lock()
-	defer twoFAAttempts.Unlock()
-	delete(twoFAAttempts.m, token)
+type attemptEntry struct {
+	n     int
+	first time.Time
 }
+
+// twoFAAttemptTTL comfortably outlives the 5-minute pending-session TTL —
+// once the session row is gone the counter is dead weight either way.
+const twoFAAttemptTTL = 15 * time.Minute
+
+// attemptSweepThreshold keeps the O(n) sweep away from the common case of
+// a handful of live logins; above it, stale entries are purged on insert.
+const attemptSweepThreshold = 128
+
+func newAttemptTracker(ttl time.Duration) *attemptTracker {
+	return &attemptTracker{m: map[string]attemptEntry{}, ttl: ttl}
+}
+
+// next increments and returns the attempt count for token.
+func (t *attemptTracker) next(token string) int {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	now := time.Now()
+	if len(t.m) > attemptSweepThreshold {
+		for k, e := range t.m {
+			if now.Sub(e.first) > t.ttl {
+				delete(t.m, k)
+			}
+		}
+	}
+	e := t.m[token]
+	if e.n == 0 {
+		e.first = now
+	}
+	e.n++
+	t.m[token] = e
+	return e.n
+}
+
+func (t *attemptTracker) reset(token string) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	delete(t.m, token)
+}
+
+func (t *attemptTracker) size() int {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return len(t.m)
+}
+
+var twoFAAttempts = newAttemptTracker(twoFAAttemptTTL)
+
+func twoFANextAttempt(token string) int { return twoFAAttempts.next(token) }
+
+func twoFAReset(token string) { twoFAAttempts.reset(token) }
 
 // GET /admin/login/2fa  — render the 6-digit input form, gated by an
 // rb_admin_pending cookie.
@@ -48,13 +99,22 @@ func (a *App) handleAdminLogin2FA(w http.ResponseWriter, r *http.Request) {
 
 	if r.Method == http.MethodGet {
 		a.render(w, "admin_2fa.html", map[string]any{
-			"Error":    "",
-			"Username": username,
+			"Error":     "",
+			"Username":  username,
+			"CSRFToken": csrfFromContext(r.Context()),
 		})
 		return
 	}
 	if r.Method != http.MethodPost {
 		http.Error(w, "method", http.StatusMethodNotAllowed)
+		return
+	}
+	// The user-side 2FA verify checks CSRF; this one historically didn't —
+	// a cross-site form could burn the 5-attempt budget and lock the admin
+	// out of their pending login. Checked before the attempt counter so a
+	// missing token never consumes an attempt.
+	if !verifyCSRF(r) {
+		http.Error(w, "CSRF token invalid — please refresh the page and retry", http.StatusForbidden)
 		return
 	}
 	if err := r.ParseForm(); err != nil {
@@ -88,11 +148,18 @@ func (a *App) handleAdminLogin2FA(w http.ResponseWriter, r *http.Request) {
 		return -1
 	}, code)
 
-	if !totp.Verify(admin.TOTPSecret, code, time.Now()) {
+	step, codeOK := totp.MatchingStep(admin.TOTPSecret, code, time.Now())
+	// One-time use (RFC 6238 §5.2): a code that already completed a login
+	// can't be replayed for a second session inside its validity window.
+	if codeOK && !totpConsumeStep(admin.TOTPSecret, step) {
+		codeOK = false
+	}
+	if !codeOK {
 		a.DB.Audit(r.Context(), "admin-attempt:"+username, "2fa_failed", "", "ip="+clientIP(r))
 		a.render(w, "admin_2fa.html", map[string]any{
-			"Error":    "验证码错误，请再试一次",
-			"Username": username,
+			"Error":     "验证码错误，请再试一次",
+			"Username":  username,
+			"CSRFToken": csrfFromContext(r.Context()),
 		})
 		return
 	}

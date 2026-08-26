@@ -28,13 +28,13 @@
 
     {{template "flash" .}}
 
-    {{$rp := index .Query0 "reset_pwd"}}{{if $rp}}
+    {{if .ResetPwd}}
     <div class="flash ok" style="display:flex; gap:14px; align-items:center;">
       <div>
         用户 <strong>#{{index .Query0 "reset_uid"}}</strong> 的临时密码：
-        <code style="background:rgba(255,255,255,0.6); padding:3px 10px; border-radius:6px; font-size:15px;">{{$rp}}</code>
+        <code style="background:rgba(255,255,255,0.6); padding:3px 10px; border-radius:6px; font-size:15px;">{{.ResetPwd}}</code>
       </div>
-      <span style="color:var(--text-soft); font-size:12px;">⚠ 只显示一次，请立即告知用户。该用户的旧 session 已全部失效。</span>
+      <span style="color:var(--text-soft); font-size:12px;">⚠ 只显示一次，刷新后不再显示，请立即告知用户。该用户的旧 session 已全部失效。</span>
     </div>
     {{end}}
 
@@ -75,14 +75,14 @@
                   <button class="btn outline tiny" type="submit">{{if .Suspended}}恢复{{else}}停用{{end}}</button>
                 </form>
                 <form method="post" action="/admin/users/reset-password"
-                      onsubmit="return confirm('重置 {{.Phone}} 的密码？\n旧密码立即失效，新临时密码会显示一次。')">
+                      data-confirm="重置 {{.Phone}} 的密码？\n旧密码立即失效，新临时密码会显示一次。">
                   {{template "csrf" $}}
                   <input type="hidden" name="id" value="{{.ID}}">
                   <button class="btn outline tiny" type="submit">重置密码</button>
                 </form>
                 {{if $.SMSAvailable}}
                 <form method="post" action="/admin/users/reset-password"
-                      onsubmit="return confirm('重置 {{.Phone}} 的密码并通过 SMS（{{$.SMSProvider}}）发给用户？')">
+                      data-confirm="重置 {{.Phone}} 的密码并通过 SMS（{{$.SMSProvider}}）发给用户？">
                   {{template "csrf" $}}
                   <input type="hidden" name="id" value="{{.ID}}">
                   <input type="hidden" name="via_sms" value="1">
@@ -91,13 +91,13 @@
                 {{end}}
                 {{if .TOTPSecret}}
                 <form method="post" action="/admin/users/reset-2fa"
-                      onsubmit="return confirm('重置 {{.Phone}} 的二步验证？\n该用户下次登录将无需 6 位验证码（账号安全性降低，建议告知用户尽快重新启用）。')">
+                      data-confirm="重置 {{.Phone}} 的二步验证？\n该用户下次登录将无需 6 位验证码（账号安全性降低，建议告知用户尽快重新启用）。">
                   {{template "csrf" $}}
                   <input type="hidden" name="id" value="{{.ID}}">
                   <button class="btn outline tiny" type="submit">重置 2FA</button>
                 </form>
                 {{end}}
-                <form method="post" action="/admin/users/delete" onsubmit="return confirm('删除用户 {{.Phone}}？该用户的 MAC 仍保留但 owner 被清空。')">
+                <form method="post" action="/admin/users/delete" data-confirm="删除用户 {{.Phone}}？该用户的 MAC 仍保留但 owner 被清空。">
                   {{template "csrf" $}}
                   <input type="hidden" name="id" value="{{.ID}}">
                   <button class="btn danger tiny" type="submit">删除</button>
@@ -115,5 +115,8 @@
     </section>
   </main>
 </div>
+  {{/* Confirm/print handlers run via ui.js data-* attributes — the CSP
+       (script-src 'self') blocks inline on*= attributes. */}}
+  <script src="/static/ui.js" defer></script>
 </body>
 </html>

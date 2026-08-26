@@ -44,12 +44,9 @@ func (a *App) handleAdminSMSLog(w http.ResponseWriter, r *http.Request) {
 		Until:      untilFilter,
 		Limit:      100,
 	})
-	// Pass through the raw query so the "reminders" flash can read
-	// sent/skipped/errored counts.
-	rawQuery := map[string]string{}
-	for k := range r.URL.Query() {
-		rawQuery[k] = r.URL.Query().Get(k)
-	}
+	// Pass through the query so the "reminders" flash can read
+	// sent/skipped/errored counts (numeric flash keys laundered).
+	rawQuery := queryFlashParams(r)
 	a.render(w, "admin_sms_log.html", a.adminCtx(r, "sms-log", map[string]any{
 		"Provider":         providerName,
 		"Records":          consoleRecords,
@@ -92,9 +89,7 @@ func (a *App) handleAdminSMSTest(w http.ResponseWriter, r *http.Request) {
 	if msg == "" {
 		msg = "router-billing test message from " + clientIP(r)
 	}
-	if len(msg) > 500 {
-		msg = msg[:500]
-	}
+	msg = truncateRunes(msg, 500)
 	if err := a.SendSMS(r.Context(), phone, msg); err != nil {
 		log.Printf("admin sms test %s: %v", phone, err)
 		a.DB.Audit(r.Context(), "admin", "sms_test_failed", phone,
