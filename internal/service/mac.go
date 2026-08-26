@@ -87,7 +87,35 @@ func (s *MACService) grantFirewallAdd(ctx context.Context, m *models.MAC) error 
 // 500 whose PSP retries then no-oped (order already paid), so the failed
 // nft add was never retried anyway — and the paid signal/audit/notify were
 // all skipped.
+// detachCancel severs a composite DB+firewall mutation from its caller's
+// cancellation. Every mutating entry point calls this first: the HTTP
+// handlers pass r.Context(), which the net/http server cancels the moment
+// the client disconnects — and a cancellation landing between the DB
+// commit and the firewall write (or the post-commit re-read inside
+// UpsertMAC) used to leave the kernel set contradicting the DB for up to
+// a full scheduler interval (1h default):
+//
+//   - Replace: old row deleted from DB, FW.Remove + the self-heal resync
+//     both failed on the dead ctx → the retired device kept full access
+//     (and a user could abort the POST deliberately to keep BOTH devices
+//     online until the next reconcile);
+//   - Extend: UpsertMAC committed, but its post-commit GetMAC re-read
+//     failed on the dead ctx → the caller saw an error for a grant that
+//     landed, and the natural retry stacked the days twice (the exact
+//     v0.126 class, through a different window);
+//   - Revoke/Delete/ExpireDue: DB flipped, FW.Remove + resync fallback
+//     failed → revoked/expired device stayed online.
+//
+// All of these operations are short and strictly bounded (local SQLite +
+// nft execs that carry their own 5s timeouts), so finishing them after
+// the client went away is safe — the same call finalizeOrder and
+// handleRedeem have made since v0.106/v0.109.
+func detachCancel(ctx context.Context) context.Context {
+	return context.WithoutCancel(ctx)
+}
+
 func (s *MACService) GrantFromOrder(ctx context.Context, o *models.Order) error {
+	ctx = detachCancel(ctx)
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	label := fmt.Sprintf("paid-%s", o.Plan)
@@ -113,6 +141,7 @@ func (s *MACService) GrantFromOrder(ctx context.Context, o *models.Order) error 
 // NOT surfaced — the DB is the source of truth and Extend's hard-fail
 // semantics would report failure for a grant that actually landed.
 func (s *MACService) GrantFromVoucher(ctx context.Context, mac, label string, days int, userID *int64) (*models.MAC, error) {
+	ctx = detachCancel(ctx)
 	// Same service-level lock as every other composite DB+firewall op —
 	// the v0.110 serialization pass covered GrantFromOrder but missed this
 	// sibling, so a redemption's FW.Add could land between a concurrent
@@ -143,6 +172,7 @@ func (s *MACService) GrantFromVoucher(ctx context.Context, mac, label string, da
 // firewall-only failure self-heals via resync and the extend reports the
 // success it actually is.
 func (s *MACService) Extend(ctx context.Context, mac, label string, days int, userID *int64) (*models.MAC, error) {
+	ctx = detachCancel(ctx)
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	m, err := s.DB.UpsertMAC(ctx, mac, label, days, userID)
@@ -164,6 +194,7 @@ func (s *MACService) Extend(ctx context.Context, mac, label string, days int, us
 // "skipped", not an error. Used by the user-grant fan-outs so a concurrent
 // device transfer can't be clobbered back to the granted user.
 func (s *MACService) ExtendOwned(ctx context.Context, mac, label string, days int, ownerID int64) (*models.MAC, error) {
+	ctx = detachCancel(ctx)
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	m, err := s.DB.ExtendMACOwned(ctx, mac, label, days, ownerID)
@@ -184,6 +215,7 @@ func (s *MACService) ExtendOwned(ctx context.Context, mac, label string, days in
 
 // Revoke marks blocked + drops from firewall set.
 func (s *MACService) Revoke(ctx context.Context, mac string) error {
+	ctx = detachCancel(ctx)
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if err := s.DB.SetMACStatus(ctx, mac, models.MACBlocked); err != nil {
@@ -194,6 +226,7 @@ func (s *MACService) Revoke(ctx context.Context, mac string) error {
 
 // Delete removes from DB + firewall.
 func (s *MACService) Delete(ctx context.Context, mac string) error {
+	ctx = detachCancel(ctx)
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if err := s.DB.DeleteMAC(ctx, mac); err != nil {
@@ -228,6 +261,7 @@ func (s *MACService) removeWithResyncFallback(ctx context.Context, mac, op strin
 // Replace transfers a user's remaining time from oldMac to newMac.
 // Both DB row and firewall set are updated atomically.
 func (s *MACService) Replace(ctx context.Context, userID int64, oldMac, newMac, label string) (*models.MAC, error) {
+	ctx = detachCancel(ctx)
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	m, err := s.DB.ReplaceMAC(ctx, userID, oldMac, newMac, label)
@@ -350,6 +384,9 @@ func (s *MACService) enforceSchedulesOnce(ctx context.Context) {
 // landing in between was overwritten and the ineligible MAC came back
 // online until the next resync.
 func (s *MACService) ApplyScheduleNow(ctx context.Context, mac string, sched models.MacSchedule) error {
+	// The schedule itself was already persisted by the caller — the
+	// firewall reconcile half must not be skippable by a disconnect.
+	ctx = detachCancel(ctx)
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	m, err := s.DB.GetMAC(ctx, mac)
@@ -370,6 +407,9 @@ func (s *MACService) ApplyScheduleNow(ctx context.Context, mac string, sched mod
 
 // ExpireDue marks expired DB rows and yanks them from firewall.
 func (s *MACService) ExpireDue(ctx context.Context) (int, error) {
+	// Admin "expire now" passes r.Context(); the rows flip to expired at
+	// the UPDATE, so the firewall removes must survive a disconnect.
+	ctx = detachCancel(ctx)
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	expired, err := s.DB.ExpireDueMACs(ctx)

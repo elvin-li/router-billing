@@ -1,5 +1,50 @@
 # Changelog
 
+## v0.128 — 深挖轮 10：客户端断开可撕裂 DB↔防火墙 复合变更（含换机双设备在线、延期重试双倍加天残余窗口）
+
+本轮合并 PR #20（v0.120–v0.127 移植线，干净合入无冲突），并对
+「DB 提交后、防火墙写入前」的取消窗口做了穷尽排查。
+
+A. (MEDIUM, 计费绕过/规则泄漏) 所有复合 DB+防火墙变更入口
+（`Replace`/`Extend`/`ExtendOwned`/`Revoke`/`Delete`/
+`GrantFromOrder`/`GrantFromVoucher`/`ExpireDue`/`ApplyScheduleNow`）
+直接使用调用方的 context——HTTP 处理器传入的是 `r.Context()`，
+客户端一断开 net/http 就把它取消。取消若落在 DB 提交之后：
+
+- 换机（/user/macs/replace）：旧行已从 DB 删除，但 `FW.Remove`
+  与自愈 resync 都在死 context 上失败——旧设备保持全量放行，
+  新 MAC 也要等下一次周期 reconcile（默认 1 小时）才入内核集合。
+  用户可以故意在 POST 后立刻断开，让新旧两台设备用一份订阅同时
+  在线，且每次 reconcile 后可重复。
+- 延期（admin/API extend）：`UpsertMAC` 已提交，但提交后的
+  `GetMAC` 重读在死 context 上失败，调用方看到错误——而
+  UpsertMAC 语义是在现有到期时间上累加，自然重试就双倍加天。
+  这正是 v0.126 修掉的类，只是通过另一个窗口（v0.126 只覆盖了
+  防火墙失败，没覆盖 context 取消让重读失败）。
+- 吊销/删除/到期扫描（admin 手动 expire-now 传 r.Context()）：
+  DB 已翻转，`FW.Remove` 与 resync 兜底全部随取消失败——被吊销/
+  已到期设备继续在线直至下一次 reconcile。
+
+修复：service 层每个变更方法入口统一
+`ctx = context.WithoutCancel(ctx)`（`detachCancel`）。这些操作
+全部短小且有界（本地 SQLite + 自带 5s 超时的 nft exec），在
+客户端消失后跑完是安全的——与 v0.106 `finalizeOrder`、v0.109
+`handleRedeem` 已确立的「资金/状态在途不可被断开中止」契约一致，
+且集中在 service 层做一次，未来新增 handler 不会再漏。
+
+回归测试（`ctx_cancel_test.go`，已验证无修复时全部失败）：对
+已取消的 context 断言 Extend 成功且恰好 +30 天并入集合、Replace
+后旧 MAC 出集合/新 MAC 入集合且 DB 转移完成、Revoke/Delete 后
+设备出集合、ExpireDue 翻转并出集合。
+
+B. 合并说明：#20（移植 #16–#19 与深挖轮 7–9）经 `git merge` 干净
+合入；其余 open PR（#5–#13 于 v0.107、#1/#2/#3 及全部 22 条
+remote 分支于 v0.113 内容级比对、#16–#19 于 v0.120–v0.127）均已
+确认被本线覆盖，无遗漏提交。#15（Shadowsocks 服务器）为基于 main
+的大型功能 PR（约 3200 行、新增常驻网络监听面与密码学实现），与
+本加固线目标正交且合并冲突面大，维持不合入，由仓库所有者单独
+决策。
+
 ## v0.127 — 深挖轮 9：正确性验证轮（时区 / SQL date / TOCTOU / 2FA 重放 / 输入边界）
 
 第三轮独立审计，按清单逐面验证此前多轮加固的完整性；本轮未发
