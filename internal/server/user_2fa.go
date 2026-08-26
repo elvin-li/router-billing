@@ -7,7 +7,6 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
-	"sync"
 	"time"
 
 	"golang.org/x/crypto/bcrypt"
@@ -39,24 +38,13 @@ import (
 const userPendingSessionKind = "user_pending_2fa"
 
 // userTwoFAAttempts mirrors twoFAAttempts in admin_2fa.go but separately
-// keyed so user attempts don't share a counter with admin attempts.
-var userTwoFAAttempts = struct {
-	sync.Mutex
-	m map[string]int
-}{m: map[string]int{}}
+// keyed so user attempts don't share a counter with admin attempts. Same
+// bounded attemptTracker: abandoned pending logins no longer leak entries.
+var userTwoFAAttempts = newAttemptTracker(twoFAAttemptTTL)
 
-func userTwoFANextAttempt(token string) int {
-	userTwoFAAttempts.Lock()
-	defer userTwoFAAttempts.Unlock()
-	userTwoFAAttempts.m[token]++
-	return userTwoFAAttempts.m[token]
-}
+func userTwoFANextAttempt(token string) int { return userTwoFAAttempts.next(token) }
 
-func userTwoFAReset(token string) {
-	userTwoFAAttempts.Lock()
-	defer userTwoFAAttempts.Unlock()
-	delete(userTwoFAAttempts.m, token)
-}
+func userTwoFAReset(token string) { userTwoFAAttempts.reset(token) }
 
 // GET / POST /user/login/2fa
 func (a *App) handleUserLogin2FA(w http.ResponseWriter, r *http.Request) {
