@@ -7,6 +7,7 @@ import (
 	"html/template"
 	"log"
 	"net/http"
+	"net/url"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -41,6 +42,7 @@ type App struct {
 	adminLoginByUser  *rateLimiter // admin login, keyed by username (defeats IP rotation)
 	redeemLimiter     *rateLimiter // voucher redemption, keyed by IP
 	payCreateLimiter  *rateLimiter // payment intent creation, keyed by IP
+	twoFADisableLimit *rateLimiter // /user/2fa/disable attempts, keyed by user ID
 
 	// Forgot-password (SMS) — separate counters from login so a hostile actor
 	// can't burn the legitimate user's login budget by spamming reset requests.
@@ -57,6 +59,26 @@ type App struct {
 
 	waitMu  sync.Mutex
 	waiters map[string][]chan struct{} // order_no → pending wait channels
+
+	// expiryRemMu serializes expiry-reminder passes. The hourly loop and
+	// the manual /admin/sms-log/expiry-reminders trigger share a 22h
+	// audit-row dedup window that is only written AFTER each SMS goes
+	// out — two overlapping passes both list the same eligible MACs
+	// before either writes its rows, double-texting every listed user.
+	expiryRemMu sync.Mutex
+
+	// sseTick overrides the 5s SSE push cadence (tests only). 0 = default.
+	sseTick time.Duration
+
+	// One-time flash values (see flash.go) — secrets that must survive
+	// exactly one POST-redirect-GET hop without touching the URL.
+	flashMu sync.Mutex
+	flashes map[string]flashEntry
+
+	// Short-TTL cache for the attention counters (see attention_cache.go).
+	attMu  sync.Mutex
+	attVal db.AttentionCounts
+	attAt  time.Time
 }
 
 func NewApp(cfg *config.Config, dbx *db.DB, svc *service.MACService) (*App, error) {
@@ -74,6 +96,7 @@ func NewApp(cfg *config.Config, dbx *db.DB, svc *service.MACService) (*App, erro
 		adminLoginByUser:  newRateLimiter(5, 5*time.Minute),
 		redeemLimiter:     newRateLimiter(10, 10*time.Minute),
 		payCreateLimiter:  newRateLimiter(20, time.Minute),
+		twoFADisableLimit: newRateLimiter(5, 15*time.Minute),
 
 		pwResetIssueIPLimit:    newRateLimiter(6, 1*time.Hour),
 		pwResetIssuePhoneLimit: newRateLimiter(3, 1*time.Hour),
@@ -83,6 +106,7 @@ func NewApp(cfg *config.Config, dbx *db.DB, svc *service.MACService) (*App, erro
 		apiTokenLimiter: map[string]*rateLimiter{},
 
 		waiters: map[string][]chan struct{}{},
+		flashes: map[string]flashEntry{},
 	}
 
 	// Wire the v0.49 webhook delivery logger: every Notifier attempt
@@ -131,7 +155,12 @@ func NewApp(cfg *config.Config, dbx *db.DB, svc *service.MACService) (*App, erro
 	}
 
 	tplGlob := filepath.Join(cfg.WebRoot, "templates", "*.html")
-	tpl, err := template.New("").Funcs(tplFuncs()).ParseGlob(tplGlob)
+	// missingkey=zero: when a template references {{.X}} and X isn't in the
+	// map (we pass map[string]any to many handlers via adminCtx), render the
+	// zero value ("" / 0 / nil) instead of the literal string "<no value>".
+	// Struct-field misses are unaffected — those have always been hard
+	// errors, which is what surfaced the v0.96 dashboard plan-sales bug.
+	tpl, err := template.New("").Option("missingkey=zero").Funcs(tplFuncs()).ParseGlob(tplGlob)
 	if err != nil {
 		return nil, fmt.Errorf("parse templates %s: %w", tplGlob, err)
 	}
@@ -272,7 +301,11 @@ func (a *App) Routes() http.Handler {
 	mux.HandleFunc("/api/admin/sessions", a.requireAPITokenRead(a.handleAPISessions))
 	mux.HandleFunc("/api/admin/audit/distinct", a.requireAPITokenRead(a.handleAPIAuditDistinct))
 	mux.HandleFunc("/api/admin/audit/totals", a.requireAPITokenRead(a.handleAPIAuditTotals))
-	mux.HandleFunc("/api/admin/backup", a.requireAPITokenRead(a.handleAPIBackup))
+	// Backup is privileged: the raw DB file carries session tokens,
+	// password hashes, TOTP secrets, and full voucher codes — all of
+	// which the JSON read endpoints deliberately strip. Read-only
+	// tokens are rejected even though the method is GET.
+	mux.HandleFunc("/api/admin/backup", a.requireAPITokenPrivileged(a.handleAPIBackup))
 	mux.HandleFunc("/api/admin/macs", a.requireAPITokenRead(a.handleAPIMACList))
 	mux.HandleFunc("/api/admin/macs/get", a.requireAPITokenRead(a.handleAPIMACGet))
 	mux.HandleFunc("/api/admin/users", a.requireAPITokenRead(a.handleAPIUserList))
@@ -348,7 +381,7 @@ func (a *App) Routes() http.Handler {
 		http.ServeFile(w, r, filepath.Join(staticDir, "sw.js"))
 	})
 
-	return a.securityHeaders(csrfMiddleware(logMiddleware(mux)))
+	return a.securityHeaders(a.realIPMiddleware(csrfMiddleware(logMiddleware(mux))))
 }
 
 func (a *App) Run(ctx context.Context) error {
@@ -390,36 +423,19 @@ func (a *App) purgeLoop(ctx context.Context) {
 	// (reclaim pages from churn — voucher batches, audit purges, etc.).
 	weekly := time.NewTicker(7 * 24 * time.Hour)
 	defer weekly.Stop()
+	// One pass at boot, like the other background loops. Routers get
+	// power-cycled daily in the field; a purge that only ever fires after
+	// 2h of continuous uptime lets expired sessions / audit / sms / webhook
+	// rows grow without bound on any box that never stays up that long.
+	// (The weekly VACUUM deliberately does NOT run at boot — it takes a
+	// write lock and a daily-rebooted router would vacuum daily.)
+	a.purgeOnce(ctx)
 	for {
 		select {
 		case <-ctx.Done():
 			return
 		case <-short.C:
-			_ = a.DB.PurgeExpiredSessions(ctx)
-			_ = a.DB.PurgeAuditLog(ctx, a.Cfg.Security.AuditLogRetention())
-			// SMS log gets the same retention cap as audit_log — both are
-			// observability tables that accumulate forever otherwise.
-			_ = a.DB.PurgeSMSLog(ctx, a.Cfg.Security.AuditLogRetention())
-			// Webhook delivery log (v0.49) uses the same retention cap.
-			_ = a.DB.PurgeWebhookDeliveries(ctx, a.Cfg.Security.AuditLogRetention())
-			// These three were added in v0.13 (password reset codes,
-			// trusted devices) but never plumbed into the janitor — so
-			// stale rows accumulated until the user manually
-			// re-triggered the flow. Tidy up here too.
-			_ = a.DB.PurgeExpiredPasswordResets(ctx)
-			_ = a.DB.PurgeExpiredTrustedDevices(ctx)
-			// v0.60: auto-cancel stale pending orders if enabled. Skip
-			// the audit row when count=0 to avoid the periodic-noop
-			// audit-spam an enabled background sweep would otherwise
-			// generate.
-			if hours := a.Cfg.Security.AutoCancelStaleOrders(); hours > 0 {
-				if n, err := a.DB.CancelStalePendingOrders(ctx, time.Duration(hours)*time.Hour); err == nil && n > 0 {
-					a.DB.Audit(ctx, "system", "orders_cancel_stale", "",
-						fmt.Sprintf("count=%d hours=%d via=purge_loop", n, hours))
-				} else if err != nil {
-					log.Printf("auto cancel stale: %v", err)
-				}
-			}
+			a.purgeOnce(ctx)
 		case <-weekly.C:
 			if _, err := a.DB.Exec(ctx, "PRAGMA optimize"); err != nil {
 				log.Printf("sqlite optimize: %v", err)
@@ -431,12 +447,42 @@ func (a *App) purgeLoop(ctx context.Context) {
 	}
 }
 
+// purgeOnce is one short-cadence housekeeping pass — cheap DELETEs only.
+func (a *App) purgeOnce(ctx context.Context) {
+	_ = a.DB.PurgeExpiredSessions(ctx)
+	_ = a.DB.PurgeAuditLog(ctx, a.Cfg.Security.AuditLogRetention())
+	// SMS log gets the same retention cap as audit_log — both are
+	// observability tables that accumulate forever otherwise.
+	_ = a.DB.PurgeSMSLog(ctx, a.Cfg.Security.AuditLogRetention())
+	// Webhook delivery log (v0.49) uses the same retention cap.
+	_ = a.DB.PurgeWebhookDeliveries(ctx, a.Cfg.Security.AuditLogRetention())
+	// These three were added in v0.13 (password reset codes,
+	// trusted devices) but never plumbed into the janitor — so
+	// stale rows accumulated until the user manually
+	// re-triggered the flow. Tidy up here too.
+	_ = a.DB.PurgeExpiredPasswordResets(ctx)
+	_ = a.DB.PurgeExpiredTrustedDevices(ctx)
+	// v0.60: auto-cancel stale pending orders if enabled. Skip
+	// the audit row when count=0 to avoid the periodic-noop
+	// audit-spam an enabled background sweep would otherwise
+	// generate.
+	if hours := a.Cfg.Security.AutoCancelStaleOrders(); hours > 0 {
+		if n, err := a.DB.CancelStalePendingOrders(ctx, time.Duration(hours)*time.Hour); err == nil && n > 0 {
+			a.DB.Audit(ctx, "system", "orders_cancel_stale", "",
+				fmt.Sprintf("count=%d hours=%d via=purge_loop", n, hours))
+		} else if err != nil {
+			log.Printf("auto cancel stale: %v", err)
+		}
+	}
+}
+
 // auditTargetHref returns the smart drill-down URL for an audit target
-// string, or "" if the target doesn't fit a known shape. v0.92 / v0.95.
+// string, or "" if the target doesn't fit a known shape. v0.92 / v0.95 / v0.97.
 //
 // Shapes:
 //   - MAC (NormalizeMAC accepts it)                    → /admin/macs/detail?mac=...
-//   - "ORD" / "ord" prefix                             → /admin/orders/detail?order_no=...
+//   - "ORD" / "ord" prefix, or the generated shape
+//     newOrderNo() actually produces ("B"+timestamp+hex) → /admin/orders/detail?order_no=...
 //   - 11-digit starts-with-1 (CN mobile)               → /admin/sms-log?phone=...
 //   - pure digits, 1-9 chars (user_id from user_grant) → /admin/users/detail?id=N
 //   - anything else                                     → "" (plain text)
@@ -452,9 +498,12 @@ func auditTargetHref(target string) string {
 	if mac, ok := models.NormalizeMAC(target); ok {
 		return "/admin/macs/detail?mac=" + mac
 	}
-	// Order number — starts with "ORD" or "ord".
-	if strings.HasPrefix(target, "ORD") || strings.HasPrefix(target, "ord") {
-		return "/admin/orders/detail?order_no=" + target
+	// Order number — the "ORD"/"ord" prefix (imported/manual shapes) or
+	// the exact shape newOrderNo() generates. Pre-v0.97 only the ORD
+	// prefix matched, so every real production order target
+	// (order_refunded / order_canceled rows) rendered as plain text.
+	if strings.HasPrefix(target, "ORD") || strings.HasPrefix(target, "ord") || isGeneratedOrderNo(target) {
+		return "/admin/orders/detail?order_no=" + url.QueryEscape(target)
 	}
 	// All-digit shapes: 11-digit starts-with-1 → phone; 1-9 digits → user_id.
 	allDigits := true
@@ -473,6 +522,29 @@ func auditTargetHref(target string) string {
 		}
 	}
 	return ""
+}
+
+// isGeneratedOrderNo reports whether target matches the exact shape
+// newOrderNo() produces: "B" + 14-digit UTC timestamp + lowercase-hex
+// suffix — 16 chars since v0.106 (31 total), 8 chars before (23 total;
+// still matched so pre-v0.106 audit rows keep linking). Kept strict so
+// ordinary words starting with "B" never get misrouted to the
+// order-detail page.
+func isGeneratedOrderNo(target string) bool {
+	if (len(target) != 23 && len(target) != 31) || target[0] != 'B' {
+		return false
+	}
+	for _, c := range target[1:15] {
+		if c < '0' || c > '9' {
+			return false
+		}
+	}
+	for _, c := range target[15:] {
+		if (c < '0' || c > '9') && (c < 'a' || c > 'f') {
+			return false
+		}
+	}
+	return true
 }
 
 func tplFuncs() template.FuncMap {

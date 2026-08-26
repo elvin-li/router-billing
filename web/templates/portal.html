@@ -122,17 +122,8 @@
     </div>
   </div>
 
+  {{/* Service-worker registration lives inside portal.js — the CSP
+       (script-src 'self') blocks inline <script> blocks. */}}
   <script src="/static/portal.js" defer></script>
-  <script>
-    // Register the service worker — gives the portal page near-instant
-    // repaint after first visit + asset cache survives WiFi disconnect.
-    // Failing registration is silent: the page still works as a plain SPA.
-    if ('serviceWorker' in navigator) {
-      window.addEventListener('load', () => {
-        navigator.serviceWorker.register('/sw.js', { scope: '/' })
-          .catch(() => { /* portal works without it */ });
-      });
-    }
-  </script>
 </body>
 </html>

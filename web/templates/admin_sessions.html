@@ -24,7 +24,7 @@
       {{if eq .OK "1"}}<div class="flash ok">已吊销其他 admin session</div>{{end}}
       <p>一键吊销所有其他管理员 session（保留你当前这一个）。其他设备上的管理员需要重新登录。</p>
       <form method="post" action="/admin/sessions/revoke-all-admin"
-            onsubmit="return confirm('确定吊销所有其他管理员 session？\n所有其他设备会立即被踢下线。')">
+            data-confirm="确定吊销所有其他管理员 session？\n所有其他设备会立即被踢下线。">
         {{template "csrf" .}}
         <button type="submit" class="btn danger" style="width:auto;">吊销所有其他 admin session</button>
       </form>
@@ -35,7 +35,7 @@
       {{if eq .OK "panic"}}<div class="flash ok">所有 session 已强制下线 ✓ 用户需要重新登录</div>{{end}}
       <p>一键登出 <strong>每个用户 + 每个其他管理员</strong>。所有设备需要重新认证。仅当确认服务被入侵时使用。</p>
       <form method="post" action="/admin/sessions/panic"
-            onsubmit="return confirm('确定？\n· 你保留当前 session\n· 所有其他 admin 立即下线\n· 所有用户（含 IoT 设备的 web 会话，但不影响计费白名单）立即下线\n\n此操作会写入审计日志。')">
+            data-confirm="确定？\n· 你保留当前 session\n· 所有其他 admin 立即下线\n· 所有用户（含 IoT 设备的 web 会话，但不影响计费白名单）立即下线\n\n此操作会写入审计日志。">
         {{template "csrf" .}}
         <button type="submit" class="btn danger" style="width:auto;">登出所有其他 session（admin + user）</button>
       </form>
@@ -65,7 +65,7 @@
               <td class="row-actions">
                 {{if not .IsCurrent}}
                 <form method="post" action="/admin/sessions/revoke"
-                      onsubmit="return confirm('吊销这个 session？')">
+                      data-confirm="吊销这个 session？">
                   {{template "csrf" $}}
                   <input type="hidden" name="token" value="{{.Token}}">
                   <button class="btn danger tiny" type="submit">吊销</button>
@@ -84,5 +84,8 @@
     </section>
   </main>
 </div>
+  {{/* Confirm/print handlers run via ui.js data-* attributes — the CSP
+       (script-src 'self') blocks inline on*= attributes. */}}
+  <script src="/static/ui.js" defer></script>
 </body>
 </html>

@@ -30,13 +30,17 @@ jobs:
           go-version: '1.22'
           cache: true
 
+      # VERSION from the tag (v0.108 → 0.108) so:
+      #   - `router-billing --version` reports the release, not a commit hash
+      #   - the .ipk filename and its control Version match the tag, letting
+      #     `opkg upgrade` actually compare versions between releases.
       - name: cross-compile aarch64
-        run: make arm64
+        run: make arm64 VERSION="${GITHUB_REF_NAME#v}"
 
       - name: pack tar.gz + ipk
         run: |
-          make pack-arm64
-          make ipk
+          make pack-arm64 VERSION="${GITHUB_REF_NAME#v}"
+          make ipk VERSION="${GITHUB_REF_NAME#v}"
 
       - name: list artifacts
         run: ls -lh build/router-billing-arm64* build/router-billing*.ipk

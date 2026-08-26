@@ -69,7 +69,7 @@
         <h1>SSID 二维码海报</h1>
         <div class="crumbs">打印贴墙，让访客扫码即可连接 WiFi 或访问账号页</div>
       </div>
-      <button onclick="window.print()" class="btn primary small" style="width:auto;">打印</button>
+      <button data-print class="btn primary small" style="width:auto;">打印</button>
     </div>
 
     <section class="admin-card">
@@ -88,5 +88,8 @@
     </section>
   </main>
 </div>
+  {{/* Confirm/print handlers run via ui.js data-* attributes — the CSP
+       (script-src 'self') blocks inline on*= attributes. */}}
+  <script src="/static/ui.js" defer></script>
 </body>
 </html>

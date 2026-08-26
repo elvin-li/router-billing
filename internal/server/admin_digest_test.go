@@ -89,6 +89,36 @@ func TestSendAdminDigestEndToEnd(t *testing.T) {
 	}
 }
 
+func TestAdminDigestAuditSurvivesContextCancel(t *testing.T) {
+	// The ctx dies the moment the SMS is delivered (admin closed the
+	// manual-trigger page, or shutdown began). The audit row is how
+	// operators confirm the daily schedule fired — it must land anyway.
+	app := setupTestApp(t)
+	console := sms.NewConsole(50)
+	app.Cfg.SMS.AdminLoginAlertPhone = "13800160001"
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	app.SMS = &sms.Sender{P: &cancelingProvider{inner: console, cancel: cancel}}
+
+	if _, err := app.sendAdminDigest(ctx); err != nil {
+		t.Fatalf("sendAdminDigest: %v", err)
+	}
+	if n := len(console.Recent()); n != 1 {
+		t.Fatalf("expected 1 SMS; got %d", n)
+	}
+	entries, _ := app.DB.ListAudit(context.Background(), 50)
+	found := false
+	for _, e := range entries {
+		if e.Action == "admin_digest_sent" {
+			found = true
+		}
+	}
+	if !found {
+		t.Error("admin_digest_sent audit row was lost to the canceled context")
+	}
+}
+
 func TestFormatAdminDigestBody(t *testing.T) {
 	cases := []struct {
 		s    db.AdminDigestStats
@@ -108,6 +138,48 @@ func TestFormatAdminDigestBody(t *testing.T) {
 		if !strings.Contains(got, c.want) {
 			t.Errorf("formatAdminDigestBody(%+v) = %q; missing %q", c.s, got, c.want)
 		}
+	}
+}
+
+func TestNextDigestAtFiresAtConfiguredHour(t *testing.T) {
+	utc := func(y int, m time.Month, d, h, min int) time.Time {
+		return time.Date(y, m, d, h, min, 0, 0, time.UTC)
+	}
+	cases := []struct {
+		name string
+		now  time.Time
+		hour int
+		want time.Time
+	}{
+		// Documented semantics: fire AT the configured UTC hour. The old
+		// code used hour-1 and fired one hour early.
+		{"before-hour-same-day", utc(2026, 3, 10, 6, 30), 9, utc(2026, 3, 10, 9, 0)},
+		{"after-hour-next-day", utc(2026, 3, 10, 9, 30), 9, utc(2026, 3, 11, 9, 0)},
+		{"exactly-at-hour-rolls-to-next-day", utc(2026, 3, 10, 9, 0), 9, utc(2026, 3, 11, 9, 0)},
+		{"hour-24-means-midnight", utc(2026, 3, 10, 6, 0), 24, utc(2026, 3, 11, 0, 0)},
+		{"hour-1-is-one-am", utc(2026, 3, 10, 0, 30), 1, utc(2026, 3, 10, 1, 0)},
+	}
+	for _, c := range cases {
+		if got := nextDigestAt(c.now, c.hour); !got.Equal(c.want) {
+			t.Errorf("%s: nextDigestAt(%s, %d) = %s; want %s",
+				c.name, c.now, c.hour, got, c.want)
+		}
+	}
+}
+
+func TestNextDigestAtAbsorbsClockJumps(t *testing.T) {
+	// After a multi-day suspend / clock step, recomputing from the current
+	// wall clock must yield exactly ONE next send — not one per missed day
+	// (the old target.Add(24h) catch-up sent a burst of digest SMSes).
+	lastFired := time.Date(2026, 3, 10, 9, 0, 0, 0, time.UTC)
+	nowAfterJump := lastFired.Add(5*24*time.Hour + 3*time.Hour) // 2026-03-15 12:00
+	next := nextDigestAt(nowAfterJump, 9)
+	want := time.Date(2026, 3, 16, 9, 0, 0, 0, time.UTC)
+	if !next.Equal(want) {
+		t.Errorf("next after clock jump = %s; want %s", next, want)
+	}
+	if !next.After(nowAfterJump) {
+		t.Error("next send must be strictly in the future — otherwise the loop fires immediately in a burst")
 	}
 }
 

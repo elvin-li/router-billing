@@ -30,7 +30,7 @@ func labelFromUserAgent(ua string) string {
 		return "(unknown browser)"
 	}
 	if len(ua) > 80 {
-		ua = ua[:80] + "…"
+		ua = truncateRunes(ua, 80) + "…"
 	}
 	return ua
 }

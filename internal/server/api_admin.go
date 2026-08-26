@@ -20,6 +20,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"io"
 	"log"
 	"net/http"
 	"strconv"
@@ -32,6 +33,13 @@ import (
 	"router-billing/internal/voucher"
 )
 
+// maxGrantDays caps every grant/extend/voucher `days` input at 10 years.
+// Beyond typo-guarding, huge values (e.g. 9e18 from a scripted client)
+// overflow time.Time inside AddDate(0,0,days) and can wrap expires_at into
+// the PAST — silently revoking instead of granting. Every entry point that
+// feeds days into UpsertMAC/CreateVoucher must enforce this bound.
+const maxGrantDays = 3650
+
 // requireAPITokenWrite extracts Authorization: Bearer <token>, verifies it
 // against config.api_tokens, and blocks read-only tokens from non-GET
 // methods. Used for endpoints that mutate state.
@@ -42,6 +50,27 @@ func (a *App) requireAPITokenWrite(h func(w http.ResponseWriter, r *http.Request
 			return
 		}
 		if r.Method != http.MethodGet && tok.ReadOnly {
+			writeJSON(w, http.StatusForbidden, map[string]string{"error": "token is read-only"})
+			return
+		}
+		h(w, r, "api:"+tokenLabel(tok))
+	}
+}
+
+// requireAPITokenPrivileged rejects read-only tokens on EVERY method,
+// including GET. Used for read paths whose payload is strictly more
+// sensitive than what a monitoring token should hold — today that is
+// /api/admin/backup, which streams the raw SQLite file (plaintext session
+// tokens, password hashes, TOTP secrets, full voucher codes). A read-only
+// token that can fetch the backup is effectively a full-scope token, so
+// the read/write distinction must gate it.
+func (a *App) requireAPITokenPrivileged(h func(w http.ResponseWriter, r *http.Request, actor string)) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		tok := a.matchBearerOrUnauthorized(w, r)
+		if tok == nil {
+			return
+		}
+		if tok.ReadOnly {
 			writeJSON(w, http.StatusForbidden, map[string]string{"error": "token is read-only"})
 			return
 		}
@@ -186,17 +215,13 @@ func (a *App) handleAPIMACList(w http.ResponseWriter, r *http.Request, _ string)
 			return
 		}
 	} else {
-		// No filters — limit the unfiltered list too, since the legacy
-		// no-cap behavior could ship 10k+ rows on busy installs.
-		all, lerr := a.DB.ListMACs(r.Context())
-		if lerr != nil {
-			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": lerr.Error()})
+		// No filters — SearchMACs with an empty query applies the LIMIT
+		// in SQL instead of shipping every row to Go and truncating.
+		macs, err = a.DB.SearchMACs(r.Context(), "", "", limit)
+		if err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 			return
 		}
-		if len(all) > limit {
-			all = all[:limit]
-		}
-		macs = all
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"macs": macs, "count": len(macs)})
 }
@@ -306,9 +331,7 @@ func (a *App) handleAPIMACLabel(w http.ResponseWriter, r *http.Request, actor st
 		return
 	}
 	label := strings.TrimSpace(req.Label)
-	if len(label) > 64 {
-		label = label[:64]
-	}
+	label = truncateRunes(label, 64)
 	if err := a.DB.SetMACLabel(r.Context(), normalized, label); err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 		return
@@ -365,9 +388,7 @@ func (a *App) handleAPIMACNotes(w http.ResponseWriter, r *http.Request, actor st
 		return
 	}
 	notes := strings.TrimSpace(req.Notes)
-	if len(notes) > 1000 {
-		notes = notes[:1000]
-	}
+	notes = truncateRunes(notes, 1000)
 	if err := a.DB.SetMACNotes(r.Context(), normalized, notes); err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 		return
@@ -646,7 +667,7 @@ func (a *App) handleAPIDashboard(w http.ResponseWriter, r *http.Request, _ strin
 		return
 	}
 	snap, _ := a.DB.DashboardSnapshot(r.Context())
-	att, _ := a.DB.Attention(r.Context())
+	att := a.attention(r.Context())
 	writeJSON(w, http.StatusOK, map[string]any{
 		"snapshot": map[string]int{
 			"today_revenue_cents":        snap.TodayRevenueCents,
@@ -1001,13 +1022,12 @@ func (a *App) handleAPIUserList(w http.ResponseWriter, r *http.Request, _ string
 		users = filtered
 	}
 
-	macCount := map[int64]int{}
-	if macs, _ := a.DB.ListMACs(r.Context()); macs != nil {
-		for _, m := range macs {
-			if m.UserID != nil {
-				macCount[*m.UserID]++
-			}
-		}
+	// One GROUP BY instead of shipping every MAC row to Go just to count —
+	// the /admin/users UI path was converted in v0.111; this API sibling
+	// still did the full-table ListMACs scan on every call.
+	macCount, _ := a.DB.CountMACsByUser(r.Context())
+	if macCount == nil {
+		macCount = map[int64]int{}
 	}
 	out := make([]apiUserSummary, 0, len(users))
 	for _, u := range users {
@@ -1045,7 +1065,7 @@ func (a *App) handleAPIMACGrant(w http.ResponseWriter, r *http.Request, actor st
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid mac"})
 		return
 	}
-	if req.Days <= 0 || req.Days > 3650 {
+	if req.Days <= 0 || req.Days > maxGrantDays {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "days must be in 1..3650"})
 		return
 	}
@@ -1118,6 +1138,13 @@ func (a *App) handleAPIMACImport(w http.ResponseWriter, r *http.Request, actor s
 	if defaultDays <= 0 {
 		defaultDays = 30
 	}
+	// Same 3650-day (10-year) cap as /api/admin/macs/grant — without it a
+	// bulk import could set effectively-permanent expiries (or overflow
+	// time math with absurd values) that the single-grant path rejects.
+	if defaultDays > maxGrantDays {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "default_days too large (max 3650)"})
+		return
+	}
 	added, failed := 0, 0
 	for _, row := range req.MACs {
 		mac, ok := models.NormalizeMAC(row.MAC)
@@ -1129,6 +1156,11 @@ func (a *App) handleAPIMACImport(w http.ResponseWriter, r *http.Request, actor s
 		if days <= 0 {
 			days = defaultDays
 		}
+		if days > maxGrantDays {
+			log.Printf("api mac import %s: days %d exceeds max 3650", mac, days)
+			failed++
+			continue
+		}
 		if _, err := a.MACSvc.Extend(r.Context(), mac, strings.TrimSpace(row.Label), days, nil); err != nil {
 			log.Printf("api mac import %s: %v", mac, err)
 			failed++
@@ -1138,9 +1170,7 @@ func (a *App) handleAPIMACImport(w http.ResponseWriter, r *http.Request, actor s
 		// existing notes untouched (would overwrite to empty otherwise
 		// on re-import, which is a footgun).
 		if notes := strings.TrimSpace(row.Notes); notes != "" {
-			if len(notes) > 1000 {
-				notes = notes[:1000]
-			}
+			notes = truncateRunes(notes, 1000)
 			if err := a.DB.SetMACNotes(r.Context(), mac, notes); err != nil {
 				log.Printf("api mac import notes %s: %v", mac, err)
 			}
@@ -1184,10 +1214,8 @@ func (a *App) handleAPIOrderRefund(w http.ResponseWriter, r *http.Request, actor
 		return
 	}
 	reason := strings.TrimSpace(req.Reason)
-	if len(reason) > 200 {
-		reason = reason[:200]
-	}
-	mac, err := a.DB.MarkOrderRefunded(r.Context(), orderNo, reason)
+	reason = truncateRunes(reason, 200)
+	mac, err := a.refundOrder(r.Context(), orderNo, reason)
 	if err != nil {
 		log.Printf("api refund %s: %v", orderNo, err)
 		status := http.StatusInternalServerError
@@ -1249,9 +1277,7 @@ func (a *App) handleAPISMSSend(w http.ResponseWriter, r *http.Request, actor str
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "message is required"})
 		return
 	}
-	if len(msg) > 500 {
-		msg = msg[:500]
-	}
+	msg = truncateRunes(msg, 500)
 	if err := a.SendSMS(r.Context(), phone, msg); err != nil {
 		log.Printf("api sms %s: %v", phone, err)
 		a.DB.Audit(r.Context(), actor, "sms_test_failed", phone,
@@ -1331,8 +1357,12 @@ func (a *App) handleAPIVoucherGenerate(w http.ResponseWriter, r *http.Request, a
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "count must be 1..1000"})
 		return
 	}
-	if req.Days <= 0 {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "days must be > 0"})
+	if req.Days <= 0 || req.Days > maxGrantDays {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "days must be in 1..3650"})
+		return
+	}
+	if req.ExpiresDays > maxGrantDays {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "expires_days too large (max 3650)"})
 		return
 	}
 	batch := strings.TrimSpace(req.Batch)
@@ -1455,8 +1485,8 @@ func (a *App) handleAPIUserGrant(w http.ResponseWriter, r *http.Request, actor s
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "user_id required"})
 		return
 	}
-	if req.Days <= 0 {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "days must be > 0"})
+	if req.Days <= 0 || req.Days > maxGrantDays {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "days must be in 1..3650"})
 		return
 	}
 
@@ -1487,9 +1517,17 @@ func (a *App) handleAPIUserGrant(w http.ResponseWriter, r *http.Request, actor s
 	}
 	out := make([]extendedMAC, 0, len(macs))
 	for i := range macs {
-		extended, err := a.MACSvc.Extend(r.Context(), macs[i].Mac, label, req.Days, &req.UserID)
+		// ExtendOwned (not Extend): the unconditional upsert would
+		// reassign user_id on a MAC transferred to a different user
+		// between the list above and this write. Ownership-guarded
+		// extend skips such rows instead of stealing them back.
+		extended, err := a.MACSvc.ExtendOwned(r.Context(), macs[i].Mac, label, req.Days, req.UserID)
 		if err != nil {
 			log.Printf("api user grant %d mac=%s: %v", req.UserID, macs[i].Mac, err)
+			continue
+		}
+		if extended == nil {
+			log.Printf("api user grant %d mac=%s: skipped (ownership changed)", req.UserID, macs[i].Mac)
 			continue
 		}
 		a.DB.Audit(r.Context(), actor, "grant", macs[i].Mac,
@@ -1789,9 +1827,22 @@ func (a *App) handleAPIOrderCancelStale(w http.ResponseWriter, r *http.Request, 
 	var req struct {
 		OlderThanHours int `json:"older_than_hours"`
 	}
-	// Tolerate empty body: cleanup cron may POST nothing and rely on the
-	// 24h default.
-	_ = json.NewDecoder(r.Body).Decode(&req)
+	// Tolerate an EMPTY body (cleanup cron may POST nothing and rely on
+	// the 24h default) — but reject malformed JSON. Pre-v0.106 a decode
+	// error was silently discarded, so a caller that sent
+	// {"older_than_hours":"48"} (string, not int) got the 24h default and
+	// canceled a bigger, more aggressive window than requested.
+	body, err := io.ReadAll(io.LimitReader(r.Body, 1<<20))
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "read body: " + err.Error()})
+		return
+	}
+	if len(strings.TrimSpace(string(body))) > 0 {
+		if err := json.Unmarshal(body, &req); err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "bad json: " + err.Error()})
+			return
+		}
+	}
 	hours := req.OlderThanHours
 	if hours <= 0 {
 		hours = 24
@@ -1895,9 +1946,7 @@ func (a *App) handleAPIAuditNote(w http.ResponseWriter, r *http.Request, actor s
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "note required"})
 		return
 	}
-	if len(note) > 1000 {
-		note = note[:1000]
-	}
+	note = truncateRunes(note, 1000)
 	action := strings.TrimSpace(req.Action)
 	if action == "" {
 		action = "manual_note"
@@ -1918,9 +1967,7 @@ func (a *App) handleAPIAuditNote(w http.ResponseWriter, r *http.Request, actor s
 		}
 	}
 	target := strings.TrimSpace(req.Target)
-	if len(target) > 200 {
-		target = target[:200]
-	}
+	target = truncateRunes(target, 200)
 	a.DB.Audit(r.Context(), actor, action, target, note+" via=api ip="+clientIP(r))
 	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 }
@@ -1989,8 +2036,8 @@ func (a *App) handleAPIUserGrantByPhone(w http.ResponseWriter, r *http.Request, 
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid phone"})
 		return
 	}
-	if req.Days <= 0 {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "days must be > 0"})
+	if req.Days <= 0 || req.Days > maxGrantDays {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "days must be in 1..3650"})
 		return
 	}
 	user, err := a.DB.GetUserByPhone(r.Context(), phone)
@@ -2019,9 +2066,16 @@ func (a *App) handleAPIUserGrantByPhone(w http.ResponseWriter, r *http.Request, 
 	}
 	out := make([]extendedMAC, 0, len(macs))
 	for i := range macs {
-		extended, err := a.MACSvc.Extend(r.Context(), macs[i].Mac, label, req.Days, &user.ID)
+		// Ownership-guarded extend — see handleAPIUserGrant. A device
+		// transferred away between the list and this write is skipped
+		// rather than re-extended and reassigned to this user.
+		extended, err := a.MACSvc.ExtendOwned(r.Context(), macs[i].Mac, label, req.Days, user.ID)
 		if err != nil {
 			log.Printf("api user grant-by-phone %s mac=%s: %v", phone, macs[i].Mac, err)
+			continue
+		}
+		if extended == nil {
+			log.Printf("api user grant-by-phone %s mac=%s: skipped (ownership changed)", phone, macs[i].Mac)
 			continue
 		}
 		a.DB.Audit(r.Context(), actor, "grant", macs[i].Mac,

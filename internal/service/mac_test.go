@@ -151,14 +151,44 @@ func TestGrantFromOrderAddsToFirewall(t *testing.T) {
 	}
 }
 
-func TestGrantPropagatesFirewallError(t *testing.T) {
-	svc, _, fw := newTestSvc(t)
+// A firewall Add failure must NOT fail the grant: the DB row is committed
+// (source of truth) and the service falls back to a full Resync. Failing
+// here used to 500 the payment webhook, whose retries then no-oped because
+// the order was already paid — the customer stayed offline with no signal.
+func TestGrantToleratesFirewallAddErrorViaResync(t *testing.T) {
+	svc, dbx, fw := newTestSvc(t)
 	fw.addErr = errors.New("nft EBADF")
 	err := svc.GrantFromOrder(context.Background(), &models.Order{
 		OrderNo: "B-2", Mac: "11:22:33:44:55:66", Plan: "month", Days: 1,
 	})
-	if err == nil || !errors.Is(err, fw.addErr) && err.Error() == "" {
-		t.Errorf("expected firewall err to propagate; got %v", err)
+	if err != nil {
+		t.Fatalf("fw add failure should not fail the grant; got %v", err)
+	}
+	// DB grant landed.
+	if m, err := dbx.GetMAC(context.Background(), "11:22:33:44:55:66"); err != nil || m == nil {
+		t.Fatalf("expected MAC row despite fw error; err=%v", err)
+	}
+	// Resync fallback ran and converged the set.
+	if len(fw.syncCalls) != 1 {
+		t.Errorf("expected 1 Resync fallback, got %d", len(fw.syncCalls))
+	}
+	if !fw.set["11:22:33:44:55:66"] {
+		t.Error("mac should be in fw set after resync fallback")
+	}
+}
+
+// If BOTH the Add and the fallback Resync fail, the grant still succeeds
+// (DB is authoritative; convergence happens on the next resync) — but the
+// upsert error path must still propagate.
+func TestGrantStillSucceedsWhenResyncAlsoFails(t *testing.T) {
+	svc, _, fw := newTestSvc(t)
+	fw.addErr = errors.New("nft EBADF")
+	fw.syncErr = errors.New("nft ENOENT")
+	err := svc.GrantFromOrder(context.Background(), &models.Order{
+		OrderNo: "B-3", Mac: "11:22:33:44:55:77", Plan: "month", Days: 1,
+	})
+	if err != nil {
+		t.Fatalf("grant should survive fw+resync failure; got %v", err)
 	}
 }
 
@@ -265,6 +295,44 @@ func TestResyncMirrorsActiveMACs(t *testing.T) {
 	}
 	if got := len(fw.syncCalls); got != 1 {
 		t.Errorf("Resync should call Sync once; got %d", got)
+	}
+}
+
+// Resync must exclude MACs whose time-of-day schedule window is currently
+// closed — otherwise a resync (boot / admin / periodic reconcile) would
+// grant a schedule-blocked device access until the next EnforceSchedules
+// tick removed it again.
+func TestResyncRespectsSchedules(t *testing.T) {
+	svc, dbx, fw := newTestSvc(t)
+	ctx := context.Background()
+
+	_, _ = svc.Extend(ctx, "AA:BB:CC:DD:EE:FF", "always-on", 30, nil)
+	_, _ = svc.Extend(ctx, "11:22:33:44:55:66", "night-only", 30, nil)
+
+	// Build a schedule whose window is provably CLOSED right now: allow
+	// only a 1-minute slot starting 2 hours from now, today.
+	now := time.Now()
+	start := (now.Hour()*60 + now.Minute() + 120) % 1440
+	wd := int(now.Weekday())
+	if wd == 0 {
+		wd = 7
+	}
+	closed := models.MacSchedule{Days: []int{wd}, StartMin: start, EndMin: (start + 1) % 1440}
+	if closed.Active(now) {
+		t.Fatal("test setup: schedule should be closed now")
+	}
+	if err := dbx.SetMACSchedule(ctx, "11:22:33:44:55:66", closed.JSON()); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := svc.Resync(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if !fw.set["AA:BB:CC:DD:EE:FF"] {
+		t.Error("unscheduled MAC missing after Resync")
+	}
+	if fw.set["11:22:33:44:55:66"] {
+		t.Error("schedule-closed MAC must NOT be in fw set after Resync")
 	}
 }
 

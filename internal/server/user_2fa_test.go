@@ -155,6 +155,9 @@ func TestUser2FALoginRequiresCodeWhenEnrolled(t *testing.T) {
 	code := validTOTPForUser(t, app, "13800139004")
 	do(t, h, "POST", "/user/2fa/confirm",
 		url.Values{"_csrf": {csrf}, "code": {code}}, jar)
+	// Confirm consumed this timestep (one-time use); a real authenticator
+	// would show a fresh code by the time the user logs in again.
+	resetTOTPReplay()
 
 	// Now wipe the active session — simulate a fresh browser logging in.
 	res, _ := do(t, h, "POST", "/user/login",
@@ -267,6 +270,9 @@ func TestUser2FADisableRequiresPasswordAndCode(t *testing.T) {
 	code := validTOTPForUser(t, app, "13800139007")
 	do(t, h, "POST", "/user/2fa/confirm",
 		url.Values{"_csrf": {csrf}, "code": {code}}, jar)
+	// Confirm consumed this timestep (one-time use); the disable attempts
+	// below legitimately reuse it inside the same 30s step.
+	resetTOTPReplay()
 
 	// Wrong password → blocked.
 	res, _ := do(t, h, "POST", "/user/2fa/disable",
@@ -453,4 +459,82 @@ func min(a, b int) int {
 		return a
 	}
 	return b
+}
+
+// The code that confirms enrollment must be recorded in the replay ledger:
+// the pending secret is promoted to the live secret verbatim, so before
+// v0.107 the very same code still passed the login-2FA gate for the rest
+// of its ±1-step window (~90s) — a shoulder-surfer watching the victim
+// enroll could immediately open their own session with it (given the
+// password, which is exactly the compromise 2FA is meant to survive).
+func TestUser2FAConfirmCodeCannotBeReplayedAtLogin(t *testing.T) {
+	app := setupTestApp(t)
+	h := app.Routes()
+	jar := registerAndLogin(t, h, "13800139080", "confirm-pw")
+	csrf := jar[csrfCookieName]
+	do(t, h, "POST", "/user/2fa/begin", url.Values{"_csrf": {csrf}}, jar)
+	code := validTOTPForUser(t, app, "13800139080")
+	res, _ := do(t, h, "POST", "/user/2fa/confirm",
+		url.Values{"_csrf": {csrf}, "code": {code}}, jar)
+	if res.StatusCode != 200 {
+		t.Fatalf("confirm should render backup codes; status=%d", res.StatusCode)
+	}
+	// NOTE: deliberately no resetTOTPReplay() here — the confirm itself
+	// must have consumed the step.
+
+	res, _ = do(t, h, "POST", "/user/login",
+		url.Values{"phone": {"13800139080"}, "password": {"confirm-pw"}}, nil)
+	pending := cookieJar(res)
+	res2, _ := do(t, h, "GET", "/user/login/2fa", nil, pending)
+	for k, v := range cookieJar(res2) {
+		pending[k] = v
+	}
+	res3, _ := do(t, h, "POST", "/user/login/2fa",
+		url.Values{"code": {code}, "_csrf": {pending[csrfCookieName]}}, pending)
+	if cookieJar(res3)[userCookieName] != "" {
+		t.Fatal("the enrollment-confirm code opened a session when replayed at login")
+	}
+	if res3.StatusCode != 200 {
+		t.Errorf("replay should re-render the challenge; status=%d", res3.StatusCode)
+	}
+}
+
+// /user/2fa/disable caps attempts. Pre-v0.107 it had no cap at all — the
+// login-2FA gate allows 5 wrong codes per pending token, but an attacker
+// holding a stolen session cookie plus the password could hammer disable
+// with the whole 10^6 code space and switch 2FA off.
+func TestUser2FADisableAttemptsRateLimited(t *testing.T) {
+	app := setupTestApp(t)
+	h := app.Routes()
+	jar := registerAndLogin(t, h, "13800139081", "cap-pw")
+	csrf := jar[csrfCookieName]
+	do(t, h, "POST", "/user/2fa/begin", url.Values{"_csrf": {csrf}}, jar)
+	code := validTOTPForUser(t, app, "13800139081")
+	do(t, h, "POST", "/user/2fa/confirm", url.Values{"_csrf": {csrf}, "code": {code}}, jar)
+	resetTOTPReplay()
+
+	// Build a code guaranteed wrong: same length, digits rotated.
+	wrong := strings.Map(func(r rune) rune {
+		return '0' + (r-'0'+1)%10
+	}, code)
+
+	disable := func(c string) string {
+		res, _ := do(t, h, "POST", "/user/2fa/disable",
+			url.Values{"_csrf": {csrf}, "password": {"cap-pw"}, "code": {c}}, jar)
+		return res.Header.Get("Location")
+	}
+
+	for i := 0; i < 5; i++ {
+		if loc := disable(wrong); !strings.Contains(loc, "2fa_failed") {
+			t.Fatalf("attempt %d should fail as wrong code; got %s", i+1, loc)
+		}
+	}
+	// 6th attempt — even with the CORRECT code — is rate-limited.
+	if loc := disable(code); !strings.Contains(loc, "rate_limited") {
+		t.Errorf("6th attempt should be rate-limited; got %s", loc)
+	}
+	u, _ := app.DB.GetUserByPhone(context.Background(), "13800139081")
+	if u.TOTPSecret == "" {
+		t.Fatal("2fa was disabled despite the attempt cap")
+	}
 }

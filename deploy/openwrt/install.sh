@@ -33,8 +33,10 @@ if [ -f /etc/router-billing/config.yaml ]; then
     log "已存在 /etc/router-billing/config.yaml，跳过覆盖"
 else
     log "首装：写入默认 config.yaml（请立即修改 admin.password）"
-    install -m 0644 "${PKG_DIR}/config.example.yaml" /etc/router-billing/config.yaml
+    install -m 0600 "${PKG_DIR}/config.example.yaml" /etc/router-billing/config.yaml
 fi
+# config 里有管理员口令散列 + 微信/支付宝商户密钥，绝不能全局可读。
+chmod 0600 /etc/router-billing/config.yaml
 
 log "安装 init 脚本"
 install -m 0755 "${PKG_DIR}/openwrt/etc/init.d/router-billing" /etc/init.d/router-billing
@@ -54,10 +56,13 @@ else
     # Friends_WiFi must be encrypted — auto-generate a 12-char ASCII key if not
     # supplied. Saved 0600 to /etc/router-billing/wifi-keys.txt so admin can recover it.
     if [ -z "${FREE_KEY}" ]; then
+        # 18 bytes → 24 base64 chars — enough margin that stripping '/+='
+        # never realistically leaves fewer than the 12 chars we cut
+        # (same as uci-defaults; 12 bytes / 16 chars used to cut it close).
         if command -v openssl >/dev/null 2>&1; then
-            FREE_KEY=$(openssl rand -base64 12 | tr -d '/+=' | cut -c1-12)
+            FREE_KEY=$(openssl rand -base64 18 | tr -d '/+=' | cut -c1-12)
         else
-            FREE_KEY=$(head -c 12 /dev/urandom | base64 | tr -d '/+=' | cut -c1-12)
+            FREE_KEY=$(head -c 18 /dev/urandom | base64 | tr -d '/+=' | cut -c1-12)
         fi
         log "auto-generated Free_WiFi key: ${FREE_KEY}"
     fi

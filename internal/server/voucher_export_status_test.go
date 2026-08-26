@@ -82,3 +82,45 @@ func TestVoucherExportFilenameEncodesStatus(t *testing.T) {
 		t.Errorf("filename should embed status; got %q", cd)
 	}
 }
+
+// Free-text batch names must not break out of the Content-Disposition
+// quoted-string. net/http neutralizes CR/LF in header values, but a `"`
+// passed through verbatim and let a batch named `x";evil=` smuggle extra
+// header parameters (and produced RFC 6266 parse ambiguity across
+// browsers). Every other export uses constant filenames; the voucher
+// export keeps the batch for self-description, sanitized.
+func TestVoucherExportFilenameSanitizesBatch(t *testing.T) {
+	app := setupTestApp(t)
+	ctx := context.Background()
+	evil := `x";evil="1`
+	_, _ = app.DB.CreateVoucher(ctx, "SANIT1111SANI", 30, "", evil, nil)
+	h := app.Routes()
+	jar := loginAdmin(t, h)
+	res, body := do(t, h, "GET", "/admin/vouchers/export.csv?batch="+
+		"x%22%3Bevil%3D%221", nil, jar)
+	cd := res.Header.Get("Content-Disposition")
+	if strings.Count(cd, `"`) != 2 {
+		t.Errorf("filename quoting broken: %q", cd)
+	}
+	if strings.Contains(cd, ";evil=") {
+		t.Errorf("batch text leaked into header params: %q", cd)
+	}
+	// The row itself still exports (filter matches the raw batch value).
+	if !strings.Contains(body, "SANIT1111SANI") {
+		t.Errorf("export body should still contain the batch's voucher")
+	}
+}
+
+func TestFilenameSafe(t *testing.T) {
+	for _, c := range []struct{ in, want string }{
+		{"batch-01", "batch-01"},
+		{`x";evil="1`, "xevil1"},
+		{"团购批次", ""},
+		{"a b\tc", "abc"},
+		{strings.Repeat("A", 100), strings.Repeat("A", 60)},
+	} {
+		if got := filenameSafe(c.in); got != c.want {
+			t.Errorf("filenameSafe(%q) = %q, want %q", c.in, got, c.want)
+		}
+	}
+}

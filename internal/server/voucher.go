@@ -1,11 +1,13 @@
 package server
 
 import (
+	"context"
 	"encoding/csv"
 	"errors"
 	"fmt"
 	"log"
 	"net/http"
+	"net/url"
 	"strconv"
 	"strings"
 	"time"
@@ -76,6 +78,13 @@ func (a *App) handleAdminVouchers(w http.ResponseWriter, r *http.Request) {
 // Returns to /admin/vouchers with added=N failed=M reasons in the flash.
 // Each created voucher is audited individually so the existing per-row
 // trail still works.
+//
+// All inserts run in a single SQLite transaction (CreateVouchersBulk) —
+// pre-v0.103 each row was its own implicit txn so a 1000-row import did
+// 1000 fsyncs ≈ several seconds even on SSD. Now: one fsync at COMMIT.
+// UNIQUE collisions still don't roll back the rest (SQLite stmt-level
+// errors don't abort the surrounding tx), so a duplicate paste in the
+// middle of an import doesn't lose the rest.
 func (a *App) handleAdminVouchersImport(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.Redirect(w, r, "/admin/vouchers", http.StatusSeeOther)
@@ -86,7 +95,14 @@ func (a *App) handleAdminVouchersImport(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	bulk := r.PostForm.Get("bulk")
-	var added, failed int
+
+	// Two-pass: first parse every line into specs (cheap, no DB), then a
+	// single bulk insert. Rejected-at-parse rows count as failed.
+	var (
+		specs   []db.VoucherSpec
+		failed  int
+		auditIP = clientIP(r)
+	)
 	for _, raw := range strings.Split(bulk, "\n") {
 		line := strings.TrimSpace(raw)
 		if line == "" || strings.HasPrefix(line, "#") {
@@ -104,6 +120,10 @@ func (a *App) handleAdminVouchersImport(w http.ResponseWriter, r *http.Request) 
 				days = n
 			}
 		}
+		if days > maxGrantDays {
+			failed++
+			continue
+		}
 		label := ""
 		if len(parts) >= 3 {
 			label = strings.TrimSpace(parts[2])
@@ -118,14 +138,31 @@ func (a *App) handleAdminVouchersImport(w http.ResponseWriter, r *http.Request) 
 				expires = &t
 			}
 		}
-		if _, err := a.DB.CreateVoucher(r.Context(), code, days, label, batch, expires); err != nil {
-			log.Printf("voucher import %s: %v", code, err)
+		specs = append(specs, db.VoucherSpec{
+			Code: code, Days: days, Label: label, Batch: batch, ExpiresAt: expires,
+		})
+	}
+
+	results, err := a.DB.CreateVouchersBulk(r.Context(), specs)
+	if err != nil {
+		log.Printf("voucher bulk import: %v", err)
+		http.Redirect(w, r, "/admin/vouchers?err=db", http.StatusSeeOther)
+		return
+	}
+	added := 0
+	for i, ok := range results {
+		if !ok {
 			failed++
 			continue
 		}
-		a.DB.Audit(r.Context(), "admin", "voucher_imported", code,
-			"days="+strconv.Itoa(days)+" batch="+batch+" ip="+clientIP(r))
 		added++
+		// Per-row audit happens after the single tx so the timeline
+		// still records every imported code, but the slow part (sync to
+		// disk) only fsyncs once for the inserts. Audit rows themselves
+		// are best-effort and not in our hot loop.
+		s := specs[i]
+		a.DB.Audit(r.Context(), "admin", "voucher_imported", s.Code,
+			"days="+strconv.Itoa(s.Days)+" batch="+s.Batch+" ip="+auditIP)
 	}
 	http.Redirect(w, r, fmt.Sprintf("/admin/vouchers?ok=import&added=%d&failed=%d", added, failed), http.StatusSeeOther)
 }
@@ -149,7 +186,11 @@ func (a *App) handleAdminVouchersGenerate(w http.ResponseWriter, r *http.Request
 		http.Redirect(w, r, "/admin/vouchers?err=invalid_days", http.StatusSeeOther)
 		return
 	}
-	if days <= 0 {
+	if days <= 0 || days > maxGrantDays {
+		http.Redirect(w, r, "/admin/vouchers?err=invalid_days", http.StatusSeeOther)
+		return
+	}
+	if expiresDays > maxGrantDays {
 		http.Redirect(w, r, "/admin/vouchers?err=invalid_days", http.StatusSeeOther)
 		return
 	}
@@ -162,29 +203,42 @@ func (a *App) handleAdminVouchersGenerate(w http.ResponseWriter, r *http.Request
 		expires = &t
 	}
 
-	created := 0
-	for i := 0; i < count; i++ {
-		// Up to 3 retries on the very unlikely 12-char collision.
-		for try := 0; try < 3; try++ {
-			code, err := voucher.New()
-			if err != nil {
-				log.Printf("voucher gen: %v", err)
-				break
-			}
-			if _, err := a.DB.CreateVoucher(r.Context(), code, days, label, batch, expires); err != nil {
-				if strings.Contains(strings.ToLower(err.Error()), "unique") {
-					continue
-				}
-				log.Printf("voucher insert: %v", err)
-				break
-			}
-			created++
+	// Generate `count` candidates upfront, dedupe in-memory (12-char codes
+	// from a 32-symbol alphabet have ~zero realistic collision rate, but
+	// the dedupe is cheap insurance), then bulk-insert in one tx.
+	// Pre-v0.103 each row was a separate fsync; 1000-voucher batches
+	// took several seconds. Now: ~1 fsync.
+	specs := make([]db.VoucherSpec, 0, count)
+	seen := make(map[string]struct{}, count)
+	for len(specs) < count {
+		code, err := voucher.New()
+		if err != nil {
+			log.Printf("voucher gen: %v", err)
 			break
+		}
+		if _, dup := seen[code]; dup {
+			continue
+		}
+		seen[code] = struct{}{}
+		specs = append(specs, db.VoucherSpec{
+			Code: code, Days: days, Label: label, Batch: batch, ExpiresAt: expires,
+		})
+	}
+	results, err := a.DB.CreateVouchersBulk(r.Context(), specs)
+	if err != nil {
+		log.Printf("voucher bulk generate: %v", err)
+		http.Redirect(w, r, "/admin/vouchers?err=db", http.StatusSeeOther)
+		return
+	}
+	created := 0
+	for _, ok := range results {
+		if ok {
+			created++
 		}
 	}
 	a.DB.Audit(r.Context(), "admin", "voucher_batch", batch,
 		fmt.Sprintf("count=%d days=%d", created, days))
-	http.Redirect(w, r, "/admin/vouchers?batch="+batch+"&ok=1", http.StatusSeeOther)
+	http.Redirect(w, r, "/admin/vouchers?batch="+url.QueryEscape(batch)+"&ok=1", http.StatusSeeOther)
 }
 
 func (a *App) handleAdminVouchersRevoke(w http.ResponseWriter, r *http.Request) {
@@ -240,7 +294,7 @@ func (a *App) handleAdminVoucherBatchRevoke(w http.ResponseWriter, r *http.Reque
 	a.DB.Audit(r.Context(), "admin", "voucher_batch_revoke", displayBatch,
 		fmt.Sprintf("count=%d ip=%s", n, clientIP(r)))
 	http.Redirect(w, r,
-		fmt.Sprintf("/admin/vouchers?ok=batch_revoke&revoked=%d&batch=%s", n, displayBatch),
+		fmt.Sprintf("/admin/vouchers?ok=batch_revoke&revoked=%d&batch=%s", n, url.QueryEscape(displayBatch)),
 		http.StatusSeeOther)
 }
 
@@ -251,20 +305,25 @@ func (a *App) handleAdminVoucherBatchRevoke(w http.ResponseWriter, r *http.Reque
 // downloaded a previous export and filtered "status=redeemed" in Excel
 // can now ask for that directly. The filter happens in Go (since the
 // DB doesn't store the derived status column) — list size is capped
-// at 1000 by the underlying ListVouchers so the in-memory pass is fine.
+// at 10000 by the underlying ListVouchers so the in-memory pass is fine.
 func (a *App) handleAdminVouchersExport(w http.ResponseWriter, r *http.Request) {
 	batch := r.URL.Query().Get("batch")
 	wantStatus := strings.TrimSpace(r.URL.Query().Get("status"))
-	list, err := a.DB.ListVouchers(r.Context(), batch, 1000)
+	list, err := a.DB.ListVouchers(r.Context(), batch, 10000)
 	if err != nil {
 		http.Error(w, "db", http.StatusInternalServerError)
 		return
 	}
 	stamp := time.Now().Format("20060102-150405")
 	w.Header().Set("Content-Type", "text/csv; charset=utf-8")
-	filenameSuffix := batch
+	// The batch/status query params are free text; every other export uses
+	// constant filenames for exactly this reason. Strip anything outside
+	// [A-Za-z0-9._-] so a batch named `x";evil=` can't break out of the
+	// Content-Disposition quoted-string (net/http neutralizes CR/LF, but
+	// quotes pass through verbatim).
+	filenameSuffix := filenameSafe(batch)
 	if wantStatus != "" {
-		filenameSuffix = batch + "-" + wantStatus
+		filenameSuffix = filenameSafe(batch + "-" + wantStatus)
 	}
 	w.Header().Set("Content-Disposition",
 		fmt.Sprintf(`attachment; filename="vouchers-%s-%s.csv"`, filenameSuffix, stamp))
@@ -292,10 +351,10 @@ func (a *App) handleAdminVouchersExport(w http.ResponseWriter, r *http.Request) 
 			voucher.Pretty(v.Code),
 			v.Code,
 			strconv.Itoa(v.Days),
-			v.Batch,
+			csvCell(v.Batch), // admin/API free text — formula-injection risk
 			expires,
 			status,
-			v.RedeemedByMac,
+			csvCell(v.RedeemedByMac),
 			v.CreatedAt.Format(time.RFC3339),
 		})
 	}
@@ -327,17 +386,20 @@ func (a *App) handleRedeem(w http.ResponseWriter, r *http.Request) {
 	// Rate-limit by client IP. 10 tries / 10 minutes is generous for honest
 	// fat-finger typos and prohibitive for brute-forcing the 12-char alphabet.
 	if a.redeemLimiter != nil && !a.redeemLimiter.allow(clientIP(r)) {
-		http.Redirect(w, r, "/redeem?err="+httpEsc("尝试过于频繁，请 10 分钟后再试"), http.StatusSeeOther)
+		http.Redirect(w, r, "/redeem?err="+url.QueryEscape("尝试过于频繁，请 10 分钟后再试"), http.StatusSeeOther)
 		return
 	}
 	if err := r.ParseForm(); err != nil {
 		http.Error(w, "form", http.StatusBadRequest)
 		return
 	}
+	// codeRaw is raw user input — always query-escape it in redirects.
+	// Pre-v0.100 it was concatenated as-is, so "X&ok=1" or "X#f" could
+	// inject extra query params / truncate the redirect URL.
 	codeRaw := r.PostForm.Get("code")
 	code := voucher.Canon(codeRaw)
 	if err := voucher.Validate(code); err != nil {
-		http.Redirect(w, r, "/redeem?code="+codeRaw+"&err="+httpEsc(err.Error()), http.StatusSeeOther)
+		http.Redirect(w, r, "/redeem?code="+url.QueryEscape(codeRaw)+"&err="+url.QueryEscape(err.Error()), http.StatusSeeOther)
 		return
 	}
 	macInput := r.PostForm.Get("mac")
@@ -346,7 +408,7 @@ func (a *App) handleRedeem(w http.ResponseWriter, r *http.Request) {
 	}
 	mac, ok := models.NormalizeMAC(macInput)
 	if !ok {
-		http.Redirect(w, r, "/redeem?code="+codeRaw+"&err="+httpEsc("无法识别 MAC，请填写"), http.StatusSeeOther)
+		http.Redirect(w, r, "/redeem?code="+url.QueryEscape(codeRaw)+"&err="+url.QueryEscape("无法识别 MAC，请填写"), http.StatusSeeOther)
 		return
 	}
 
@@ -358,21 +420,37 @@ func (a *App) handleRedeem(w http.ResponseWriter, r *http.Request) {
 
 	v, err := a.DB.RedeemVoucher(r.Context(), code, mac, userID)
 	if err != nil {
-		http.Redirect(w, r, "/redeem?code="+codeRaw+"&err="+httpEsc(redeemErrLabel(err)), http.StatusSeeOther)
+		http.Redirect(w, r, "/redeem?code="+url.QueryEscape(codeRaw)+"&err="+url.QueryEscape(redeemErrLabel(err)), http.StatusSeeOther)
 		return
 	}
-	// Apply the time to the MAC.
-	m, err := a.MACSvc.Extend(r.Context(), mac, "voucher:"+v.Batch, v.Days, userID)
+	// The voucher is consumed from here on — this is money in flight, same
+	// as a paid order inside finalizeOrder. Don't let a browser disconnect
+	// abort between "consumed" and "granted" (r.Context() cancels on
+	// disconnect; pre-v0.109 that burned the code with nothing granted).
+	ctx := context.WithoutCancel(r.Context())
+	// Apply the time to the MAC. GrantFromVoucher errors ONLY when the DB
+	// grant failed (nothing durable) — a firewall-only failure is resynced
+	// internally, not surfaced, so a redeemed code is never reported as a
+	// failure after days were actually granted.
+	m, err := a.MACSvc.GrantFromVoucher(ctx, mac, "voucher:"+v.Batch, v.Days, userID)
 	if err != nil {
-		log.Printf("redeem extend %s: %v", mac, err)
-		http.Redirect(w, r, "/redeem?code="+codeRaw+"&err=授权失败请联系管理员", http.StatusSeeOther)
+		log.Printf("redeem grant %s (voucher %s): %v", mac, code, err)
+		// Compensate: put the voucher back to unused so the customer can
+		// retry instead of losing the code (pay path's RevertOrderToPending
+		// equivalent).
+		if uerr := a.DB.UnredeemVoucher(ctx, code, mac); uerr != nil {
+			log.Printf("CRITICAL: voucher %s consumed but grant failed (%v) and un-redeem failed (%v) — needs manual grant", code, err, uerr)
+			http.Redirect(w, r, "/redeem?code="+url.QueryEscape(codeRaw)+"&err="+url.QueryEscape("授权失败请联系管理员"), http.StatusSeeOther)
+			return
+		}
+		http.Redirect(w, r, "/redeem?code="+url.QueryEscape(codeRaw)+"&err="+url.QueryEscape("授权失败，充值码未消耗，请重试"), http.StatusSeeOther)
 		return
 	}
 	actor := "user-anon"
 	if userID != nil {
 		actor = fmt.Sprintf("user:%d", *userID)
 	}
-	a.DB.Audit(r.Context(), actor, "redeem", mac, "voucher="+code)
+	a.DB.Audit(ctx, actor, "redeem", mac, "voucher="+code)
 	uid := int64(0)
 	if userID != nil {
 		uid = *userID
@@ -391,6 +469,24 @@ func (a *App) handleRedeem(w http.ResponseWriter, r *http.Request) {
 	http.Redirect(w, r, q, http.StatusSeeOther)
 }
 
+// filenameSafe keeps ASCII letters, digits and ._- (capped at 60 chars) so
+// free-text values embedded in a Content-Disposition filename can't carry
+// quotes or separators into the header.
+func filenameSafe(s string) string {
+	var b strings.Builder
+	for _, r := range s {
+		if b.Len() >= 60 {
+			break
+		}
+		switch {
+		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9',
+			r == '.', r == '_', r == '-':
+			b.WriteRune(r)
+		}
+	}
+	return b.String()
+}
+
 func redeemErrLabel(err error) string {
 	switch {
 	case errors.Is(err, db.ErrVoucherNotFound):
@@ -404,18 +500,4 @@ func redeemErrLabel(err error) string {
 	default:
 		return err.Error()
 	}
-}
-
-// httpEsc is a tiny URL-encoder for our redirect query strings.
-func httpEsc(s string) string {
-	var b strings.Builder
-	for _, r := range s {
-		switch r {
-		case '&', '?', '#', '=', '+', '%', ' ':
-			b.WriteString(fmt.Sprintf("%%%02X", r))
-		default:
-			b.WriteRune(r)
-		}
-	}
-	return b.String()
 }

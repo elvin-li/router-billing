@@ -22,7 +22,7 @@ func (a *App) handleAdminStatsStream(w http.ResponseWriter, r *http.Request) {
 
 	send := func() {
 		stats, _ := a.DB.Stats(r.Context())
-		att, _ := a.DB.Attention(r.Context())
+		att := a.attention(r.Context())
 		buf, _ := json.Marshal(map[string]any{
 			"total":           stats.Total,
 			"active":          stats.Active,
@@ -38,7 +38,7 @@ func (a *App) handleAdminStatsStream(w http.ResponseWriter, r *http.Request) {
 	}
 
 	send()
-	t := time.NewTicker(5 * time.Second)
+	t := time.NewTicker(a.sseTickInterval())
 	defer t.Stop()
 	hb := time.NewTicker(25 * time.Second)
 	defer hb.Stop()
@@ -47,8 +47,17 @@ func (a *App) handleAdminStatsStream(w http.ResponseWriter, r *http.Request) {
 		case <-r.Context().Done():
 			return
 		case <-t.C:
+			// Stop streaming once the admin session is revoked/expired —
+			// requireAdmin only gated the initial connect (see
+			// adminSessionAlive in devices_stream.go).
+			if !a.adminSessionAlive(r) {
+				return
+			}
 			send()
 		case <-hb.C:
+			if !a.adminSessionAlive(r) {
+				return
+			}
 			fmt.Fprintf(w, ": heartbeat\n\n")
 			flusher.Flush()
 		}

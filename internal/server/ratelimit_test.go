@@ -1,6 +1,7 @@
 package server
 
 import (
+	"fmt"
 	"testing"
 	"time"
 )
@@ -21,6 +22,23 @@ func TestRateLimiter(t *testing.T) {
 	time.Sleep(110 * time.Millisecond)
 	if !rl.allow("1.2.3.4") {
 		t.Error("after window, should be allowed again")
+	}
+}
+
+// The hits map must stay bounded even when every key is live inside the
+// window (an attacker rotating IPv6 source addresses creates fresh keys
+// faster than expiry can drain them). Before the hard cap this grew without
+// limit — a memory-exhaustion DoS on a RAM-constrained router.
+func TestRateLimiterBoundedUnderKeyFlood(t *testing.T) {
+	rl := newRateLimiter(3, time.Hour)
+	for i := 0; i < 50000; i++ {
+		rl.allow(fmt.Sprintf("2001:db8::%x", i))
+	}
+	rl.mu.Lock()
+	n := len(rl.hits)
+	rl.mu.Unlock()
+	if n > 8192 {
+		t.Errorf("hits map grew to %d entries under key flood; want <= 8192", n)
 	}
 }
 

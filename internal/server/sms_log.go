@@ -32,7 +32,11 @@ func (a *App) SendSMS(ctx context.Context, phone, message string) error {
 	if err != nil {
 		errMsg = err.Error()
 	}
-	if logErr := a.DB.LogSMS(ctx, provider, phone, message, err == nil, errMsg); logErr != nil {
+	// The log write must survive ctx dying between "provider delivered"
+	// and "row inserted" (client disconnect, shutdown): the SMS is out in
+	// the real world either way, and sms_log exists precisely to record
+	// that.
+	if logErr := a.DB.LogSMS(context.WithoutCancel(ctx), provider, phone, message, err == nil, errMsg); logErr != nil {
 		log.Printf("sms_log write failed: %v (real send result was: %v)", logErr, err)
 	}
 	return err

@@ -77,6 +77,90 @@ func TestExpiryReminderDeduplicatesWithin22Hours(t *testing.T) {
 	}
 }
 
+// cancelingProvider delivers via the wrapped Console but cancels the
+// given CancelFunc as a side effect of the send — simulating a request
+// context that dies between "SMS delivered" and "de-dup audit written"
+// (admin closed the trigger page, or the server started shutting down).
+type cancelingProvider struct {
+	inner  *sms.Console
+	cancel context.CancelFunc
+}
+
+func (c *cancelingProvider) Name() string { return "canceling" }
+func (c *cancelingProvider) Send(ctx context.Context, phone, message string) error {
+	err := c.inner.Send(ctx, phone, message)
+	c.cancel()
+	return err
+}
+
+func TestExpiryReminderDedupSurvivesContextCancelMidPass(t *testing.T) {
+	app := setupTestApp(t)
+	console := sms.NewConsole(50)
+
+	seedUserAndMACExpiring(t, app, "13800143020", "AA:BB:CC:DD:E1:20", 2)
+
+	// First pass: the context is canceled the moment the SMS goes out.
+	// The de-dup audit row must still land — otherwise every later pass
+	// re-texts the same user (real-world SMS spam until the MAC expires).
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	app.SMS = &sms.Sender{P: &cancelingProvider{inner: console, cancel: cancel}}
+	sent1, _, _ := app.sendExpiryReminders(ctx)
+	if sent1 != 1 {
+		t.Fatalf("first pass: sent = %d, want 1", sent1)
+	}
+
+	// Second pass with a healthy context — must de-dup.
+	app.SMS = &sms.Sender{P: console}
+	sent2, _, _ := app.sendExpiryReminders(context.Background())
+	if sent2 != 0 {
+		t.Errorf("second pass re-sent %d reminders — de-dup audit row was lost to the canceled context", sent2)
+	}
+	if n := len(console.Recent()); n != 1 {
+		t.Errorf("expected exactly 1 SMS total; got %d", n)
+	}
+}
+
+func TestExpiryReminderPassStopsOnCanceledContext(t *testing.T) {
+	app := setupTestApp(t)
+	console := sms.NewConsole(50)
+
+	// Two eligible MACs. The context dies as a side effect of the FIRST
+	// send — the pass must stop instead of grinding through the rest
+	// (each remaining MAC would fail its send on the dead ctx and write
+	// an expiry_reminder_failed audit row: restart-time noise).
+	seedUserAndMACExpiring(t, app, "13800143030", "AA:BB:CC:DD:E1:30", 2)
+	seedUserAndMACExpiring(t, app, "13800143031", "AA:BB:CC:DD:E1:31", 2)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	app.SMS = &sms.Sender{P: &cancelingProvider{inner: console, cancel: cancel}}
+	sent, _, errored := app.sendExpiryReminders(ctx)
+	if sent != 1 {
+		t.Errorf("sent = %d, want 1 (the in-flight MAC completes)", sent)
+	}
+	if errored != 0 {
+		t.Errorf("errored = %d, want 0 — remaining MACs should be deferred, not failed", errored)
+	}
+	if n := len(console.Recent()); n != 1 {
+		t.Errorf("expected 1 SMS before the cancel stopped the pass; got %d", n)
+	}
+	entries, _ := app.DB.ListAudit(context.Background(), 50)
+	for _, e := range entries {
+		if e.Action == "expiry_reminder_failed" {
+			t.Errorf("canceled pass wrote a failure audit row: %+v", e)
+		}
+	}
+
+	// A later healthy pass picks up the deferred MAC (and only that one —
+	// the first is de-duped by its audit row).
+	app.SMS = &sms.Sender{P: console}
+	sent2, _, _ := app.sendExpiryReminders(context.Background())
+	if sent2 != 1 {
+		t.Errorf("follow-up pass sent = %d, want 1 (the deferred MAC)", sent2)
+	}
+}
+
 func TestExpiryReminderSkipsSuspendedUsers(t *testing.T) {
 	app := setupTestApp(t)
 	console := sms.NewConsole(50)
@@ -248,5 +332,25 @@ func TestFormatExpiryReminderBody(t *testing.T) {
 	body2 := formatExpiryReminderBody("AA:BB:CC:11:22:33", "", exp)
 	if strings.Contains(body2, "()") {
 		t.Errorf("label-less body should not have empty parens; got %s", body2)
+	}
+}
+
+func TestFormatExpiryReminderBodyDayCountRoundsUp(t *testing.T) {
+	cases := []struct {
+		until time.Duration
+		want  string
+	}{
+		// 71h out spans into the 3rd day — the old truncation said "2 天".
+		{71 * time.Hour, "还有 3 天"},
+		{47 * time.Hour, "还有 2 天"},
+		{20 * time.Hour, "还有 1 天"},
+		// Already past (still status=active until the sweep): clamp to 1.
+		{-2 * time.Hour, "还有 1 天"},
+	}
+	for _, c := range cases {
+		body := formatExpiryReminderBody("AA:BB:CC:11:22:33", "", time.Now().Add(c.until))
+		if !strings.Contains(body, c.want) {
+			t.Errorf("until=%s: body %q should contain %q", c.until, body, c.want)
+		}
 	}
 }

@@ -77,7 +77,7 @@
           {{if .HasSchedule}}
           <button class="btn outline" type="submit" name="clear" value="1"
                   formnovalidate
-                  onclick="return confirm('清除时段限制？该 MAC 将恢复 24x7 在线。')">
+                  data-confirm="清除时段限制？该 MAC 将恢复 24x7 在线。">
             清除（恢复 24x7）
           </button>
           {{end}}
@@ -93,5 +93,8 @@
     </section>
   </main>
 </div>
+  {{/* Confirm/print handlers run via ui.js data-* attributes — the CSP
+       (script-src 'self') blocks inline on*= attributes. */}}
+  <script src="/static/ui.js" defer></script>
 </body>
 </html>

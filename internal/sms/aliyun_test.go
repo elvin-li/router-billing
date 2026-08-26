@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -161,6 +162,58 @@ func TestAliyunNameAndDefaults(t *testing.T) {
 	if a.HTTPClient == nil || a.HTTPClient.Timeout <= 0 {
 		t.Error("HTTPClient defaults missing")
 	}
+}
+
+func TestAliyunZeroValueSendDoesNotPanic(t *testing.T) {
+	// A literal &Aliyun{...} (bypassing NewAliyun) leaves nowFn/nonceFn
+	// nil — pre-v0.108 Send dereferenced them unguarded and the panic
+	// escaped in whatever background goroutine sent the SMS, killing the
+	// whole process.
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte(`{"Code":"OK","Message":"","RequestId":"r"}`))
+	}))
+	t.Cleanup(srv.Close)
+
+	a := &Aliyun{
+		AccessKeyID:     "ak",
+		AccessKeySecret: "sec",
+		SignName:        "S",
+		TemplateCode:    "T",
+		Endpoint:        srv.URL,
+	}
+	if err := a.Send(context.Background(), "13800138000", "1234"); err != nil {
+		t.Fatalf("zero-value Send: %v", err)
+	}
+}
+
+func TestAliyunConcurrentSendsNoRace(t *testing.T) {
+	// Send is invoked concurrently in production (expiry-reminder loop,
+	// digest loop, login-alert goroutines). The old lazy `a.HTTPClient =`
+	// / `a.Endpoint =` writes inside Send were a data race — run under
+	// `go test -race` this test pins the fix.
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte(`{"Code":"OK","Message":"","RequestId":"r"}`))
+	}))
+	t.Cleanup(srv.Close)
+
+	a := &Aliyun{
+		AccessKeyID:     "ak",
+		AccessKeySecret: "sec",
+		SignName:        "S",
+		TemplateCode:    "T",
+		Endpoint:        srv.URL,
+	}
+	var wg sync.WaitGroup
+	for i := 0; i < 8; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			if err := a.Send(context.Background(), "13800138000", "1234"); err != nil {
+				t.Errorf("concurrent Send: %v", err)
+			}
+		}()
+	}
+	wg.Wait()
 }
 
 func TestLooksLikeJSON(t *testing.T) {
