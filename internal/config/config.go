@@ -554,13 +554,57 @@ func (c *Config) validatePay() error {
 
 // validateFirewall mirrors firewall.NewBackend's accepted names so a typo
 // fails --check-config instead of log.Fatal'ing at boot.
+//
+// Table/set names are also validated: they are interpolated verbatim into
+// `nft -f` scripts and `ipset restore` payloads, so whitespace, braces or
+// newlines in a name would change the script's *structure* instead of
+// failing cleanly (defense-in-depth — the config file is root-owned, but a
+// typo'd name should fail at --check-config, not corrupt a firewall
+// transaction at 3am). The ipset backend additionally caps the set name so
+// the atomic-swap scratch set ("<name>_swp") still fits the kernel's
+// 31-char IPSET_MAXNAMELEN — a longer name made every Sync fail at runtime
+// with an opaque restore error.
 func (c *Config) validateFirewall() error {
-	switch strings.ToLower(strings.TrimSpace(c.Firewall.Backend)) {
+	backend := strings.ToLower(strings.TrimSpace(c.Firewall.Backend))
+	switch backend {
 	case "", "nft", "nftables", "ipt", "iptables", "ipset":
-		return nil
 	default:
 		return fmt.Errorf("firewall.backend %q: must be nftables or iptables", c.Firewall.Backend)
 	}
+	switch c.Firewall.Table {
+	case "ip", "ip6", "inet", "bridge", "arp", "netdev":
+	default:
+		return fmt.Errorf("firewall.table %q: must be one of ip, ip6, inet, bridge, arp, netdev", c.Firewall.Table)
+	}
+	if !validFirewallName(c.Firewall.TableName) {
+		return fmt.Errorf("firewall.table_name %q: only letters, digits, '_' and '-' are allowed", c.Firewall.TableName)
+	}
+	if !validFirewallName(c.Firewall.SetName) {
+		return fmt.Errorf("firewall.set_name %q: only letters, digits, '_' and '-' are allowed", c.Firewall.SetName)
+	}
+	switch backend {
+	case "ipt", "iptables", "ipset":
+		if len(c.Firewall.SetName) > 27 {
+			return fmt.Errorf("firewall.set_name %q: max 27 chars on the iptables/ipset backend (the \"_swp\" swap scratch set must fit ipset's 31-char name limit)", c.Firewall.SetName)
+		}
+	}
+	return nil
+}
+
+// validFirewallName allows [A-Za-z0-9_-]+ — the safe common subset for
+// nftables identifiers and ipset names.
+func validFirewallName(s string) bool {
+	if s == "" {
+		return false
+	}
+	for _, r := range s {
+		switch {
+		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9', r == '_', r == '-':
+		default:
+			return false
+		}
+	}
+	return true
 }
 
 // validateDurations rejects negative intervals. applyDefaults only fills
