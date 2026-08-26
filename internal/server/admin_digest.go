@@ -139,7 +139,11 @@ func (a *App) handleAdminDigestTrigger(w http.ResponseWriter, r *http.Request) {
 		http.Redirect(w, r, "/admin/sms-log?err=sms_disabled", http.StatusSeeOther)
 		return
 	}
-	if a.Cfg.SMS.AdminLoginAlertPhone == "" {
+	// Same guard as the loop: a malformed configured phone must bounce
+	// with a clear error instead of burning a provider call that the
+	// upstream will reject. (Load-time validation catches this for real
+	// configs; this keeps the manual path safe for hand-built ones.)
+	if !models.ValidPhone(a.Cfg.SMS.AdminLoginAlertPhone) {
 		http.Redirect(w, r, "/admin/sms-log?err=digest_no_phone", http.StatusSeeOther)
 		return
 	}
