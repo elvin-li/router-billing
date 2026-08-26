@@ -330,14 +330,12 @@ func (a *App) handleAdminExportUsers(w http.ResponseWriter, r *http.Request) {
 		}
 		users = filtered
 	}
-	// Pre-aggregate mac counts so we don't N+1.
-	macCount := map[int64]int{}
-	if macs, _ := a.DB.ListMACs(r.Context()); macs != nil {
-		for _, m := range macs {
-			if m.UserID != nil {
-				macCount[*m.UserID]++
-			}
-		}
+	// Pre-aggregate mac counts with one GROUP BY instead of shipping every
+	// MAC row to Go just to count (same conversion as /admin/users in v0.111
+	// and /api/admin/users).
+	macCount, _ := a.DB.CountMACsByUser(r.Context())
+	if macCount == nil {
+		macCount = map[int64]int{}
 	}
 	w.Header().Set("Content-Type", "text/csv; charset=utf-8")
 	// Filename includes the filters when set so the download is self-
